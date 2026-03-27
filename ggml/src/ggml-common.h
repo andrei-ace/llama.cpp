@@ -266,16 +266,23 @@ typedef struct {
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
-// TurboQuant 3-bit: 2-bit PolarQuant index + 1-bit QJL sign per element
-#define QK_TURBO3       32
-#define QK_TURBO3_GROUP 128
+// TurboQuant 2.5-bit: mixed-precision PolarQuant + full QJL
+// 32 outlier channels at 3 bits (2-bit PolarQuant + 1-bit QJL)
+// 96 regular channels at 2 bits (1-bit PolarQuant + 1-bit QJL)
+// Full 128-dim QJL for unbiased inner product estimation
+// Effective: (32*3 + 96*2)/128 = 2.25 bpw data + 0.25 bpw norms = 2.50 bpw
+#define QK_TURBO3       128
+#define QK_TURBO3_HI    32
+#define QK_TURBO3_LO    96
 #define QR_TURBO3_0     1
 typedef struct {
-    ggml_half norm;                    // 2 bytes: block L2 norm
-    uint8_t   qs[QK_TURBO3 / 4];      // 8 bytes: 2-bit quantization indices
-    uint8_t   signs[QK_TURBO3 / 8];   // 4 bytes: 1-bit sign (upper bit of 3-bit code)
+    ggml_half norm;                          // 2 bytes: block L2 norm
+    ggml_half rnorm;                         // 2 bytes: residual L2 norm for QJL correction
+    uint8_t   qs_hi[QK_TURBO3_HI * 2 / 8];  // 8 bytes: 2-bit PolarQuant indices (outlier channels)
+    uint8_t   qs_lo[QK_TURBO3_LO / 8];      // 12 bytes: 1-bit PolarQuant indices (regular channels)
+    uint8_t   signs[QK_TURBO3 / 8];         // 16 bytes: 1-bit QJL signs (all 128 channels)
 } block_turbo3_0;
-static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3/4 + QK_TURBO3/8, "wrong turbo3_0 block size/padding");
+static_assert(sizeof(block_turbo3_0) == 2*sizeof(ggml_half) + QK_TURBO3_HI*2/8 + QK_TURBO3_LO/8 + QK_TURBO3/8, "wrong turbo3_0 block size/padding");
 
 // TurboQuant 4-bit: 3-bit PolarQuant index + 1-bit QJL sign per element
 #define QK_TURBO4       128
