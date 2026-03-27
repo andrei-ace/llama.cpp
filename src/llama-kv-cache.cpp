@@ -211,6 +211,16 @@ llama_kv_cache::llama_kv_cache(
 
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+
+    // TurboQuant: detect turbo types and warn that rotation is not yet initialized
+    const bool uses_turbo = (type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 ||
+                             type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0);
+    if (uses_turbo) {
+        // TODO(TurboQuant): allocate and initialize 128x128 rotation matrices here
+        // turbo_rotation     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 128);
+        // turbo_rotation_inv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 128);
+        LLAMA_LOG_WARN("%s: TurboQuant KV cache types detected but rotation matrices not yet initialized (stub)\n", __func__);
+    }
 }
 
 void llama_kv_cache::clear(bool data) {
@@ -2281,4 +2291,12 @@ void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ub
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     kv->set_input_pos_bucket(dst, ubatch);
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rot_forward() const {
+    return kv ? kv->get_turbo_rot_forward() : nullptr;
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rot_inverse() const {
+    return kv ? kv->get_turbo_rot_inverse() : nullptr;
 }

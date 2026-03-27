@@ -486,6 +486,17 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 }
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    // TODO(TurboQuant): implement custom flash attention kernels for turbo types
+    // (k_turbo3_dequant_f16, k_turbo4_dequant_f16, ggml_cuda_turbo_prefill_attend)
+    {
+        const ggml_tensor * K = dst->src[1];
+        const ggml_tensor * V = dst->src[2];
+        if (K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 ||
+            V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0) {
+            GGML_ABORT("TurboQuant flash attention not yet implemented");
+        }
+    }
+
     ggml_cuda_set_device(ctx.device);
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
@@ -506,5 +517,12 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
 }
 
 bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
+    // TODO(TurboQuant): turbo FA kernels not yet implemented
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    if (K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 ||
+        V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0) {
+        return false;
+    }
     return ggml_cuda_get_best_fattn_kernel(device, dst) != BEST_FATTN_KERNEL_NONE;
 }

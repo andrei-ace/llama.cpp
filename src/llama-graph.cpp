@@ -1844,6 +1844,18 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
+
+        // TODO(TurboQuant): V un-rotation
+        // When V cache uses turbo types (TURBO3_0/TURBO4_0), the stored values are in a
+        // WHT-rotated basis. After computing attention output (softmax(QK^T)V), apply the
+        // inverse Walsh-Hadamard transform here to recover the correct output.
+        // Requires implementing ggml_turbo_wht() op first.
+        //   if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0) {
+        //       if (cur->ne[0] % 128 == 0) {
+        //           cur = ggml_cont(ctx0, cur);
+        //           cur = ggml_turbo_wht(ctx0, cur, /*inverse=*/1);
+        //       }
+        //   }
     } else {
         ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
         cb(kq, "kq", il);

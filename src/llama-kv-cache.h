@@ -199,6 +199,10 @@ public:
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
+    // TurboQuant rotation matrices
+    ggml_tensor * get_turbo_rot_forward() const { return turbo_rotation; }
+    ggml_tensor * get_turbo_rot_inverse() const { return turbo_rotation_inv; }
+
 private:
     const llama_model & model;
     const llama_hparams & hparams;
@@ -248,6 +252,10 @@ private:
     stream_copy_info sc_info;
 
     std::vector<kv_layer> layers;
+
+    // TurboQuant rotation matrices (nullptr if not using turbo types)
+    ggml_tensor * turbo_rotation     = nullptr;
+    ggml_tensor * turbo_rotation_inv = nullptr;
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
@@ -353,6 +361,10 @@ public:
     void set_input_k_shift   (ggml_tensor * dst) const;
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+
+    // TurboQuant rotation matrices (delegated to parent KV cache)
+    ggml_tensor * get_turbo_rot_forward() const override;
+    ggml_tensor * get_turbo_rot_inverse() const override;
 
 private:
     llama_memory_status status;

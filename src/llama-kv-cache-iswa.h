@@ -122,6 +122,10 @@ public:
     const llama_kv_cache_context * get_base() const;
     const llama_kv_cache_context * get_swa()  const;
 
+    // TurboQuant rotation matrices (delegated to base KV cache context)
+    ggml_tensor * get_turbo_rot_forward() const override;
+    ggml_tensor * get_turbo_rot_inverse() const override;
+
 private:
     //llama_kv_cache_iswa * kv;
 

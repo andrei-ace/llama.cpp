@@ -328,3 +328,11 @@ const llama_kv_cache_context * llama_kv_cache_iswa_context::get_swa()  const {
 
     return static_cast<const llama_kv_cache_context *>(ctx_swa.get());
 }
+
+ggml_tensor * llama_kv_cache_iswa_context::get_turbo_rot_forward() const {
+    return ctx_base ? ctx_base->get_turbo_rot_forward() : nullptr;
+}
+
+ggml_tensor * llama_kv_cache_iswa_context::get_turbo_rot_inverse() const {
+    return ctx_base ? ctx_base->get_turbo_rot_inverse() : nullptr;
+}

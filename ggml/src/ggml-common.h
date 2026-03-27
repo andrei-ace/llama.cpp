@@ -266,6 +266,28 @@ typedef struct {
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
+// TurboQuant 3-bit: 2-bit PolarQuant index + 1-bit QJL sign per element
+#define QK_TURBO3       32
+#define QK_TURBO3_GROUP 128
+#define QR_TURBO3_0     1
+typedef struct {
+    ggml_half norm;                    // 2 bytes: block L2 norm
+    uint8_t   qs[QK_TURBO3 / 4];      // 8 bytes: 2-bit quantization indices
+    uint8_t   signs[QK_TURBO3 / 8];   // 4 bytes: 1-bit sign (upper bit of 3-bit code)
+} block_turbo3_0;
+static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3/4 + QK_TURBO3/8, "wrong turbo3_0 block size/padding");
+
+// TurboQuant 4-bit: 3-bit PolarQuant index + 1-bit QJL sign per element
+#define QK_TURBO4       128
+#define QR_TURBO4_0     1
+typedef struct {
+    ggml_half norm;                    // 2 bytes: block L2 norm
+    ggml_half rnorm;                   // 2 bytes: reciprocal norm (for QJL correction)
+    uint8_t   qs[QK_TURBO4 * 3 / 8];  // 48 bytes: 3-bit quantization indices
+    uint8_t   signs[QK_TURBO4 / 8];   // 16 bytes: 1-bit QJL signs
+} block_turbo4_0;
+static_assert(sizeof(block_turbo4_0) == 2*sizeof(ggml_half) + QK_TURBO4*3/8 + QK_TURBO4/8, "wrong turbo4_0 block size/padding");
+
 //
 // Super-block quantization structures
 //
