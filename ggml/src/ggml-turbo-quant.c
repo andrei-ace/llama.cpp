@@ -1,16 +1,12 @@
-// TurboQuant CPU reference implementation
-// Algorithm: PolarQuant (MSE-optimal scalar quantization) + QJL (1-bit residual correction)
-// Reference: "TurboQuant: Redefining AI Efficiency with Extreme Compression" (arXiv 2504.19874)
+// TurboQuant CPU reference — exact paper algorithm (arXiv 2504.19874)
 //
-// TURBO3_0: mixed-precision 2.5 bpw (32 outlier channels at 3-bit, 96 regular at 2-bit)
-// TURBO4_0: uniform 3.5 bpw (128 channels at 4-bit: 3-bit PolarQuant + 1-bit QJL)
+// TurboQuant_prod(b) = (b-1)-bit MSE quantizer + 1-bit QJL on residual.
+// Two operating points, each with two independent instances (32 hi + 96 lo channels):
+//   TURBO3_0: hi=b3(4 centroids) + lo=b2(2 centroids) → 2.5 bpv
+//   TURBO4_0: hi=b4(8 centroids) + lo=b3(4 centroids) → 3.5 bpv
 //
-// Both types operate on 128-element blocks (= one attention head dimension).
-// The rotation matrix (PolarQuant pre-rotation) is NOT applied here.
-// It is handled at the graph/operator level before calling these functions.
-//
-// QJL uses a randomized Hadamard projection (not identity) so that the
-// inner product estimator is unbiased: E[<q, x_hat>] = <q, x>.
+// Rotation (Π) applied at graph level, NOT here.
+// QJL uses one fixed i.i.d. N(0,1) matrix per dimension (reused across all blocks).
 
 #include "ggml-quants.h"
 #include "ggml-impl.h"
@@ -20,196 +16,172 @@
 #include <assert.h>
 
 // ---------------------------------------------------------------------------
-// Centroid tables
+// Centroids: exact Lloyd-Max for Beta((d-1)/2, (d-1)/2), d=128
 // ---------------------------------------------------------------------------
-// Exact Lloyd-Max centroids for the Beta distribution arising after random
-// orthogonal rotation of unit-norm vectors in R^d:
-//   f(x) = Gamma(d/2) / (sqrt(pi) * Gamma((d-1)/2)) * (1 - x^2)^((d-3)/2)
 
-// TURBO3_0 outlier channels: 4 signed centroids (2-bit PolarQuant, d=128)
-static const float turbo3_hi_centroids[4] = {
-    -0.1330458627f,
-    -0.0399983984f,
-     0.0399983984f,
-     0.1330458627f,
+static const float centroids_8[8] = {
+    -0.1883988281f, -0.1181421705f, -0.0665887043f, -0.0216082019f,
+     0.0216082019f,  0.0665887043f,  0.1181421705f,  0.1883988281f,
 };
 
-// TURBO3_0 regular channels: 2 signed centroids (1-bit PolarQuant, d=128)
-static const float turbo3_lo_centroids[2] = {
-    -0.0707250243f,
-     0.0707250243f,
+static const float centroids_4[4] = {
+    -0.1330458627f, -0.0399983984f, 0.0399983984f, 0.1330458627f,
 };
 
-// TURBO4_0: 8 signed centroids (3-bit PolarQuant, d=128)
-static const float turbo4_centroids[8] = {
-    -0.1883988281f,
-    -0.1181421705f,
-    -0.0665887043f,
-    -0.0216082019f,
-     0.0216082019f,
-     0.0665887043f,
-     0.1181421705f,
-     0.1883988281f,
+static const float centroids_2[2] = {
+    -0.0707250243f, 0.0707250243f,
 };
 
-// QJL correction factor: sqrt(pi/2) / d, where d = 128
-#define TURBO_QJL_ALPHA  0.00979152f
-
 // ---------------------------------------------------------------------------
-// QJL Hadamard projection
+// PRNG for i.i.d. Gaussian QJL matrices
 // ---------------------------------------------------------------------------
-// The QJL transform uses S = D_qjl * H where:
-//   H = Walsh-Hadamard matrix (orthogonal, self-inverse up to scale)
-//   D_qjl = diagonal of deterministic ±1 signs
-// This gives an unbiased inner product estimator per the QJL paper.
 
-// Deterministic ±1 signs for QJL projection (golden-ratio hash, fixed for all blocks)
-static void qjl_signs_128(float * signs) {
-    for (int i = 0; i < 128; i++) {
-        // Deterministic pseudo-random sign from golden ratio hash
-        uint32_t h = (uint32_t)i * 0x9E3779B9u;
-        signs[i] = (h >> 16) & 1 ? 1.0f : -1.0f;
-    }
+static uint64_t tq_prng;
+static void tq_seed(uint64_t s) { tq_prng = s; }
+static float tq_gaussian(void) {
+    tq_prng = tq_prng * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u1 = ((float)(uint32_t)(tq_prng >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+    tq_prng = tq_prng * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u2 = ((float)(uint32_t)(tq_prng >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+    return sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
 }
 
-// Fast Walsh-Hadamard Transform (in-place, unnormalized)
-static void fwht_128(float * x) {
-    for (int half = 1; half < 128; half *= 2) {
-        for (int i = 0; i < 128; i += half * 2) {
-            for (int j = i; j < i + half; j++) {
-                float a = x[j];
-                float b = x[j + half];
-                x[j]        = a + b;
-                x[j + half]  = a - b;
-            }
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// QJL (paper Definition 1): one fixed i.i.d. Gaussian S per dimension
+// ---------------------------------------------------------------------------
+// Paper: S is generated once during setup, reused for all blocks.
+// We use a fixed seed per dimension so S is deterministic.
 
-// QJL forward (full d=128): project residual → 128 sign bits
-// Returns ||r||
-static float qjl_forward_128(const float * r, uint8_t * signs_out) {
-    float qjl_s[128];
-    float proj[128];
+// Seeds: one per QJL dimension used in the system
+#define QJL_SEED_32   0x514A4C20ULL  // "QJL " — for 32-dim instances
+#define QJL_SEED_96   0x514A4C60ULL  // "QJL`" — for 96-dim instances
+#define QJL_SEED_128  0x514A4C80ULL  // for 128-dim (if needed)
 
-    qjl_signs_128(qjl_s);
-
-    for (int j = 0; j < 128; j++) {
-        proj[j] = r[j] * qjl_s[j];
-    }
-    fwht_128(proj);
-
+static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed) {
+    tq_seed(seed);
     float rnorm_sq = 0.0f;
-    for (int j = 0; j < 128; j++) {
-        rnorm_sq += r[j] * r[j];
-    }
+    for (int j = 0; j < m; j++) rnorm_sq += r[j] * r[j];
 
-    memset(signs_out, 0, 16);
-    for (int j = 0; j < 128; j++) {
-        int bit = (proj[j] >= 0.0f) ? 1 : 0;
-        signs_out[j / 8] |= (uint8_t)(bit << (j % 8));
+    memset(signs, 0, (m + 7) / 8);
+    for (int i = 0; i < m; i++) {
+        float proj = 0.0f;
+        for (int j = 0; j < m; j++) proj += tq_gaussian() * r[j];
+        if (proj >= 0.0f) signs[i / 8] |= (uint8_t)(1 << (i % 8));
     }
-
     return sqrtf(rnorm_sq);
 }
 
-// QJL inverse (full d=128): 128 sign bits → correction vector
-static void qjl_inverse_128(const uint8_t * signs_in, float rnorm, float * correction) {
-    float qjl_s[128];
-    qjl_signs_128(qjl_s);
-
-    for (int j = 0; j < 128; j++) {
-        int bit = (signs_in[j / 8] >> (j % 8)) & 1;
-        correction[j] = bit ? 1.0f : -1.0f;
+static void qjl_inverse(const uint8_t * signs, float rnorm, float * corr, int m, uint64_t seed) {
+    memset(corr, 0, m * sizeof(float));
+    tq_seed(seed);
+    for (int i = 0; i < m; i++) {
+        float z = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+        for (int j = 0; j < m; j++) corr[j] += tq_gaussian() * z;
     }
-
-    fwht_128(correction);
-
-    // Scale: sqrt(pi/2) / d * ||r|| where d=128
-    float scale = TURBO_QJL_ALPHA * rnorm;
-    for (int j = 0; j < 128; j++) {
-        correction[j] *= qjl_s[j] * scale;
-    }
-}
-
-// QJL forward (reduced m=32): project 128-dim residual → 32 sign bits
-// Uses first 32 rows of S = D*H (first 32 outputs of Hadamard)
-// Returns ||r||
-static float qjl_forward_32(const float * r, uint8_t * signs_out) {
-    float qjl_s[128];
-    float proj[128];
-
-    qjl_signs_128(qjl_s);
-
-    for (int j = 0; j < 128; j++) {
-        proj[j] = r[j] * qjl_s[j];
-    }
-    fwht_128(proj);
-
-    float rnorm_sq = 0.0f;
-    for (int j = 0; j < 128; j++) {
-        rnorm_sq += r[j] * r[j];
-    }
-
-    // Store sign of first 32 projections only
-    memset(signs_out, 0, 4);
-    for (int j = 0; j < 32; j++) {
-        int bit = (proj[j] >= 0.0f) ? 1 : 0;
-        signs_out[j / 8] |= (uint8_t)(bit << (j % 8));
-    }
-
-    return sqrtf(rnorm_sq);
-}
-
-// QJL inverse (reduced m=32): 32 sign bits → 128-dim correction
-// Reconstructs using S^T_{128×32} (first 32 columns of H*D)
-static void qjl_inverse_32(const uint8_t * signs_in, float rnorm, float * correction) {
-    float qjl_s[128];
-    qjl_signs_128(qjl_s);
-
-    // Build 128-dim vector: first 32 entries from signs, rest zero
-    for (int j = 0; j < 32; j++) {
-        int bit = (signs_in[j / 8] >> (j % 8)) & 1;
-        correction[j] = bit ? 1.0f : -1.0f;
-    }
-    for (int j = 32; j < 128; j++) {
-        correction[j] = 0.0f;
-    }
-
-    // Apply H (inverse Hadamard = H/d for unnormalized, but we absorb the /d into scale)
-    fwht_128(correction);
-
-    // Scale: sqrt(pi/2) / m * ||r|| where m=32 (number of projections)
-    // The /m (not /d) is because we're using m projections, not d
-    float scale = 1.2533141f / 32.0f * rnorm;  // sqrt(pi/2) / m * ||r||
-    for (int j = 0; j < 128; j++) {
-        correction[j] *= qjl_s[j] * scale;
-    }
+    float scale = 1.2533141f / (float)m * rnorm;
+    for (int j = 0; j < m; j++) corr[j] *= scale;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Find nearest signed centroid (linear scan, n entries)
-static inline int best_signed_index(float val, const float * centroids, int n) {
-    int best = 0;
-    float best_dist = fabsf(val - centroids[0]);
-    for (int i = 1; i < n; i++) {
-        float dist = fabsf(val - centroids[i]);
-        if (dist < best_dist) {
-            best_dist = dist;
-            best = i;
-        }
-    }
+static inline int nearest(float val, const float * c, int n) {
+    int best = 0; float bd = fabsf(val - c[0]);
+    for (int i = 1; i < n; i++) { float d = fabsf(val - c[i]); if (d < bd) { bd = d; best = i; } }
     return best;
 }
 
+static inline void pk3(uint8_t * q, int j, int v) {
+    int bp = j*3, bi = bp>>3, sh = bp&7;
+    q[bi] |= (uint8_t)((v<<sh)&0xFF);
+    if (sh > 5) q[bi+1] |= (uint8_t)(v>>(8-sh));
+}
+
+static inline int up3(const uint8_t * q, int j) {
+    int bp = j*3, bi = bp>>3, sh = bp&7;
+    return (sh <= 5) ? (q[bi]>>sh)&7 : ((q[bi]>>sh)|(q[bi+1]<<(8-sh)))&7;
+}
+
 // ---------------------------------------------------------------------------
-// TURBO3_0: mixed-precision PolarQuant + full QJL (2.5 bpw)
-//   Channels [0, 32): 2-bit PolarQuant (4 signed centroids) + QJL
-//   Channels [32, 128): 1-bit PolarQuant (2 signed centroids) + QJL
-//   Full 128-dim Hadamard QJL for unbiased inner product estimation
+// Generic two-instance quantize/dequantize
+//
+// Both TURBO3 and TURBO4 have the same block layout:
+//   norm, rnorm_hi, rnorm_lo, qs_hi[], qs_lo[], signs_hi[], signs_lo[]
+//
+// The only difference is the centroid tables and packing widths:
+//   TURBO3: hi = 2-bit MSE (centroids_4), lo = 1-bit MSE (centroids_2)
+//   TURBO4: hi = 3-bit MSE (centroids_8), lo = 2-bit MSE (centroids_4)
+// ---------------------------------------------------------------------------
+
+// Quantize hi channels with n_c centroids, packing at bits_per_idx bits
+static void quant_hi(const float * xb, float inv_norm, uint8_t * qs,
+                     const float * c, int n_c, int bits, int n_hi,
+                     float * residual) {
+    memset(qs, 0, n_hi * bits / 8);
+    for (int j = 0; j < n_hi; j++) {
+        float xn = xb[j] * inv_norm;
+        int idx = nearest(xn, c, n_c);
+        if (bits == 2) {
+            qs[j / 4] |= (uint8_t)(idx << ((j % 4) * 2));
+        } else {  // bits == 3
+            pk3(qs, j, idx);
+        }
+        residual[j] = xn - c[idx];
+    }
+}
+
+// Quantize lo channels
+static void quant_lo(const float * xb, float inv_norm, uint8_t * qs,
+                     const float * c, int n_c, int bits, int n_lo, int offset,
+                     float * residual) {
+    memset(qs, 0, (n_lo * bits + 7) / 8);
+    for (int j = 0; j < n_lo; j++) {
+        float xn = xb[offset + j] * inv_norm;
+        int idx;
+        if (bits == 1) {
+            idx = (xn >= 0.0f) ? 1 : 0;
+            qs[j / 8] |= (uint8_t)(idx << (j % 8));
+        } else {  // bits == 2
+            idx = nearest(xn, c, n_c);
+            qs[j / 4] |= (uint8_t)(idx << ((j % 4) * 2));
+        }
+        residual[j] = xn - c[idx];
+    }
+}
+
+// Dequantize hi channels
+static void dequant_hi(const uint8_t * qs, const float * corr,
+                       const float * c, int bits, int n_hi,
+                       float norm, float * out) {
+    for (int j = 0; j < n_hi; j++) {
+        int idx;
+        if (bits == 2) {
+            idx = (qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+        } else {  // bits == 3
+            idx = up3(qs, j);
+        }
+        out[j] = norm * (c[idx] + corr[j]);
+    }
+}
+
+// Dequantize lo channels
+static void dequant_lo(const uint8_t * qs, const float * corr,
+                       const float * c, int bits, int n_lo,
+                       float norm, float * out, int offset) {
+    for (int j = 0; j < n_lo; j++) {
+        int idx;
+        if (bits == 1) {
+            idx = (qs[j / 8] >> (j % 8)) & 1;
+        } else {  // bits == 2
+            idx = (qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+        }
+        out[offset + j] = norm * (c[idx] + corr[j]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TURBO3_0: hi=b3(centroids_4, 2-bit), lo=b2(centroids_2, 1-bit)
 // ---------------------------------------------------------------------------
 
 void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * GGML_RESTRICT y, int64_t k) {
@@ -218,56 +190,25 @@ void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * G
 
     for (int64_t i = 0; i < nb; i++) {
         const float * xb = x + i * QK_TURBO3;
-
-        // 1. Compute block L2 norm
         float sum_sq = 0.0f;
-        for (int j = 0; j < QK_TURBO3; j++) {
-            sum_sq += xb[j] * xb[j];
-        }
-        const float norm = sqrtf(sum_sq);
+        for (int j = 0; j < QK_TURBO3; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
 
-        y[i].norm  = GGML_FP32_TO_FP16(norm);
-        y[i].rnorm = GGML_FP32_TO_FP16(0.0f);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(0.0f);
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+        memset(y[i].signs_lo, 0, sizeof(y[i].signs_lo));
 
-        // 2. Clear packed arrays
-        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
-        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
-        memset(y[i].signs, 0, sizeof(y[i].signs));
+        if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
+        float inv = 1.0f / norm;
 
-        if (norm == 0.0f) {
-            continue;
-        }
+        float res_hi[QK_TURBO3_HI], res_lo[QK_TURBO3_LO];
+        quant_hi(xb, inv, y[i].qs_hi, centroids_4, 4, 2, QK_TURBO3_HI, res_hi);
+        quant_lo(xb, inv, y[i].qs_lo, centroids_2, 2, 1, QK_TURBO3_LO, QK_TURBO3_HI, res_lo);
 
-        const float inv_norm = 1.0f / norm;
-
-        // 3. PolarQuant: quantize with mixed precision
-        float centroid_vals[QK_TURBO3];
-
-        // Outlier channels [0, 32): 2-bit PolarQuant (4 signed centroids)
-        for (int j = 0; j < QK_TURBO3_HI; j++) {
-            const float xn = xb[j] * inv_norm;
-            const int idx = best_signed_index(xn, turbo3_hi_centroids, 4);
-            centroid_vals[j] = turbo3_hi_centroids[idx];
-            y[i].qs_hi[j / 4] |= (uint8_t)(idx << ((j % 4) * 2));
-        }
-
-        // Regular channels [32, 128): 1-bit PolarQuant (2 signed centroids)
-        for (int j = 0; j < QK_TURBO3_LO; j++) {
-            const float xn = xb[QK_TURBO3_HI + j] * inv_norm;
-            const int idx = (xn >= 0.0f) ? 1 : 0;
-            centroid_vals[QK_TURBO3_HI + j] = turbo3_lo_centroids[idx];
-            y[i].qs_lo[j / 8] |= (uint8_t)(idx << (j % 8));
-        }
-
-        // 4. Compute residual
-        float residual[128];
-        for (int j = 0; j < QK_TURBO3; j++) {
-            residual[j] = xb[j] * inv_norm - centroid_vals[j];
-        }
-
-        // 5. Full 128-dim QJL: Hadamard-projected sign bits + residual norm
-        float rnorm = qjl_forward_128(residual, y[i].signs);
-        y[i].rnorm = GGML_FP32_TO_FP16(rnorm);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, QK_TURBO3_HI, QJL_SEED_32));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, QK_TURBO3_LO, QJL_SEED_96));
     }
 }
 
@@ -276,59 +217,21 @@ void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGM
     const int64_t nb = k / QK_TURBO3;
 
     for (int64_t i = 0; i < nb; i++) {
-        const float norm  = GGML_FP16_TO_FP32(x[i].norm);
-        const float rnorm = GGML_FP16_TO_FP32(x[i].rnorm);
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
         float * yb = y + i * QK_TURBO3;
 
-        // Reconstruct centroids
-        float centroid_vals[128];
+        float ch[QK_TURBO3_HI], cl[QK_TURBO3_LO];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), ch, QK_TURBO3_HI, QJL_SEED_32);
+        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), cl, QK_TURBO3_LO, QJL_SEED_96);
 
-        for (int j = 0; j < QK_TURBO3_HI; j++) {
-            const int idx = (x[i].qs_hi[j / 4] >> ((j % 4) * 2)) & 0x3;
-            centroid_vals[j] = turbo3_hi_centroids[idx];
-        }
-        for (int j = 0; j < QK_TURBO3_LO; j++) {
-            const int idx = (x[i].qs_lo[j / 8] >> (j % 8)) & 1;
-            centroid_vals[QK_TURBO3_HI + j] = turbo3_lo_centroids[idx];
-        }
-
-        // Full QJL inverse: 128 sign bits → 128-dim correction
-        float correction[128];
-        qjl_inverse_128(x[i].signs, rnorm, correction);
-
-        // Final reconstruction
-        for (int j = 0; j < QK_TURBO3; j++) {
-            yb[j] = norm * (centroid_vals[j] + correction[j]);
-        }
+        dequant_hi(x[i].qs_hi, ch, centroids_4, 2, QK_TURBO3_HI, norm, yb);
+        dequant_lo(x[i].qs_lo, cl, centroids_2, 1, QK_TURBO3_LO, norm, yb, QK_TURBO3_HI);
     }
 }
 
 // ---------------------------------------------------------------------------
-// TURBO4_0: PolarQuant + QJL (3-bit signed centroid + 1-bit QJL, 3.5 bpw)
+// TURBO4_0: hi=b4(centroids_8, 3-bit), lo=b3(centroids_4, 2-bit)
 // ---------------------------------------------------------------------------
-
-// 3-bit packing helpers: sequential bitstream, 128 elements x 3 bits = 48 bytes
-static inline void turbo4_pack_3bit(uint8_t * qs, int j, int val) {
-    const int bit_pos = j * 3;
-    const int byte_idx = bit_pos >> 3;
-    const int shift = bit_pos & 7;
-
-    qs[byte_idx] |= (uint8_t)((val << shift) & 0xFF);
-    if (shift > 5) {
-        qs[byte_idx + 1] |= (uint8_t)(val >> (8 - shift));
-    }
-}
-
-static inline int turbo4_unpack_3bit(const uint8_t * qs, int j) {
-    const int bit_pos = j * 3;
-    const int byte_idx = bit_pos >> 3;
-    const int shift = bit_pos & 7;
-
-    if (shift <= 5) {
-        return (qs[byte_idx] >> shift) & 0x7;
-    }
-    return ((qs[byte_idx] >> shift) | (qs[byte_idx + 1] << (8 - shift))) & 0x7;
-}
 
 void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_TURBO4 == 0);
@@ -336,44 +239,25 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
 
     for (int64_t i = 0; i < nb; i++) {
         const float * xb = x + i * QK_TURBO4;
-
-        // 1. Compute block L2 norm
         float sum_sq = 0.0f;
-        for (int j = 0; j < QK_TURBO4; j++) {
-            sum_sq += xb[j] * xb[j];
-        }
-        const float norm = sqrtf(sum_sq);
+        for (int j = 0; j < QK_TURBO4; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
 
-        y[i].norm  = GGML_FP32_TO_FP16(norm);
-        y[i].rnorm = GGML_FP32_TO_FP16(0.0f);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(0.0f);
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+        memset(y[i].signs_lo, 0, sizeof(y[i].signs_lo));
 
-        // 2. Clear packed arrays
-        memset(y[i].qs,    0, sizeof(y[i].qs));
-        memset(y[i].signs, 0, sizeof(y[i].signs));
+        if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
+        float inv = 1.0f / norm;
 
-        if (norm == 0.0f) {
-            continue;
-        }
+        float res_hi[QK_TURBO4_HI], res_lo[QK_TURBO4_LO];
+        quant_hi(xb, inv, y[i].qs_hi, centroids_8, 8, 3, QK_TURBO4_HI, res_hi);
+        quant_lo(xb, inv, y[i].qs_lo, centroids_4, 4, 2, QK_TURBO4_LO, QK_TURBO4_HI, res_lo);
 
-        const float inv_norm = 1.0f / norm;
-
-        // 3. PolarQuant: quantize each element with 3-bit signed centroid
-        int indices[QK_TURBO4];
-        for (int j = 0; j < QK_TURBO4; j++) {
-            const float xn = xb[j] * inv_norm;
-            indices[j] = best_signed_index(xn, turbo4_centroids, 8);
-            turbo4_pack_3bit(y[i].qs, j, indices[j]);
-        }
-
-        // 4. Compute residual
-        float residual[128];
-        for (int j = 0; j < QK_TURBO4; j++) {
-            residual[j] = xb[j] * inv_norm - turbo4_centroids[indices[j]];
-        }
-
-        // 5. QJL: full 128-dim Hadamard-projected sign bits + residual norm
-        float rnorm = qjl_forward_128(residual, y[i].signs);
-        y[i].rnorm = GGML_FP32_TO_FP16(rnorm);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, QK_TURBO4_HI, QJL_SEED_32));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, QK_TURBO4_LO, QJL_SEED_96));
     }
 }
 
@@ -382,24 +266,14 @@ void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGM
     const int64_t nb = k / QK_TURBO4;
 
     for (int64_t i = 0; i < nb; i++) {
-        const float norm  = GGML_FP16_TO_FP32(x[i].norm);
-        const float rnorm = GGML_FP16_TO_FP32(x[i].rnorm);
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
         float * yb = y + i * QK_TURBO4;
 
-        // Reconstruct centroids
-        float centroid_vals[128];
-        for (int j = 0; j < QK_TURBO4; j++) {
-            const int idx = turbo4_unpack_3bit(x[i].qs, j);
-            centroid_vals[j] = turbo4_centroids[idx];
-        }
+        float ch[QK_TURBO4_HI], cl[QK_TURBO4_LO];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), ch, QK_TURBO4_HI, QJL_SEED_32);
+        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), cl, QK_TURBO4_LO, QJL_SEED_96);
 
-        // QJL inverse: reconstruct correction from 128 sign bits
-        float correction[128];
-        qjl_inverse_128(x[i].signs, rnorm, correction);
-
-        // Final reconstruction
-        for (int j = 0; j < QK_TURBO4; j++) {
-            yb[j] = norm * (centroid_vals[j] + correction[j]);
-        }
+        dequant_hi(x[i].qs_hi, ch, centroids_8, 3, QK_TURBO4_HI, norm, yb);
+        dequant_lo(x[i].qs_lo, cl, centroids_4, 2, QK_TURBO4_LO, norm, yb, QK_TURBO4_HI);
     }
 }
