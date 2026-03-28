@@ -32,6 +32,12 @@ void quantize_row_q8_K(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
 void quantize_row_tq1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_tq2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 
+// Note: actual signatures use block_turbo*_prod *, cast via ggml_from_float_t
+void quantize_row_tqk_25_ref(const float * GGML_RESTRICT x, block_tqk_25 * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_35_ref(const float * GGML_RESTRICT x, block_tqk_35 * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqv_25_ref(const float * GGML_RESTRICT x, block_tqv_25 * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqv_35_ref(const float * GGML_RESTRICT x, block_tqv_35 * GGML_RESTRICT y, int64_t k);
+
 void quantize_row_iq4_nl (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_iq4_xs (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 
@@ -53,6 +59,18 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
 void ggml_vec_dot_tq1_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void ggml_vec_dot_tq2_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+
+void ggml_vec_dot_tqk_25_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_35_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+
+// TurboQuant per-layer-per-head outlier calibration API
+void tq_set_current_layer(int layer, int is_k);
+void tq_set_current_head(int head);
+void tq_accumulate_channels(int layer, int is_k, const float * x, int64_t k);
+void tq_lock_outliers_from_accum(int n_layers);
+int  tq_is_calibrating(void);
+int  tq_min_accum_count(int n_layers); // returns min accumulated vector count across layers
+void tq_reset_calibration(void);
 
 void ggml_vec_dot_iq2_xxs_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void ggml_vec_dot_iq2_xs_q8_K (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
