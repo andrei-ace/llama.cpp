@@ -11,6 +11,7 @@
 #include "ggml-quants.h"
 #include "ggml-impl.h"
 #include "ggml-cpu/quants.h"
+#include "ggml-turbo-quant.h"
 
 #include <math.h>
 #include <string.h>
@@ -1073,6 +1074,51 @@ void tq_reset_calibration(void) {
                 tq_k_regular_reg[l][h][i] = TQ_DIM_HI + i;
                 tq_v_regular_reg[l][h][i] = TQ_DIM_HI + i;
             }
+        }
+    }
+}
+
+void tq_reset_accumulators(void) {
+    memset(tq_k_accum, 0, sizeof(tq_k_accum));
+    memset(tq_v_accum, 0, sizeof(tq_v_accum));
+    memset(tq_k_accum_n, 0, sizeof(tq_k_accum_n));
+    memset(tq_v_accum_n, 0, sizeof(tq_v_accum_n));
+}
+
+// ---------------------------------------------------------------------------
+// Public accessors for rotation matrices and channel maps (used by Metal/CUDA)
+// ---------------------------------------------------------------------------
+
+const float * tq_get_rot_v_fwd(void)  { tq_init_rotations(); return tq_rot_v_fwd; }
+const float * tq_get_rot_v_inv(void)  { tq_init_rotations(); return tq_rot_v_inv; }
+const float * tq_get_rot_hi_fwd(void) { tq_init_rotations(); return tq_rot_hi_fwd; }
+const float * tq_get_rot_hi_inv(void) { tq_init_rotations(); return tq_rot_hi_inv; }
+const float * tq_get_rot_lo_fwd(void) { tq_init_rotations(); return tq_rot_lo_fwd; }
+const float * tq_get_rot_lo_inv(void) { tq_init_rotations(); return tq_rot_lo_inv; }
+
+int tq_get_rot_v_size(void)  { return TQ_DIM * TQ_DIM; }
+int tq_get_rot_hi_size(void) { return TQ_DIM_HI * TQ_DIM_HI; }
+int tq_get_rot_lo_size(void) { return TQ_DIM_LO * TQ_DIM_LO; }
+
+void tq_get_channel_map(int layer, int head, int is_k, int * outlier, int * regular) {
+    tq_init_rotations();
+    if (layer < 0 || layer >= TQ_MAX_LAYERS || head < 0 || head >= TQ_MAX_HEADS) return;
+    const int * src_out = is_k ? tq_k_outlier_reg[layer][head] : tq_v_outlier_reg[layer][head];
+    const int * src_reg = is_k ? tq_k_regular_reg[layer][head] : tq_v_regular_reg[layer][head];
+    memcpy(outlier, src_out, TQ_DIM_HI * sizeof(int));
+    memcpy(regular, src_reg, TQ_DIM_LO * sizeof(int));
+}
+
+void tq_get_qjl_matrix(float * out, int dim, uint64_t seed) {
+    // Generate the same i.i.d. Gaussian matrix used by QJL forward/inverse
+    uint64_t st = seed;
+    for (int i = 0; i < dim; i++) {
+        for (int j = 0; j < dim; j++) {
+            st = st * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u1 = ((float)(uint32_t)(st >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+            st = st * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u2 = ((float)(uint32_t)(st >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+            out[i * dim + j] = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
         }
     }
 }

@@ -238,8 +238,10 @@ at different scale (d=1536+) where QJL variance is negligible.
 
 ## Known Limitations and Caveats
 
-- **CPU only** — CUDA/Metal kernels not updated for calibration or 128×128 V rotation
-- **No KV offload** — TQ types not supported in Metal set_rows
+- **Metal V cache (TQV) supported** — get_rows and set_rows for tqv25/tqv35 on Metal
+- **Metal K cache (TQK) kernels written** — but channel map upload not yet wired end-to-end
+- **No Metal flash attention** — TQ types fall back to dequantize + standard attention
+- **CUDA kernels not updated** — CUDA still needs the same treatment as Metal
 - **Re-quantization adds error** — prompt tokens quantized with calibrated channels
   have ~0.35 rel_L2 error, which degrades arithmetic precision
 - **Memory spike** during calibration — fp16 + TQ both allocated briefly

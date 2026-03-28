@@ -377,6 +377,35 @@ typedef struct {
     float    logit_softcap;
 } ggml_metal_kargs_flash_attn_ext;
 
+// TurboQuant flash attention — simplified custom kernel
+typedef struct {
+    int32_t  ne01;           // number of queries
+    int32_t  ne02;           // number of Q heads
+    int32_t  ne03;           // batch size
+    uint64_t nb01;           // Q stride per query
+    uint64_t nb02;           // Q stride per head
+    uint64_t nb03;           // Q stride per batch
+    int32_t  ne11;           // number of KV tokens
+    int32_t  ne_12_2;        // K/V head count (for GQA)
+    int32_t  ne_12_3;
+    uint64_t nb11;           // K stride per token
+    uint64_t nb12;           // K stride per head
+    uint64_t nb13;           // K stride per batch
+    uint64_t nb21;           // V stride per token
+    uint64_t nb22;           // V stride per head
+    uint64_t nb23;           // V stride per batch
+    int32_t  ne31;           // mask ne1
+    uint64_t nb31;           // mask stride
+    int32_t  ne1;            // output ne1
+    int32_t  ne2;            // output ne2
+    int32_t  ne3;            // output ne3
+    float    scale;          // 1/sqrt(dk)
+    int32_t  layer;          // KV cache layer
+    int32_t  n_kv_heads;     // number of KV heads
+    int32_t  has_mask;       // 1 if mask is valid, 0 if not
+    int32_t  v_is_q4_0;     // 1 if V is q4_0, 0 if V is tqv35
+} ggml_metal_kargs_flash_attn_ext_tq;
+
 typedef struct {
     int32_t  ne01;
     int32_t  ne02;
@@ -929,6 +958,42 @@ typedef struct {
     uint64_t nb2;
     uint64_t nb3;
 } ggml_metal_kargs_set_rows;
+
+// TurboQuant K cache — extra args for per-layer-per-head channel maps
+typedef struct {
+    int32_t  ne00t;
+    int32_t  ne00;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne10;
+    uint64_t nb10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb1;
+    uint64_t nb2;
+    uint64_t nb3;
+    int32_t  layer;       // KV cache layer index
+    int32_t  n_kv_heads;  // number of KV heads per layer
+} ggml_metal_kargs_get_rows_tqk;
+
+typedef struct {
+    int32_t  nk0;
+    int32_t  ne01;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne11;
+    int32_t  ne12;
+    uint64_t nb10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb1;
+    uint64_t nb2;
+    uint64_t nb3;
+    int32_t  layer;
+    int32_t  n_kv_heads;
+} ggml_metal_kargs_set_rows_tqk;
 
 typedef struct {
     int32_t  ne00;

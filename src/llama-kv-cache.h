@@ -222,6 +222,10 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        // Pre-allocated TQ tensors for GPU calibration (avoids Metal allocation deadlock)
+        ggml_tensor * k_tq = nullptr;
+        ggml_tensor * v_tq = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
