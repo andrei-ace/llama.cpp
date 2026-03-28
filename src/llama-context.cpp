@@ -1829,6 +1829,12 @@ int llama_context::decode(const llama_batch & batch_inp) {
         auto * kv = dynamic_cast<llama_kv_cache *>(memory.get());
         if (kv && kv->is_tq_calibrating()) {
             kv->tq_try_finish_calibration();
+            // If calibration just completed, KV tensor types changed (fp16 → TQ).
+            // Force graph re-reserve so the scheduler picks up the new types
+            // and dispatches to TQ flash attention instead of the fp16 path.
+            if (!kv->is_tq_calibrating()) {
+                sched_need_reserve = true;
+            }
         }
     }
 

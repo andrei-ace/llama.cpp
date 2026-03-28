@@ -2,6 +2,17 @@
 #include "cpy-utils.cuh"
 #include "turbo-quant-cuda.cuh"
 
+// Lazy init for this TU's rotation matrices (called once on first TQ operation)
+static void tq_ensure_rotations_setrows(cudaStream_t stream) {
+    static bool initialized = false;
+    if (!initialized) {
+        tq_device_init_rotations_kernel<<<1, 1, 0, stream>>>();
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        initialized = true;
+    }
+}
+
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
 // Generic quantized set_rows kernel template
@@ -311,6 +322,7 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             stream
         );
     } else if (dst->type == GGML_TYPE_TURBO3_0_PROD) {
+        tq_ensure_rotations_setrows(stream);
         set_rows_cuda_quant<idx_t, block_turbo3_0_prod, QK_TURBO3_PROD, quantize_f32_turbo3_0_prod_block>(
             src0_d, src1_d, (block_turbo3_0_prod*)dst->data,
             ne00, ne01, ne02, ne03,
@@ -321,6 +333,7 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             stream
         );
     } else if (dst->type == GGML_TYPE_TURBO4_0_PROD) {
+        tq_ensure_rotations_setrows(stream);
         set_rows_cuda_quant<idx_t, block_turbo4_0_prod, QK_TURBO4_PROD, quantize_f32_turbo4_0_prod_block>(
             src0_d, src1_d, (block_turbo4_0_prod*)dst->data,
             ne00, ne01, ne02, ne03,
@@ -331,6 +344,7 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             stream
         );
     } else if (dst->type == GGML_TYPE_TURBO3_0_MSE) {
+        tq_ensure_rotations_setrows(stream);
         set_rows_cuda_quant<idx_t, block_turbo3_0_mse, QK_TURBO3_MSE, quantize_f32_turbo3_0_mse_block>(
             src0_d, src1_d, (block_turbo3_0_mse*)dst->data,
             ne00, ne01, ne02, ne03,
@@ -341,6 +355,7 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             stream
         );
     } else if (dst->type == GGML_TYPE_TURBO4_0_MSE) {
+        tq_ensure_rotations_setrows(stream);
         set_rows_cuda_quant<idx_t, block_turbo4_0_mse, QK_TURBO4_MSE, quantize_f32_turbo4_0_mse_block>(
             src0_d, src1_d, (block_turbo4_0_mse*)dst->data,
             ne00, ne01, ne02, ne03,
@@ -369,3 +384,4 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         set_rows_cuda<float, int32_t>(ctx, src0, src1, dst);
     }
 }
+

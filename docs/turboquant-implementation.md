@@ -233,13 +233,170 @@ at different scale (d=1536+) where QJL variance is negligible.
 | `ggml/src/ggml-cpu/quants.h` | Public calibration function declarations |
 | `ggml/src/ggml-cpu/ops.cpp` | Layer/head detection in set_rows, get_rows, FA |
 | `ggml/src/ggml-cpu/ggml-cpu.c` | Layer detection in mul_mat, MSE type traits |
-| `src/llama-kv-cache.h/cpp` | fp16→TQ calibration flow, tensor swap, buffer cleanup |
+| `src/llama-kv-cache.h/cpp` | fp16→TQ calibration flow, tensor swap, GPU readback calibration |
 | `src/llama-context.cpp` | Calibration trigger after decode |
+
+See [CUDA File Map](#cuda-file-map) below for GPU-specific files.
+
+## CUDA Implementation
+
+Full GPU support for TQ KV cache on CUDA (tested on Jetson Orin AGX, SM 8.7).
+Enables `-ngl 99 -ctk tqk35 -ctv tqv35 -fa on` for fully offloaded inference.
+
+### Architecture
+
+Three rotation matrices generated on-device via deterministic Householder QR:
+- Π_hi (32×32) — K outlier channels, seed `0x5475524230484932`
+- Π_lo (96×96) — K regular channels, seed `0x54755242304C4F36`
+- Π_v (128×128) — V cache full vector, seed `0x5475524230564131`
+
+Each CUDA translation unit (TU) that includes `turbo-quant-cuda.cuh` gets its own
+`static __device__` copies of these matrices, lazily initialized on first TQ operation
+via `tq_device_init_rotations_kernel` (single-thread Householder QR on GPU).
+
+### Dedicated Flash Attention Kernel
+
+`fattn-vec-tq.cuh` — custom FA kernel for TQ PROD K × MSE V combinations.
+
+**K cache (PROD) dot product per token:**
+1. Pre-rotate query subsets: q_rot_hi = Π_hi × q[0:31], q_rot_lo = Π_lo × q[32:127]
+2. Pre-compute QJL projections: proj[i] = Σ_j S_ij × q_raw[j] (once per query, O(m²))
+3. Per K token: MSE centroid dot (128 lookups) + QJL sign-weighted correction (128 muls)
+
+**V cache (MSE) accumulation — deferred rotation:**
+- Dequantize V per-element in rotated space: just `centroid[idx] × norm` (cheap)
+- Accumulate VKQ in rotated space across all K tokens
+- Apply Π_v^T inverse rotation once at output
+
+This avoids the expensive per-token 128×128 rotation during V accumulation.
+
+### GPU Calibration Flow
+
+With `-ngl 99`, the KV cache is on GPU. The calibration flow:
+1. KV cache starts as fp16 on GPU (same as CPU path)
+2. After 256+ tokens in KV cache, `tq_try_finish_calibration` detects enough data
+3. Reads back fp16 K data from GPU to CPU via `ggml_backend_tensor_get`
+4. Accumulates channel magnitudes on CPU, locks outlier channels
+5. Re-quantizes fp16 → TQ on CPU, uploads back via `ggml_backend_tensor_set`
+6. Frees old fp16 buffers (saves ~4× memory)
+7. Subsequent generation tokens quantized directly to TQ on GPU via CUDA `set_rows`
+
+### CUDA `supports_op` Registration
+
+TQ types registered for:
+- `GGML_OP_SET_ROWS` — CUDA quantize (f32 → TQ blocks)
+- `GGML_OP_GET_ROWS` — CUDA dequantize (TQ blocks → f32)
+- `GGML_OP_FLASH_ATTN_EXT` — dedicated TQ FA kernel
+
+### Synthetic FA Benchmark (Jetson Orin AGX, single head, decode)
+
+| seq_len | f16 (ms) | q4_0 (ms) | tq35 (ms) | tq25 (ms) | q4_0/f16 | tq35/f16 |
+|---------|----------|-----------|-----------|-----------|----------|----------|
+| 512     | 1.77     | 1.08      | 3.80      | 3.15      | 0.61x    | 2.14x    |
+| 1024    | 1.90     | 2.11      | 4.42      | 4.39      | 1.11x    | 2.33x    |
+| 2048    | 3.58     | 3.60      | 7.32      | 5.73      | 1.01x    | 2.05x    |
+| 4096    | 7.27     | 7.35      | 11.9      | 10.4      | 1.01x    | 1.64x    |
+| 8192    | 16.2     | 14.4      | 21.0      | 19.0      | 0.89x    | 1.29x    |
+| 16384   | 32.3     | 31.5      | 46.1      | 38.3      | 0.98x    | 1.43x    |
+| 32768   | 59.5     | 71.0      | 89.7      | 80.4      | 1.19x    | 1.51x    |
+
+Per-head KV cache memory (K+V combined):
+
+| seq_len | f16     | q4_0    | tq35    | tq25    |
+|---------|---------|---------|---------|---------|
+| 32768   | 16 MB   | 4.5 MB  | 3.6 MB  | 2.6 MB  |
+
+**Observations:**
+- q4_0 matches f16 speed at most lengths, slower at 32K (1.19x) — well-optimized path
+- TQ35 FA kernel is 1.3–2.3x slower than f16 per head, but uses 4.4x less memory
+- TQ25 slightly faster than TQ35 (less data), 6.1x memory compression
+- TQ35 uses 20% less memory than q4_0 (3.6 vs 4.5 MB at 32K)
+
+### Real Model Benchmark (Qwen 2.5 1.5B Q4_K_M, Jetson Orin AGX)
+
+600 token prompt (calibration at 256), 128 token generation, FA on, ngl 99.
+
+| KV Config      | bpv  | Gen t/s | ms/tok | vs f16  |
+|----------------|------|---------|--------|---------|
+| f16/f16        | 32.0 |   69.9  |  14.3  |   1.0x  |
+| q8_0/q8_0      | 17.0 |   68.0  |  14.7  |   1.0x  |
+| q4_0/q4_0      | 9.0  |   68.0  |  14.7  |   1.0x  |
+| tqk35/q4_0     | 8.25 |   20.7  |  48.4  |   3.4x  |
+| tqk35/tqv35    | 7.25 |   13.0  |  77.2  |   5.4x  |
+
+**Mixed config (tqk35/q4_0):** TQ K with QJL correction for better K accuracy,
+standard q4_0 V for faster V dequant (no rotation overhead). 61% faster than
+full TQ while using slightly more V memory.
+
+**Query preprocessing is fully parallelized:**
+- Rotation: each thread computes one output element (32+96 parallel dot products)
+- QJL projection: LCG skip-ahead lets each thread independently compute one row
+  of S×q without generating the full PRNG sequence serially
+
+**Current kernel optimizations:**
+- Parallel query preprocessing: rotation + QJL via LCG skip-ahead (all 128 threads)
+- Warp-cooperative K dot: 4 threads per K token, each handles 32 channels, `__shfl_xor` reduce
+- Precomputed q×centroid tables in shared memory (no global centroid access per token)
+- Algebraic QJL trick: `Σ proj*sign = 2*masked_sum - proj_sum` (precomputed sum)
+- 144–148 registers/thread → 3 blocks/SM occupancy, 4.2KB shared memory
+
+### Real Model Benchmarks — Qwen 7B Q4_K_M (4 KV heads)
+
+Same setup: 600 token prompt, 128 token generation, FA on, ngl 99.
+
+| KV Config      | bpv  | Gen t/s | ms/tok | vs f16  |
+|----------------|------|---------|--------|---------|
+| f16/f16        | 32.0 |   24.4  |  41.0  |   1.0x  |
+| q8_0/q8_0      | 17.0 |   24.0  |  41.6  |   1.0x  |
+| q4_0/q4_0      | 9.0  |   24.0  |  41.6  |   1.0x  |
+| tqk35/q4_0     | 8.25 |   12.7  |  78.5  |   1.9x  |
+| tqk35/tqv35    | 7.25 |    9.2  | 109.0  |   2.7x  |
+
+7B is proportionally better than 1.5B because FA is a smaller fraction of total
+decode compute (bigger MLP/linear layers dominate).
+
+**Performance analysis:** The TQ FA kernel gap vs f16/q4_0 narrows with larger
+models (5.4x on 1.5B → 2.7x on 7B) because attention is a smaller fraction of
+total decode. The per-kernel cost is dominated by TQ's centroid lookup + QJL
+sign checks vs q4_0's simple nibble shift+scale.
+
+### MSE-only vs PROD+QJL for K cache
+
+CPU attention simulation (Test Q) without calibration shows MSE-only K scoring
+higher on top1 accuracy. However, with proper outlier calibration (256+ tokens),
+PROD+QJL produces better results in end-to-end model testing — the unbiased QJL
+correction matters when the outlier channels are correctly identified.
+
+| Config              | output_cos | top1_acc | Notes |
+|---------------------|------------|----------|-------|
+| mse_k + mse_v      | 0.9873     | 82.0%    | No calibration (random data) |
+| prod_k + mse_v      | 0.9873     | 67.0%    | No calibration (random data) |
+
+With calibration, PROD+QJL recovers the accuracy gap.
+
+### CUDA File Map
+
+| File | Role |
+|------|------|
+| `ggml/src/ggml-common.h` | Type aliases (block_turbo*), QK/QR constants |
+| `ggml/src/ggml-cuda/turbo-quant-cuda.cuh` | Device kernels: 3 rotations, d-specific centroids, quant/dequant, QJL, device-side init |
+| `ggml/src/ggml-cuda/turbo-quant-init.cu` | Placeholder TU for init kernel |
+| `ggml/src/ggml-cuda/fattn-vec-tq.cuh` | Dedicated TQ flash attention kernel |
+| `ggml/src/ggml-cuda/template-instances/fattn-vec-tq-instances.cu` | 4 K×V template instances (PROD3/4 × MSE3/4) |
+| `ggml/src/ggml-cuda/fattn.cu` | TQ dispatch in FA entry point + supports_op |
+| `ggml/src/ggml-cuda/ggml-cuda.cu` | supports_op for SET_ROWS/GET_ROWS with TQ types |
+| `ggml/src/ggml-cuda/set-rows.cu` | Lazy rotation init + TQ quantize dispatch |
+| `ggml/src/ggml-cuda/getrows.cu` | Lazy rotation init + TQ dequantize dispatch |
+| `tests/bench-turboquant-fa.cu` | Synthetic FA benchmark (f16 vs q4_0 vs tq35 vs tq25) |
 
 ## Known Limitations and Caveats
 
-- **CPU only** — CUDA/Metal kernels not updated for calibration or 128×128 V rotation
-- **No KV offload** — TQ types not supported in Metal set_rows
+- **No Metal support** — TQ types not supported in Metal set_rows
 - **Re-quantization adds error** — prompt tokens quantized with calibrated channels
   have ~0.35 rel_L2 error, which degrades arithmetic precision
 - **Memory spike** during calibration — fp16 + TQ both allocated briefly
+- **GPU calibration reads back data** — one-time GPU→CPU transfer of fp16 K cache
+  during calibration (~10ms for 28 layers × 256 tokens), negligible vs prompt time
+- **TQ FA kernel not yet parallelized across threads for K dot** — current implementation
+  assigns one K token per thread; warp-cooperative dot product would improve throughput
+- **Mixed configs supported** — TQ K (PROD) works with q4_0, q8_0, f16, or TQ MSE V

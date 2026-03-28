@@ -3,6 +3,17 @@
 #include "convert.cuh"
 #include "turbo-quant-cuda.cuh"
 
+// Lazy init for this TU's rotation matrices
+static void tq_ensure_rotations_getrows(cudaStream_t stream) {
+    static bool initialized = false;
+    if (!initialized) {
+        tq_device_init_rotations_kernel<<<1, 1, 0, stream>>>();
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        initialized = true;
+    }
+}
+
 template<int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
 static __global__ void k_get_rows(
         const void * __restrict__ src0, const int32_t * __restrict__ src1, dst_t * __restrict__ dst,
@@ -201,18 +212,22 @@ static void ggml_cuda_get_rows_switch_src0_type(
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         case GGML_TYPE_TURBO3_0_PROD:
+            tq_ensure_rotations_getrows(stream);
             get_rows_cuda_q<QK_TURBO3_PROD, QR_TURBO3_0_PROD, dequantize_turbo3_0_prod>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         case GGML_TYPE_TURBO4_0_PROD:
+            tq_ensure_rotations_getrows(stream);
             get_rows_cuda_q<QK_TURBO4_PROD, QR_TURBO4_0_PROD, dequantize_turbo4_0_prod>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         case GGML_TYPE_TURBO3_0_MSE:
+            tq_ensure_rotations_getrows(stream);
             get_rows_cuda_q<QK_TURBO3_MSE, QR_TURBO3_0_MSE, dequantize_turbo3_0_mse>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
         case GGML_TYPE_TURBO4_0_MSE:
+            tq_ensure_rotations_getrows(stream);
             get_rows_cuda_q<QK_TURBO4_MSE, QR_TURBO4_0_MSE, dequantize_turbo4_0_mse>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
@@ -301,3 +316,4 @@ void ggml_cuda_op_get_rows_back(ggml_backend_cuda_context & ctx, ggml_tensor * d
 
     k_get_rows_back_float<<<block_nums, block_dims, 0, stream>>>(src0_d, src1_d, dst_d, ne00, ne10);
 }
+

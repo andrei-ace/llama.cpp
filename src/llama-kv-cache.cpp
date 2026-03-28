@@ -12,6 +12,7 @@ extern "C" {
     int  tq_is_calibrating(void);
     int  tq_min_accum_count(int n_layers);
     void tq_reset_calibration(void);
+    void tq_accumulate_channels(int layer, int is_k, const float * x, int64_t k);
 }
 
 #include <algorithm>
@@ -361,19 +362,59 @@ llama_kv_cache::llama_kv_cache(
 void llama_kv_cache::tq_try_finish_calibration() {
     if (!tq_calibrating_) return;
 
-    // Find max model layer id to check accumulation across all actual layers
     int max_layer_id = 0;
     for (const auto & l : layers) {
         if ((int)l.il > max_layer_id) max_layer_id = (int)l.il;
     }
-    const int min_count = tq_min_accum_count(max_layer_id + 1);
 
     static const int TQ_MIN_CALIB_VECTORS = 256;
 
-    if (min_count < TQ_MIN_CALIB_VECTORS) {
-        LLAMA_LOG_DEBUG("%s: TurboQuant calibration: %d tokens accumulated (need %d), continuing...\n",
-                        __func__, min_count, TQ_MIN_CALIB_VECTORS);
+    // Check CPU-side accumulators first (works when KV cache is on CPU)
+    const int min_count = tq_min_accum_count(max_layer_id + 1);
+    if (min_count >= TQ_MIN_CALIB_VECTORS) {
+        tq_finish_calibration();
         return;
+    }
+
+    // GPU offload path: CPU accumulators are empty because set_rows runs on GPU.
+    // Check if enough tokens exist in the KV cache by counting used cells.
+    uint32_t min_used = UINT32_MAX;
+    for (uint32_t s = 0; s < n_stream; s++) {
+        uint32_t used = v_cells[s].used_max_p1();
+        if (used < min_used) min_used = used;
+    }
+
+    if (min_used < (uint32_t)TQ_MIN_CALIB_VECTORS) {
+        LLAMA_LOG_DEBUG("%s: TurboQuant calibration: %d tokens in KV cache (need %d), continuing...\n",
+                        __func__, (int)min_used, TQ_MIN_CALIB_VECTORS);
+        return;
+    }
+
+    // Read back fp16 K data from GPU and accumulate channel magnitudes on CPU
+    LLAMA_LOG_INFO("%s: TurboQuant GPU calibration — reading back K cache for outlier detection...\n", __func__);
+
+    for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        ggml_tensor * k_tensor = layers[ikv].k;
+        if (!k_tensor || k_tensor->type != GGML_TYPE_F16) continue;
+
+        const int64_t n_embd = k_tensor->ne[0];
+        const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
+        std::vector<ggml_fp16_t> fp16_buf(n_embd);
+        std::vector<float> f32_buf(n_embd);
+
+        for (uint32_t s = 0; s < n_stream; s++) {
+            const uint32_t max_cell = v_cells[s].used_max_p1();
+            for (uint32_t cell = 0; cell < max_cell && cell < (uint32_t)TQ_MIN_CALIB_VECTORS; cell++) {
+                if (v_cells[s].is_empty(cell)) continue;
+                const size_t offset = (s * get_size() + cell) * fp16_row_sz;
+
+                ggml_backend_tensor_get(k_tensor, fp16_buf.data(), offset, n_embd * sizeof(ggml_fp16_t));
+                ggml_fp16_to_fp32_row(fp16_buf.data(), f32_buf.data(), n_embd);
+
+                tq_set_current_layer(layers[ikv].il, 1);
+                tq_accumulate_channels(layers[ikv].il, 1, f32_buf.data(), n_embd);
+            }
+        }
     }
 
     tq_finish_calibration();

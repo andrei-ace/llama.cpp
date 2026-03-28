@@ -344,6 +344,34 @@ typedef struct {
 static_assert(sizeof(block_tqv_35) == 2*sizeof(ggml_half) + TQV_N_OUTLIER*4/8 + TQV_N_REGULAR*3/8, "wrong tqv_35 block size");
 // Total: 56 bytes for 128 elements = 3.5 bpv
 
+// CUDA/HIP type aliases — the CUDA stubs use "turbo*" naming
+typedef block_tqk_25  block_turbo3_0_prod;
+typedef block_tqk_35  block_turbo4_0_prod;
+typedef block_tqv_25  block_turbo3_0_mse;
+typedef block_tqv_35  block_turbo4_0_mse;
+
+// Block size constants (all TQ types use 128-element blocks)
+#define QK_TURBO3_PROD     TQK_BLOCK_SIZE
+#define QK_TURBO4_PROD     TQK_BLOCK_SIZE
+#define QK_TURBO3_MSE      TQV_BLOCK_SIZE
+#define QK_TURBO4_MSE      TQV_BLOCK_SIZE
+
+// QR constants (quantization ratio, used by get_rows_cuda_q)
+#define QR_TURBO3_0_PROD   QR_TQK_25
+#define QR_TURBO4_0_PROD   QR_TQK_35
+#define QR_TURBO3_0_MSE    QR_TQV_25
+#define QR_TURBO4_0_MSE    QR_TQV_35
+
+// Hi/Lo partition sizes for CUDA kernels
+#define QK_TURBO3_PROD_HI  TQK_N_OUTLIER
+#define QK_TURBO3_PROD_LO  TQK_N_REGULAR
+#define QK_TURBO4_PROD_HI  TQK_N_OUTLIER
+#define QK_TURBO4_PROD_LO  TQK_N_REGULAR
+#define QK_TURBO3_MSE_HI   TQV_N_OUTLIER
+#define QK_TURBO3_MSE_LO   TQV_N_REGULAR
+#define QK_TURBO4_MSE_HI   TQV_N_OUTLIER
+#define QK_TURBO4_MSE_LO   TQV_N_REGULAR
+
 //
 // Super-block quantization structures
 //

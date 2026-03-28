@@ -1,71 +1,103 @@
 // TurboQuant CUDA device functions — exact paper algorithm (arXiv 2504.19874)
 //
-// MSE types (V cache): pure centroid lookup, no QJL
-// PROD types (K cache): MSE centroids + QJL correction on residual
+// MSE types (V cache): 128×128 rotation, pure centroid lookup, no QJL
+// PROD types (K cache): 32/96 channel split, independent rotations,
+//                        MSE centroids + QJL correction on residual
+//
+// Three independent rotation matrices (static per-TU, device-side init):
+//   Π_hi  (32×32)  — K outlier channels
+//   Π_lo  (96×96)  — K regular channels
+//   Π_v   (128×128) — V cache (full vector, no split)
 
 #pragma once
 
-// In the main ggml-cuda build, common.cuh is already included by the .cu file
-// before this header. For standalone test builds, callers must include
-// ggml-common.h (with GGML_COMMON_DECL_CUDA) before this header.
 #ifndef TURBO_QUANT_STANDALONE_TEST
 #include "common.cuh"
 #endif
 
 // ---------------------------------------------------------------------------
-// Rotation matrix Π (128×128 orthogonal, generated via QR of Gaussian)
-// Stored as two static device arrays: forward (Π) and inverse (Π^T).
-// Initialized by tq_init_rotation() called from host at KV cache creation.
+// Dimension constants
 // ---------------------------------------------------------------------------
 
-#define TQ_HEAD_DIM 128
+#define TQ_DIM_HI   32
+#define TQ_DIM_LO   96
+#define TQ_DIM_V   128
 
-static __device__ float tq_rotation_fwd[TQ_HEAD_DIM * TQ_HEAD_DIM];
-static __device__ float tq_rotation_inv[TQ_HEAD_DIM * TQ_HEAD_DIM];
+// ---------------------------------------------------------------------------
+// Rotation matrices — static per-TU, initialized lazily on device
+// ---------------------------------------------------------------------------
+
+static __device__ float tq_rot_hi_fwd[TQ_DIM_HI * TQ_DIM_HI];
+static __device__ float tq_rot_hi_inv[TQ_DIM_HI * TQ_DIM_HI];
+static __device__ float tq_rot_lo_fwd[TQ_DIM_LO * TQ_DIM_LO];
+static __device__ float tq_rot_lo_inv[TQ_DIM_LO * TQ_DIM_LO];
+static __device__ float tq_rot_v_fwd[TQ_DIM_V * TQ_DIM_V];
+static __device__ float tq_rot_v_inv[TQ_DIM_V * TQ_DIM_V];
 static __device__ int   tq_rotation_ready = 0;
 
-// Host-callable function to upload rotation matrices to device
-// (defined at bottom of file, needs to be in a .cu, not .cuh — called from host)
+// ---------------------------------------------------------------------------
+// Rotation helpers: generic matvec out = M * in
+// ---------------------------------------------------------------------------
 
-// Apply forward rotation: out = Π * in (for quantize)
-static __device__ __forceinline__ void tq_rotate_forward(const float * in, float * out) {
-    for (int i = 0; i < TQ_HEAD_DIM; i++) {
+static __device__ __forceinline__ void tq_matvec(
+        const float * __restrict__ M, const float * __restrict__ in,
+        float * __restrict__ out, int d) {
+    for (int i = 0; i < d; i++) {
         float sum = 0.0f;
-        for (int j = 0; j < TQ_HEAD_DIM; j++) {
-            sum += tq_rotation_fwd[i * TQ_HEAD_DIM + j] * in[j];
+        for (int j = 0; j < d; j++) {
+            sum += M[i * d + j] * in[j];
         }
         out[i] = sum;
     }
 }
 
-// Apply inverse rotation: out = Π^T * in (for dequantize)
-static __device__ __forceinline__ void tq_rotate_inverse(const float * in, float * out) {
-    for (int i = 0; i < TQ_HEAD_DIM; i++) {
-        float sum = 0.0f;
-        for (int j = 0; j < TQ_HEAD_DIM; j++) {
-            sum += tq_rotation_inv[i * TQ_HEAD_DIM + j] * in[j];
-        }
-        out[i] = sum;
-    }
-}
+#define tq_rotate_hi_fwd(in, out) tq_matvec(tq_rot_hi_fwd, in, out, TQ_DIM_HI)
+#define tq_rotate_hi_inv(in, out) tq_matvec(tq_rot_hi_inv, in, out, TQ_DIM_HI)
+#define tq_rotate_lo_fwd(in, out) tq_matvec(tq_rot_lo_fwd, in, out, TQ_DIM_LO)
+#define tq_rotate_lo_inv(in, out) tq_matvec(tq_rot_lo_inv, in, out, TQ_DIM_LO)
+#define tq_rotate_v_fwd(in, out)  tq_matvec(tq_rot_v_fwd,  in, out, TQ_DIM_V)
+#define tq_rotate_v_inv(in, out)  tq_matvec(tq_rot_v_inv,  in, out, TQ_DIM_V)
 
 // ---------------------------------------------------------------------------
-// Centroids: exact Lloyd-Max for Beta((d-1)/2, (d-1)/2), d=128
+// Centroids: exact Lloyd-Max for Beta((d-1)/2, (d-1)/2)
+// Three dimension families: d=32 (K outlier), d=96 (K regular), d=128 (V)
 // ---------------------------------------------------------------------------
 
+// d=32 (K outlier subset)
+static __device__ const float tq_centroids_8_d32[8] = {
+    -0.3662682422f, -0.2324605670f, -0.1317560968f, -0.0428515156f,
+     0.0428515156f,  0.1317560968f,  0.2324605670f,  0.3662682422f,
+};
+static __device__ const float tq_centroids_4_d32[4] = {
+    -0.2633194113f, -0.0798019295f, 0.0798019295f, 0.2633194113f,
+};
+static __device__ const float tq_centroids_2_d32[2] = {
+    -0.1421534638f, 0.1421534638f,
+};
+
+// d=96 (K regular subset)
+static __device__ const float tq_centroids_8_d96[8] = {
+    -0.2168529349f, -0.1361685800f, -0.0767954958f, -0.0249236898f,
+     0.0249236898f,  0.0767954958f,  0.1361685800f,  0.2168529349f,
+};
+static __device__ const float tq_centroids_4_d96[4] = {
+    -0.1534455138f, -0.0461670286f, 0.0461670286f, 0.1534455138f,
+};
+static __device__ const float tq_centroids_2_d96[2] = {
+    -0.0816460916f, 0.0816460916f,
+};
+
+// d=128 (V cache, full vector)
 static __device__ const float tq_centroids_2[2] = {
     -0.0707250243f, 0.0707250243f,
 };
-
 static __device__ const float tq_centroids_4[4] = {
     -0.1330458627f, -0.0399983984f, 0.0399983984f, 0.1330458627f,
 };
-
 static __device__ const float tq_centroids_8[8] = {
     -0.1883988281f, -0.1181421705f, -0.0665887043f, -0.0216082019f,
      0.0216082019f,  0.0665887043f,  0.1181421705f,  0.1883988281f,
 };
-
 static __device__ const float tq_centroids_16[16] = {
     -0.2376827302f, -0.1808574273f, -0.1418271941f, -0.1103094608f,
     -0.0828467454f, -0.0577864193f, -0.0341609484f, -0.0113059237f,
@@ -139,157 +171,6 @@ static __device__ __forceinline__ int tq_nearest(float val, const float * c, int
 }
 
 // ---------------------------------------------------------------------------
-// Generic MSE dequantize: unpack index, look up centroid, scale by norm
-// ---------------------------------------------------------------------------
-
-static __device__ __forceinline__ float tq_dequant_element_turbo3_mse(
-        const block_turbo3_0_mse * blk, int j, float norm) {
-    if (j < QK_TURBO3_MSE_HI) {
-        // hi channel: 3-bit index -> centroids_8
-        const int idx = tq_unpack_3bit(blk->qs_hi, j);
-        return norm * tq_centroids_8[idx];
-    } else {
-        // lo channel: 2-bit index -> centroids_4
-        const int idx = tq_unpack_2bit(blk->qs_lo, j - QK_TURBO3_MSE_HI);
-        return norm * tq_centroids_4[idx];
-    }
-}
-
-static __device__ __forceinline__ float tq_dequant_element_turbo4_mse(
-        const block_turbo4_0_mse * blk, int j, float norm) {
-    if (j < QK_TURBO4_MSE_HI) {
-        // hi channel: 4-bit index -> centroids_16
-        const int idx = tq_unpack_4bit(blk->qs_hi, j);
-        return norm * tq_centroids_16[idx];
-    } else {
-        // lo channel: 3-bit index -> centroids_8
-        const int idx = tq_unpack_3bit(blk->qs_lo, j - QK_TURBO4_MSE_HI);
-        return norm * tq_centroids_8[idx];
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MSE dequantize for get_rows (returns 2 consecutive elements)
-// ---------------------------------------------------------------------------
-
-static __device__ __forceinline__ void dequantize_turbo3_0_mse(
-        const void * vx, const int64_t ib, const int iqs, float2 & v) {
-    const block_turbo3_0_mse * x = (const block_turbo3_0_mse *) vx;
-    const float norm = __half2float(x[ib].norm);
-
-    if (tq_rotation_ready) {
-        // Full block dequant in rotated space, then inverse rotate
-        float rotated[QK_TURBO3_MSE];
-        for (int j = 0; j < QK_TURBO3_MSE; j++) {
-            rotated[j] = tq_dequant_element_turbo3_mse(&x[ib], j, norm);
-        }
-        float orig[QK_TURBO3_MSE];
-        tq_rotate_inverse(rotated, orig);
-        v.x = orig[iqs + 0];
-        v.y = orig[iqs + 1];
-    } else {
-        v.x = tq_dequant_element_turbo3_mse(&x[ib], iqs + 0, norm);
-        v.y = tq_dequant_element_turbo3_mse(&x[ib], iqs + 1, norm);
-    }
-}
-
-static __device__ __forceinline__ void dequantize_turbo4_0_mse(
-        const void * vx, const int64_t ib, const int iqs, float2 & v) {
-    const block_turbo4_0_mse * x = (const block_turbo4_0_mse *) vx;
-    const float norm = __half2float(x[ib].norm);
-
-    if (tq_rotation_ready) {
-        float rotated[QK_TURBO4_MSE];
-        for (int j = 0; j < QK_TURBO4_MSE; j++) {
-            rotated[j] = tq_dequant_element_turbo4_mse(&x[ib], j, norm);
-        }
-        float orig[QK_TURBO4_MSE];
-        tq_rotate_inverse(rotated, orig);
-        v.x = orig[iqs + 0];
-        v.y = orig[iqs + 1];
-    } else {
-        v.x = tq_dequant_element_turbo4_mse(&x[ib], iqs + 0, norm);
-        v.y = tq_dequant_element_turbo4_mse(&x[ib], iqs + 1, norm);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MSE quantize for set_rows (one thread per 128-element block)
-// ---------------------------------------------------------------------------
-
-static __device__ void quantize_f32_turbo3_0_mse_block(
-        const float * __restrict__ x, block_turbo3_0_mse * __restrict__ y) {
-    // Apply forward rotation: rotated = Π * x
-    float rotated[QK_TURBO3_MSE];
-    if (tq_rotation_ready) {
-        tq_rotate_forward(x, rotated);
-    } else {
-        for (int j = 0; j < QK_TURBO3_MSE; j++) rotated[j] = x[j];
-    }
-
-    // Compute L2 norm (invariant under rotation)
-    float sum_sq = 0.0f;
-    for (int j = 0; j < QK_TURBO3_MSE; j++) {
-        sum_sq += rotated[j] * rotated[j];
-    }
-    const float norm = sqrtf(sum_sq);
-    y->norm = __float2half(norm);
-
-    memset(y->qs_hi, 0, sizeof(y->qs_hi));
-    memset(y->qs_lo, 0, sizeof(y->qs_lo));
-
-    if (norm == 0.0f) { return; }
-    const float inv = 1.0f / norm;
-
-    for (int j = 0; j < QK_TURBO3_MSE_HI; j++) {
-        const float xn = rotated[j] * inv;
-        const int idx = tq_nearest(xn, tq_centroids_8, 8);
-        tq_pack_3bit(y->qs_hi, j, idx);
-    }
-
-    for (int j = 0; j < QK_TURBO3_MSE_LO; j++) {
-        const float xn = rotated[QK_TURBO3_MSE_HI + j] * inv;
-        const int idx = tq_nearest(xn, tq_centroids_4, 4);
-        tq_pack_2bit(y->qs_lo, j, idx);
-    }
-}
-
-static __device__ void quantize_f32_turbo4_0_mse_block(
-        const float * __restrict__ x, block_turbo4_0_mse * __restrict__ y) {
-    float rotated[QK_TURBO4_MSE];
-    if (tq_rotation_ready) {
-        tq_rotate_forward(x, rotated);
-    } else {
-        for (int j = 0; j < QK_TURBO4_MSE; j++) rotated[j] = x[j];
-    }
-
-    float sum_sq = 0.0f;
-    for (int j = 0; j < QK_TURBO4_MSE; j++) {
-        sum_sq += rotated[j] * rotated[j];
-    }
-    const float norm = sqrtf(sum_sq);
-    y->norm = __float2half(norm);
-
-    memset(y->qs_hi, 0, sizeof(y->qs_hi));
-    memset(y->qs_lo, 0, sizeof(y->qs_lo));
-
-    if (norm == 0.0f) { return; }
-    const float inv = 1.0f / norm;
-
-    for (int j = 0; j < QK_TURBO4_MSE_HI; j++) {
-        const float xn = rotated[j] * inv;
-        const int idx = tq_nearest(xn, tq_centroids_16, 16);
-        tq_pack_4bit(y->qs_hi, j, idx);
-    }
-
-    for (int j = 0; j < QK_TURBO4_MSE_LO; j++) {
-        const float xn = rotated[QK_TURBO4_MSE_HI + j] * inv;
-        const int idx = tq_nearest(xn, tq_centroids_8, 8);
-        tq_pack_3bit(y->qs_lo, j, idx);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // PRNG for QJL (identical to CPU reference for bit-exact match)
 // ---------------------------------------------------------------------------
 
@@ -314,12 +195,10 @@ static __device__ __forceinline__ float tq_prng_gaussian(tq_prng_state & st) {
 
 // ---------------------------------------------------------------------------
 // QJL inverse: reconstruct correction vector from sign bits
-// For get_rows (not FA hot path). Serial per-block, O(m^2).
 // ---------------------------------------------------------------------------
 
 static __device__ void tq_qjl_inverse(
         const uint8_t * signs, float rnorm, float * corr, int m, uint64_t seed) {
-    // Zero correction vector
     for (int j = 0; j < m; j++) {
         corr[j] = 0.0f;
     }
@@ -343,12 +222,10 @@ static __device__ void tq_qjl_inverse(
 
 // ---------------------------------------------------------------------------
 // QJL forward: project residual through PRNG matrix, store signs + norm
-// For set_rows (not the hot path). Serial per-block, O(m^2).
 // ---------------------------------------------------------------------------
 
 static __device__ float tq_qjl_forward(
         const float * residual, uint8_t * signs, int m, uint64_t seed) {
-    // Compute residual norm
     float rnorm_sq = 0.0f;
     for (int j = 0; j < m; j++) {
         rnorm_sq += residual[j] * residual[j];
@@ -373,127 +250,366 @@ static __device__ float tq_qjl_forward(
 }
 
 // ---------------------------------------------------------------------------
-// PROD dequantize for get_rows (K cache, with QJL correction)
+// Device-side rotation matrix generation (Householder QR of Gaussian)
+// Runs on GPU in a single thread. Called once per TU on first use.
+// Matches CPU tq_gen_orthogonal() bit-exactly (same PRNG + QR algorithm).
 // ---------------------------------------------------------------------------
+
+static __device__ void tq_device_qr_orthogonal(float * fwd, float * inv, int d, uint64_t seed) {
+    // Fill A with Gaussian random (using same PRNG as CPU)
+    tq_prng_state st;
+    tq_prng_init(st, seed);
+
+    // A stored in-place in fwd (temporary)
+    float * A = fwd;  // reuse fwd as scratch, we'll overwrite it with Q
+    for (int i = 0; i < d * d; i++) {
+        A[i] = tq_prng_gaussian(st);
+    }
+
+    // We need separate storage for Q. Use inv as scratch for Q during QR.
+    float * Q = inv;
+    for (int i = 0; i < d; i++)
+        for (int j = 0; j < d; j++)
+            Q[i * d + j] = (i == j) ? 1.0f : 0.0f;
+
+    // Householder QR: A → R (upper tri), Q accumulated
+    for (int k = 0; k < d; k++) {
+        float norm_sq = 0.0f;
+        for (int i = k; i < d; i++) {
+            norm_sq += A[i * d + k] * A[i * d + k];
+        }
+        float norm = sqrtf(norm_sq);
+        if (norm < 1e-12f) continue;
+
+        float sign = (A[k * d + k] >= 0.0f) ? 1.0f : -1.0f;
+        float alpha = -sign * norm;
+
+        // Householder vector v (stored in-place in A column below diagonal)
+        // v = A[k:d, k] - alpha * e_k
+        // But we need separate v storage — use the first column of scratch
+        // Actually, compute v_norm_sq and apply reflector directly
+
+        // v[i] = A[i,k] for i >= k, v[k] -= alpha
+        float v_k = A[k * d + k] - alpha;
+        float v_norm_sq = v_k * v_k;
+        for (int i = k + 1; i < d; i++) {
+            v_norm_sq += A[i * d + k] * A[i * d + k];
+        }
+        if (v_norm_sq < 1e-24f) continue;
+        float tau = 2.0f / v_norm_sq;
+
+        // Apply H = I - tau*v*v^T to A from left: A = H*A (columns k..d-1)
+        for (int j = k; j < d; j++) {
+            float dot = v_k * A[k * d + j];
+            for (int i = k + 1; i < d; i++) {
+                dot += A[i * d + k] * A[i * d + j];
+            }
+            A[k * d + j] -= tau * v_k * dot;
+            for (int i = k + 1; i < d; i++) {
+                A[i * d + j] -= tau * A[i * d + k] * dot;
+            }
+        }
+
+        // Apply H to Q from right: Q = Q*H (all rows)
+        for (int i = 0; i < d; i++) {
+            float dot = Q[i * d + k] * v_k;
+            for (int j2 = k + 1; j2 < d; j2++) {
+                dot += Q[i * d + j2] * A[j2 * d + k];
+            }
+            Q[i * d + k] -= tau * dot * v_k;
+            for (int j2 = k + 1; j2 < d; j2++) {
+                Q[i * d + j2] -= tau * dot * A[j2 * d + k];
+            }
+        }
+
+        // Zero out the Householder vector column for next iteration
+        // (A[k,k] is now alpha, A[i>k,k] was the v vector — leave as is,
+        //  but we read A[i,k] as v[i] above, so we need to preserve it
+        //  until after the reflector is applied. It's already consumed.)
+    }
+
+    // Q is in inv. Copy to fwd.
+    for (int i = 0; i < d * d; i++) {
+        fwd[i] = Q[i];
+    }
+
+    // inv = Q^T
+    for (int i = 0; i < d; i++) {
+        for (int j = 0; j < d; j++) {
+            inv[i * d + j] = fwd[j * d + i];
+        }
+    }
+}
+
+static __global__ void tq_device_init_rotations_kernel() {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    // Seeds matching CPU: ggml-turbo-quant.c tq_init_rotations()
+    tq_device_qr_orthogonal(tq_rot_hi_fwd, tq_rot_hi_inv, TQ_DIM_HI, 0x5475524230484932ULL);
+    tq_device_qr_orthogonal(tq_rot_lo_fwd, tq_rot_lo_inv, TQ_DIM_LO, 0x54755242304C4F36ULL);
+    tq_device_qr_orthogonal(tq_rot_v_fwd,  tq_rot_v_inv,  TQ_DIM_V,  0x5475524230564131ULL);
+
+    __threadfence();  // Ensure all writes visible before setting ready flag
+    tq_rotation_ready = 1;
+}
+
+// ===================================================================
+// MSE types (V cache) — 128×128 rotation, d=128 centroids, no QJL
+// ===================================================================
+
+static __device__ __forceinline__ float tq_dequant_element_turbo3_mse(
+        const block_turbo3_0_mse * blk, int j, float norm) {
+    if (j < QK_TURBO3_MSE_HI) {
+        const int idx = tq_unpack_3bit(blk->qs_hi, j);
+        return norm * tq_centroids_8[idx];
+    } else {
+        const int idx = tq_unpack_2bit(blk->qs_lo, j - QK_TURBO3_MSE_HI);
+        return norm * tq_centroids_4[idx];
+    }
+}
+
+static __device__ __forceinline__ float tq_dequant_element_turbo4_mse(
+        const block_turbo4_0_mse * blk, int j, float norm) {
+    if (j < QK_TURBO4_MSE_HI) {
+        const int idx = tq_unpack_4bit(blk->qs_hi, j);
+        return norm * tq_centroids_16[idx];
+    } else {
+        const int idx = tq_unpack_3bit(blk->qs_lo, j - QK_TURBO4_MSE_HI);
+        return norm * tq_centroids_8[idx];
+    }
+}
+
+// MSE dequantize for get_rows: dequant in rotated space, inverse rotate Π_v^T
+
+static __device__ __forceinline__ void dequantize_turbo3_0_mse(
+        const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_turbo3_0_mse * x = (const block_turbo3_0_mse *) vx;
+    const float norm = __half2float(x[ib].norm_hi);
+
+    if (tq_rotation_ready) {
+        float rotated[TQ_DIM_V];
+        for (int j = 0; j < TQ_DIM_V; j++) {
+            rotated[j] = tq_dequant_element_turbo3_mse(&x[ib], j, norm);
+        }
+        float orig[TQ_DIM_V];
+        tq_rotate_v_inv(rotated, orig);
+        v.x = orig[iqs + 0];
+        v.y = orig[iqs + 1];
+    } else {
+        v.x = tq_dequant_element_turbo3_mse(&x[ib], iqs + 0, norm);
+        v.y = tq_dequant_element_turbo3_mse(&x[ib], iqs + 1, norm);
+    }
+}
+
+static __device__ __forceinline__ void dequantize_turbo4_0_mse(
+        const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_turbo4_0_mse * x = (const block_turbo4_0_mse *) vx;
+    const float norm = __half2float(x[ib].norm_hi);
+
+    if (tq_rotation_ready) {
+        float rotated[TQ_DIM_V];
+        for (int j = 0; j < TQ_DIM_V; j++) {
+            rotated[j] = tq_dequant_element_turbo4_mse(&x[ib], j, norm);
+        }
+        float orig[TQ_DIM_V];
+        tq_rotate_v_inv(rotated, orig);
+        v.x = orig[iqs + 0];
+        v.y = orig[iqs + 1];
+    } else {
+        v.x = tq_dequant_element_turbo4_mse(&x[ib], iqs + 0, norm);
+        v.y = tq_dequant_element_turbo4_mse(&x[ib], iqs + 1, norm);
+    }
+}
+
+// MSE quantize for set_rows: rotate Π_v, normalize, MSE quantize
+
+static __device__ void quantize_f32_turbo3_0_mse_block(
+        const float * __restrict__ x, block_turbo3_0_mse * __restrict__ y) {
+    float rotated[TQ_DIM_V];
+    if (tq_rotation_ready) {
+        tq_rotate_v_fwd(x, rotated);
+    } else {
+        for (int j = 0; j < TQ_DIM_V; j++) rotated[j] = x[j];
+    }
+
+    float sum_sq = 0.0f;
+    for (int j = 0; j < TQ_DIM_V; j++) {
+        sum_sq += rotated[j] * rotated[j];
+    }
+    const float norm = sqrtf(sum_sq);
+    y->norm_hi = __float2half(norm);
+    y->norm_lo = __float2half(0.0f);
+
+    memset(y->qs_hi, 0, sizeof(y->qs_hi));
+    memset(y->qs_lo, 0, sizeof(y->qs_lo));
+
+    if (norm == 0.0f) { return; }
+    const float inv = 1.0f / norm;
+
+    for (int j = 0; j < QK_TURBO3_MSE_HI; j++) {
+        const float xn = rotated[j] * inv;
+        const int idx = tq_nearest(xn, tq_centroids_8, 8);
+        tq_pack_3bit(y->qs_hi, j, idx);
+    }
+
+    for (int j = 0; j < QK_TURBO3_MSE_LO; j++) {
+        const float xn = rotated[QK_TURBO3_MSE_HI + j] * inv;
+        const int idx = tq_nearest(xn, tq_centroids_4, 4);
+        tq_pack_2bit(y->qs_lo, j, idx);
+    }
+}
+
+static __device__ void quantize_f32_turbo4_0_mse_block(
+        const float * __restrict__ x, block_turbo4_0_mse * __restrict__ y) {
+    float rotated[TQ_DIM_V];
+    if (tq_rotation_ready) {
+        tq_rotate_v_fwd(x, rotated);
+    } else {
+        for (int j = 0; j < TQ_DIM_V; j++) rotated[j] = x[j];
+    }
+
+    float sum_sq = 0.0f;
+    for (int j = 0; j < TQ_DIM_V; j++) {
+        sum_sq += rotated[j] * rotated[j];
+    }
+    const float norm = sqrtf(sum_sq);
+    y->norm_hi = __float2half(norm);
+    y->norm_lo = __float2half(0.0f);
+
+    memset(y->qs_hi, 0, sizeof(y->qs_hi));
+    memset(y->qs_lo, 0, sizeof(y->qs_lo));
+
+    if (norm == 0.0f) { return; }
+    const float inv = 1.0f / norm;
+
+    for (int j = 0; j < QK_TURBO4_MSE_HI; j++) {
+        const float xn = rotated[j] * inv;
+        const int idx = tq_nearest(xn, tq_centroids_16, 16);
+        tq_pack_4bit(y->qs_hi, j, idx);
+    }
+
+    for (int j = 0; j < QK_TURBO4_MSE_LO; j++) {
+        const float xn = rotated[QK_TURBO4_MSE_HI + j] * inv;
+        const int idx = tq_nearest(xn, tq_centroids_8, 8);
+        tq_pack_3bit(y->qs_lo, j, idx);
+    }
+}
+
+// ===================================================================
+// PROD types (K cache) — 32/96 split, independent rotations, QJL
+// Identity channel permutation (channels 0-31 = outlier, 32-127 = regular)
+// ===================================================================
+
+// PROD dequantize for get_rows: full block with rotation + QJL
 
 static __device__ __forceinline__ void dequantize_turbo3_0_prod(
         const void * vx, const int64_t ib, const int iqs, float2 & v) {
     const block_turbo3_0_prod * x = (const block_turbo3_0_prod *) vx;
-    const float norm = __half2float(x[ib].norm);
-    const int j0 = iqs;
-    const int j1 = iqs + 1;
+    const float norm_hi = __half2float(x[ib].norm_hi);
+    const float norm_lo = __half2float(x[ib].norm_lo);
 
-    // Compute QJL corrections for both elements
-    float val0, val1;
-
-    if (j1 < QK_TURBO3_PROD_HI) {
-        // Both in hi partition (j0,j1 < 32)
-        float corr_hi[QK_TURBO3_PROD_HI];
-        tq_qjl_inverse(x[ib].signs_hi, __half2float(x[ib].rnorm_hi),
-                        corr_hi, QK_TURBO3_PROD_HI, QJL_SEED_32);
-
-        const int idx0 = tq_unpack_2bit(x[ib].qs_hi, j0);
-        const int idx1 = tq_unpack_2bit(x[ib].qs_hi, j1);
-        val0 = norm * (tq_centroids_4[idx0] + corr_hi[j0]);
-        val1 = norm * (tq_centroids_4[idx1] + corr_hi[j1]);
-
-    } else if (j0 >= QK_TURBO3_PROD_HI) {
-        // Both in lo partition (j0,j1 >= 32)
-        float corr_lo[QK_TURBO3_PROD_LO];
-        tq_qjl_inverse(x[ib].signs_lo, __half2float(x[ib].rnorm_lo),
-                        corr_lo, QK_TURBO3_PROD_LO, QJL_SEED_96);
-
-        const int lo0 = j0 - QK_TURBO3_PROD_HI;
-        const int lo1 = j1 - QK_TURBO3_PROD_HI;
-        const int idx0 = tq_unpack_1bit(x[ib].qs_lo, lo0);
-        const int idx1 = tq_unpack_1bit(x[ib].qs_lo, lo1);
-        val0 = norm * (tq_centroids_2[idx0] + corr_lo[lo0]);
-        val1 = norm * (tq_centroids_2[idx1] + corr_lo[lo1]);
-
-    } else {
-        // Straddling boundary: j0=31 (hi), j1=32 (lo)
-        float corr_hi[QK_TURBO3_PROD_HI];
-        tq_qjl_inverse(x[ib].signs_hi, __half2float(x[ib].rnorm_hi),
-                        corr_hi, QK_TURBO3_PROD_HI, QJL_SEED_32);
-        float corr_lo[QK_TURBO3_PROD_LO];
-        tq_qjl_inverse(x[ib].signs_lo, __half2float(x[ib].rnorm_lo),
-                        corr_lo, QK_TURBO3_PROD_LO, QJL_SEED_96);
-
-        const int idx0 = tq_unpack_2bit(x[ib].qs_hi, j0);
-        const int idx1 = tq_unpack_1bit(x[ib].qs_lo, 0);
-        val0 = norm * (tq_centroids_4[idx0] + corr_hi[j0]);
-        val1 = norm * (tq_centroids_2[idx1] + corr_lo[0]);
+    // MSE centroids in rotated space
+    float yhi_rot[TQ_DIM_HI], ylo_rot[TQ_DIM_LO];
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        yhi_rot[j] = tq_centroids_4_d32[tq_unpack_2bit(x[ib].qs_hi, j)];
+    }
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        ylo_rot[j] = tq_centroids_2_d96[tq_unpack_1bit(x[ib].qs_lo, j)];
     }
 
-    v.x = val0;
-    v.y = val1;
+    // Inverse rotate and scale
+    float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
+    if (tq_rotation_ready) {
+        tq_rotate_hi_inv(yhi_rot, hi_orig);
+        tq_rotate_lo_inv(ylo_rot, lo_orig);
+    } else {
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] = yhi_rot[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] = ylo_rot[j];
+    }
+    for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] *= norm_hi;
+    for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] *= norm_lo;
+
+    // QJL correction (in original space)
+    float corr_hi[TQ_DIM_HI], corr_lo[TQ_DIM_LO];
+    tq_qjl_inverse(x[ib].signs_hi, __half2float(x[ib].rnorm_hi),
+                    corr_hi, TQ_DIM_HI, QJL_SEED_32);
+    tq_qjl_inverse(x[ib].signs_lo, __half2float(x[ib].rnorm_lo),
+                    corr_lo, TQ_DIM_LO, QJL_SEED_96);
+
+    for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] += corr_hi[j];
+    for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] += corr_lo[j];
+
+    // Identity permutation: output[0..31] = hi, output[32..127] = lo
+    const int j0 = iqs, j1 = iqs + 1;
+    v.x = (j0 < TQ_DIM_HI) ? hi_orig[j0] : lo_orig[j0 - TQ_DIM_HI];
+    v.y = (j1 < TQ_DIM_HI) ? hi_orig[j1] : lo_orig[j1 - TQ_DIM_HI];
 }
 
 static __device__ __forceinline__ void dequantize_turbo4_0_prod(
         const void * vx, const int64_t ib, const int iqs, float2 & v) {
     const block_turbo4_0_prod * x = (const block_turbo4_0_prod *) vx;
-    const float norm = __half2float(x[ib].norm);
-    const int j0 = iqs;
-    const int j1 = iqs + 1;
+    const float norm_hi = __half2float(x[ib].norm_hi);
+    const float norm_lo = __half2float(x[ib].norm_lo);
 
-    float val0, val1;
-
-    if (j1 < QK_TURBO4_PROD_HI) {
-        // Both in hi partition
-        float corr_hi[QK_TURBO4_PROD_HI];
-        tq_qjl_inverse(x[ib].signs_hi, __half2float(x[ib].rnorm_hi),
-                        corr_hi, QK_TURBO4_PROD_HI, QJL_SEED_32);
-
-        const int idx0 = tq_unpack_3bit(x[ib].qs_hi, j0);
-        const int idx1 = tq_unpack_3bit(x[ib].qs_hi, j1);
-        val0 = norm * (tq_centroids_8[idx0] + corr_hi[j0]);
-        val1 = norm * (tq_centroids_8[idx1] + corr_hi[j1]);
-
-    } else if (j0 >= QK_TURBO4_PROD_HI) {
-        // Both in lo partition
-        float corr_lo[QK_TURBO4_PROD_LO];
-        tq_qjl_inverse(x[ib].signs_lo, __half2float(x[ib].rnorm_lo),
-                        corr_lo, QK_TURBO4_PROD_LO, QJL_SEED_96);
-
-        const int lo0 = j0 - QK_TURBO4_PROD_HI;
-        const int lo1 = j1 - QK_TURBO4_PROD_HI;
-        const int idx0 = tq_unpack_2bit(x[ib].qs_lo, lo0);
-        const int idx1 = tq_unpack_2bit(x[ib].qs_lo, lo1);
-        val0 = norm * (tq_centroids_4[idx0] + corr_lo[lo0]);
-        val1 = norm * (tq_centroids_4[idx1] + corr_lo[lo1]);
-
-    } else {
-        // Straddling boundary: j0=31 (hi), j1=32 (lo)
-        float corr_hi[QK_TURBO4_PROD_HI];
-        tq_qjl_inverse(x[ib].signs_hi, __half2float(x[ib].rnorm_hi),
-                        corr_hi, QK_TURBO4_PROD_HI, QJL_SEED_32);
-        float corr_lo[QK_TURBO4_PROD_LO];
-        tq_qjl_inverse(x[ib].signs_lo, __half2float(x[ib].rnorm_lo),
-                        corr_lo, QK_TURBO4_PROD_LO, QJL_SEED_96);
-
-        const int idx0 = tq_unpack_3bit(x[ib].qs_hi, j0);
-        const int idx1 = tq_unpack_2bit(x[ib].qs_lo, 0);
-        val0 = norm * (tq_centroids_8[idx0] + corr_hi[j0]);
-        val1 = norm * (tq_centroids_4[idx1] + corr_lo[0]);
+    float yhi_rot[TQ_DIM_HI], ylo_rot[TQ_DIM_LO];
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        yhi_rot[j] = tq_centroids_8_d32[tq_unpack_3bit(x[ib].qs_hi, j)];
+    }
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        ylo_rot[j] = tq_centroids_4_d96[tq_unpack_2bit(x[ib].qs_lo, j)];
     }
 
-    v.x = val0;
-    v.y = val1;
+    float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
+    if (tq_rotation_ready) {
+        tq_rotate_hi_inv(yhi_rot, hi_orig);
+        tq_rotate_lo_inv(ylo_rot, lo_orig);
+    } else {
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] = yhi_rot[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] = ylo_rot[j];
+    }
+    for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] *= norm_hi;
+    for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] *= norm_lo;
+
+    float corr_hi[TQ_DIM_HI], corr_lo[TQ_DIM_LO];
+    tq_qjl_inverse(x[ib].signs_hi, __half2float(x[ib].rnorm_hi),
+                    corr_hi, TQ_DIM_HI, QJL_SEED_32);
+    tq_qjl_inverse(x[ib].signs_lo, __half2float(x[ib].rnorm_lo),
+                    corr_lo, TQ_DIM_LO, QJL_SEED_96);
+
+    for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] += corr_hi[j];
+    for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] += corr_lo[j];
+
+    const int j0 = iqs, j1 = iqs + 1;
+    v.x = (j0 < TQ_DIM_HI) ? hi_orig[j0] : lo_orig[j0 - TQ_DIM_HI];
+    v.y = (j1 < TQ_DIM_HI) ? hi_orig[j1] : lo_orig[j1 - TQ_DIM_HI];
 }
 
-// ---------------------------------------------------------------------------
-// PROD quantize for set_rows (K cache, one thread per block)
-// ---------------------------------------------------------------------------
+// PROD quantize for set_rows: split → rotate → MSE → residual in orig → QJL
 
 static __device__ void quantize_f32_turbo3_0_prod_block(
         const float * __restrict__ x, block_turbo3_0_prod * __restrict__ y) {
-    // Compute L2 norm
-    float sum_sq = 0.0f;
-    for (int j = 0; j < QK_TURBO3_PROD; j++) {
-        sum_sq += x[j] * x[j];
+    const float * hi_raw = x;
+    const float * lo_raw = x + TQ_DIM_HI;
+
+    // Rotate each subset
+    float hi_rot[TQ_DIM_HI], lo_rot[TQ_DIM_LO];
+    if (tq_rotation_ready) {
+        tq_rotate_hi_fwd(hi_raw, hi_rot);
+        tq_rotate_lo_fwd(lo_raw, lo_rot);
+    } else {
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_rot[j] = hi_raw[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_rot[j] = lo_raw[j];
     }
-    const float norm = sqrtf(sum_sq);
-    y->norm = __float2half(norm);
+
+    // Per-subset norms
+    float sum_hi = 0.0f, sum_lo = 0.0f;
+    for (int j = 0; j < TQ_DIM_HI; j++) sum_hi += hi_rot[j] * hi_rot[j];
+    for (int j = 0; j < TQ_DIM_LO; j++) sum_lo += lo_rot[j] * lo_rot[j];
+    const float norm_hi = sqrtf(sum_hi);
+    const float norm_lo = sqrtf(sum_lo);
+
+    y->norm_hi = __float2half(norm_hi);
+    y->norm_lo = __float2half(norm_lo);
     y->rnorm_hi = __float2half(0.0f);
     y->rnorm_lo = __float2half(0.0f);
     memset(y->qs_hi,    0, sizeof(y->qs_hi));
@@ -501,41 +617,73 @@ static __device__ void quantize_f32_turbo3_0_prod_block(
     memset(y->signs_hi, 0, sizeof(y->signs_hi));
     memset(y->signs_lo, 0, sizeof(y->signs_lo));
 
-    if (norm == 0.0f) { return; }
-    const float inv = 1.0f / norm;
+    const float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
+    const float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
 
-    // Hi channels (0..31): 2-bit MSE -> centroids_4
-    float res_hi[QK_TURBO3_PROD_HI];
-    for (int j = 0; j < QK_TURBO3_PROD_HI; j++) {
-        const float xn = x[j] * inv;
-        const int idx = tq_nearest(xn, tq_centroids_4, 4);
+    // MSE quantize with d-specific centroids
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        const float xn = hi_rot[j] * inv_hi;
+        const int idx = tq_nearest(xn, tq_centroids_4_d32, 4);
         tq_pack_2bit(y->qs_hi, j, idx);
-        res_hi[j] = xn - tq_centroids_4[idx];
     }
-
-    // Lo channels (32..127): 1-bit MSE -> centroids_2
-    float res_lo[QK_TURBO3_PROD_LO];
-    for (int j = 0; j < QK_TURBO3_PROD_LO; j++) {
-        const float xn = x[QK_TURBO3_PROD_HI + j] * inv;
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        const float xn = lo_rot[j] * inv_lo;
         const int idx = (xn >= 0.0f) ? 1 : 0;
         tq_pack_1bit(y->qs_lo, j, idx);
-        res_lo[j] = xn - tq_centroids_2[idx];
     }
 
-    // QJL forward on residuals
-    y->rnorm_hi = __float2half(tq_qjl_forward(res_hi, y->signs_hi, QK_TURBO3_PROD_HI, QJL_SEED_32));
-    y->rnorm_lo = __float2half(tq_qjl_forward(res_lo, y->signs_lo, QK_TURBO3_PROD_LO, QJL_SEED_96));
+    // Residual in original space: r = raw - norm * Π^T × centroids[idx]
+    float yhi_rot[TQ_DIM_HI], ylo_rot[TQ_DIM_LO];
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        yhi_rot[j] = tq_centroids_4_d32[tq_unpack_2bit(y->qs_hi, j)];
+    }
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        ylo_rot[j] = tq_centroids_2_d96[tq_unpack_1bit(y->qs_lo, j)];
+    }
+
+    float hi_rec[TQ_DIM_HI], lo_rec[TQ_DIM_LO];
+    if (tq_rotation_ready) {
+        tq_rotate_hi_inv(yhi_rot, hi_rec);
+        tq_rotate_lo_inv(ylo_rot, lo_rec);
+    } else {
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_rec[j] = yhi_rot[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_rec[j] = ylo_rot[j];
+    }
+
+    float res_hi[TQ_DIM_HI], res_lo[TQ_DIM_LO];
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        res_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+    }
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        res_lo[j] = lo_raw[j] - norm_lo * lo_rec[j];
+    }
+
+    y->rnorm_hi = __float2half(tq_qjl_forward(res_hi, y->signs_hi, TQ_DIM_HI, QJL_SEED_32));
+    y->rnorm_lo = __float2half(tq_qjl_forward(res_lo, y->signs_lo, TQ_DIM_LO, QJL_SEED_96));
 }
 
 static __device__ void quantize_f32_turbo4_0_prod_block(
         const float * __restrict__ x, block_turbo4_0_prod * __restrict__ y) {
-    // Compute L2 norm
-    float sum_sq = 0.0f;
-    for (int j = 0; j < QK_TURBO4_PROD; j++) {
-        sum_sq += x[j] * x[j];
+    const float * hi_raw = x;
+    const float * lo_raw = x + TQ_DIM_HI;
+
+    float hi_rot[TQ_DIM_HI], lo_rot[TQ_DIM_LO];
+    if (tq_rotation_ready) {
+        tq_rotate_hi_fwd(hi_raw, hi_rot);
+        tq_rotate_lo_fwd(lo_raw, lo_rot);
+    } else {
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_rot[j] = hi_raw[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_rot[j] = lo_raw[j];
     }
-    const float norm = sqrtf(sum_sq);
-    y->norm = __float2half(norm);
+
+    float sum_hi = 0.0f, sum_lo = 0.0f;
+    for (int j = 0; j < TQ_DIM_HI; j++) sum_hi += hi_rot[j] * hi_rot[j];
+    for (int j = 0; j < TQ_DIM_LO; j++) sum_lo += lo_rot[j] * lo_rot[j];
+    const float norm_hi = sqrtf(sum_hi);
+    const float norm_lo = sqrtf(sum_lo);
+
+    y->norm_hi = __float2half(norm_hi);
+    y->norm_lo = __float2half(norm_lo);
     y->rnorm_hi = __float2half(0.0f);
     y->rnorm_lo = __float2half(0.0f);
     memset(y->qs_hi,    0, sizeof(y->qs_hi));
@@ -543,28 +691,45 @@ static __device__ void quantize_f32_turbo4_0_prod_block(
     memset(y->signs_hi, 0, sizeof(y->signs_hi));
     memset(y->signs_lo, 0, sizeof(y->signs_lo));
 
-    if (norm == 0.0f) { return; }
-    const float inv = 1.0f / norm;
+    const float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
+    const float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
 
-    // Hi channels (0..31): 3-bit MSE -> centroids_8
-    float res_hi[QK_TURBO4_PROD_HI];
-    for (int j = 0; j < QK_TURBO4_PROD_HI; j++) {
-        const float xn = x[j] * inv;
-        const int idx = tq_nearest(xn, tq_centroids_8, 8);
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        const float xn = hi_rot[j] * inv_hi;
+        const int idx = tq_nearest(xn, tq_centroids_8_d32, 8);
         tq_pack_3bit(y->qs_hi, j, idx);
-        res_hi[j] = xn - tq_centroids_8[idx];
     }
-
-    // Lo channels (32..127): 2-bit MSE -> centroids_4
-    float res_lo[QK_TURBO4_PROD_LO];
-    for (int j = 0; j < QK_TURBO4_PROD_LO; j++) {
-        const float xn = x[QK_TURBO4_PROD_HI + j] * inv;
-        const int idx = tq_nearest(xn, tq_centroids_4, 4);
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        const float xn = lo_rot[j] * inv_lo;
+        const int idx = tq_nearest(xn, tq_centroids_4_d96, 4);
         tq_pack_2bit(y->qs_lo, j, idx);
-        res_lo[j] = xn - tq_centroids_4[idx];
     }
 
-    // QJL forward on residuals
-    y->rnorm_hi = __float2half(tq_qjl_forward(res_hi, y->signs_hi, QK_TURBO4_PROD_HI, QJL_SEED_32));
-    y->rnorm_lo = __float2half(tq_qjl_forward(res_lo, y->signs_lo, QK_TURBO4_PROD_LO, QJL_SEED_96));
+    float yhi_rot[TQ_DIM_HI], ylo_rot[TQ_DIM_LO];
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        yhi_rot[j] = tq_centroids_8_d32[tq_unpack_3bit(y->qs_hi, j)];
+    }
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        ylo_rot[j] = tq_centroids_4_d96[tq_unpack_2bit(y->qs_lo, j)];
+    }
+
+    float hi_rec[TQ_DIM_HI], lo_rec[TQ_DIM_LO];
+    if (tq_rotation_ready) {
+        tq_rotate_hi_inv(yhi_rot, hi_rec);
+        tq_rotate_lo_inv(ylo_rot, lo_rec);
+    } else {
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_rec[j] = yhi_rot[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_rec[j] = ylo_rot[j];
+    }
+
+    float res_hi[TQ_DIM_HI], res_lo[TQ_DIM_LO];
+    for (int j = 0; j < TQ_DIM_HI; j++) {
+        res_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+    }
+    for (int j = 0; j < TQ_DIM_LO; j++) {
+        res_lo[j] = lo_raw[j] - norm_lo * lo_rec[j];
+    }
+
+    y->rnorm_hi = __float2half(tq_qjl_forward(res_hi, y->signs_hi, TQ_DIM_HI, QJL_SEED_32));
+    y->rnorm_lo = __float2half(tq_qjl_forward(res_lo, y->signs_lo, TQ_DIM_LO, QJL_SEED_96));
 }
