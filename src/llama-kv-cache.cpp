@@ -119,12 +119,18 @@ llama_kv_cache::llama_kv_cache(
     if (uses_turbo_k || uses_turbo_v) {
         target_type_k = type_k;
         target_type_v = type_v;
-        if (uses_turbo_k) { alloc_type_k = GGML_TYPE_F16; }
-        if (uses_turbo_v) { alloc_type_v = GGML_TYPE_F16; }
-        tq_calibrating_ = true;
-        // P1: Reset global calibration state for this new context
-        tq_reset_calibration();
-        LLAMA_LOG_INFO("%s: TurboQuant calibration enabled — starting with fp16 K/V cache\n", __func__);
+        // V doesn't need calibration (no outlier split, fixed 128×128 rotation)
+        // Only start fp16 calibration phase if K needs outlier detection
+        if (uses_turbo_k) {
+            alloc_type_k = GGML_TYPE_F16;
+            alloc_type_v = GGML_TYPE_F16; // V also starts fp16 so re-quant handles both
+            tq_calibrating_ = true;
+            tq_reset_calibration();
+            LLAMA_LOG_INFO("%s: TurboQuant calibration enabled — K+V start as fp16\n", __func__);
+        } else {
+            // V-only TQ: no calibration needed, allocate TQ directly
+            LLAMA_LOG_INFO("%s: TurboQuant V-only — no calibration needed\n", __func__);
+        }
     }
 
     for (uint32_t il = 0; il < hparams.n_layer; il++) {
@@ -362,7 +368,7 @@ void llama_kv_cache::tq_try_finish_calibration() {
     }
     const int min_count = tq_min_accum_count(max_layer_id + 1);
 
-    static const int TQ_MIN_CALIB_VECTORS = 128;
+    static const int TQ_MIN_CALIB_VECTORS = 256;
 
     if (min_count < TQ_MIN_CALIB_VECTORS) {
         LLAMA_LOG_DEBUG("%s: TurboQuant calibration: %d tokens accumulated (need %d), continuing...\n",

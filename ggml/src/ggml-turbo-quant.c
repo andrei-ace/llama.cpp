@@ -22,6 +22,9 @@
 // Each independent instance uses centroids for its own dimension d.
 // ---------------------------------------------------------------------------
 
+// Precomputed Lloyd-Max centroids for various (d, b) configurations.
+// Some may be unused at current operating points but kept for future use.
+
 // d=32 (outlier instance)
 static const float centroids_8_d32[8] = {
     -0.3662682422f, -0.2324605670f, -0.1317560968f, -0.0428515156f,
@@ -47,21 +50,22 @@ static const float centroids_2_d96[2] = {
 };
 
 // d=128 (used by MSE types which operate on full vector)
-static const float centroids_8[8] = {
-    -0.1883988281f, -0.1181421705f, -0.0665887043f, -0.0216082019f,
-     0.0216082019f,  0.0665887043f,  0.1181421705f,  0.1883988281f,
-};
+// d=128 centroids — exact Lloyd-Max for Beta(63.5, 63.5) computed with scipy
 static const float centroids_16[16] = {
-    -0.2376827302f, -0.1808574273f, -0.1418271941f, -0.1103094608f,
-    -0.0828467454f, -0.0577864193f, -0.0341609484f, -0.0113059237f,
-     0.0113059237f,  0.0341609484f,  0.0577864193f,  0.0828467454f,
-     0.1103094608f,  0.1418271941f,  0.1808574273f,  0.2376827302f,
+    -0.2376271868f, -0.1807937296f, -0.1417616544f, -0.1102470655f,
+    -0.0827925668f, -0.0577445357f, -0.0341340283f, -0.0112964982f,
+     0.0112964982f,  0.0341340283f,  0.0577445357f,  0.0827925668f,
+     0.1102470655f,  0.1417616544f,  0.1807937296f,  0.2376271868f,
+};
+static const float centroids_8[8] = {
+    -0.1883971860f, -0.1181397670f, -0.0665856080f, -0.0216043106f,
+     0.0216043106f,  0.0665856080f,  0.1181397670f,  0.1883971860f,
 };
 static const float centroids_4[4] = {
-    -0.1330458627f, -0.0399983984f, 0.0399983984f, 0.1330458627f,
+    -0.1330415202f, -0.0399915952f, 0.0399915952f, 0.1330415202f,
 };
 static const float centroids_2[2] = {
-    -0.0707250243f, 0.0707250243f,
+    -0.0706615727f, 0.0706615727f,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,10 +78,12 @@ static const float centroids_2[2] = {
 #define TQ_DIM_HI  32
 #define TQ_DIM_LO  96
 
-static float tq_rot_hi_fwd[TQ_DIM_HI * TQ_DIM_HI];  // Π_hi (row-major)
+static float tq_rot_hi_fwd[TQ_DIM_HI * TQ_DIM_HI];  // Π_hi (row-major) — K cache outlier subset
 static float tq_rot_hi_inv[TQ_DIM_HI * TQ_DIM_HI];
-static float tq_rot_lo_fwd[TQ_DIM_LO * TQ_DIM_LO];  // Π_lo (row-major)
+static float tq_rot_lo_fwd[TQ_DIM_LO * TQ_DIM_LO];  // Π_lo (row-major) — K cache regular subset
 static float tq_rot_lo_inv[TQ_DIM_LO * TQ_DIM_LO];
+static float tq_rot_v_fwd[TQ_DIM * TQ_DIM];          // Π_v (128×128) — V cache, no split
+static float tq_rot_v_inv[TQ_DIM * TQ_DIM];
 
 // ---------------------------------------------------------------------------
 // Per-layer-per-head outlier channel registry (populated during calibration)
@@ -148,6 +154,7 @@ static void tq_init_rotations(void) {
     if (tq_initialized) return;
     tq_gen_orthogonal(tq_rot_hi_fwd, tq_rot_hi_inv, TQ_DIM_HI, 0x5475524230484932ULL); // "TuRB0HI2"
     tq_gen_orthogonal(tq_rot_lo_fwd, tq_rot_lo_inv, TQ_DIM_LO, 0x54755242304C4F36ULL); // "TuRB0LO6"
+    tq_gen_orthogonal(tq_rot_v_fwd, tq_rot_v_inv, TQ_DIM, 0x5475524230564131ULL);      // "TuRB0VA1"
     // Default outlier channels: first 32 (will be overridden by calibration)
     for (int i = 0; i < TQ_DIM_HI; i++) tq_outlier_ch[i] = i;
     for (int i = 0; i < TQ_DIM_LO; i++) tq_regular_ch[i] = TQ_DIM_HI + i;
@@ -201,18 +208,20 @@ static void tq_detect_outliers(const float * x) {
     tq_outliers_detected = 1;
 }
 
-// Extract hi/lo channel subsets from a 128-dim vector (uses per-layer-per-head registry)
+// Extract hi/lo channel subsets from a 128-dim vector
+// K cache: uses calibrated per-layer-per-head outlier channels
+// V cache: uses default fixed split (0-31 / 32-127) — V has no outliers (per RotateKV paper)
 static void tq_split_channels(const float * x, float * hi, float * lo) {
-    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[tq_cur_layer][tq_cur_head];
-    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[tq_cur_layer][tq_cur_head];
+    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[0][0];
+    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[0][0];
     for (int i = 0; i < TQ_DIM_HI; i++) hi[i] = x[outlier[i]];
     for (int i = 0; i < TQ_DIM_LO; i++) lo[i] = x[regular[i]];
 }
 
-// Merge hi/lo channel subsets back into 128-dim vector (uses per-layer-per-head registry)
+// Merge hi/lo channel subsets back into 128-dim vector
 static void tq_merge_channels(const float * hi, const float * lo, float * x) {
-    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[tq_cur_layer][tq_cur_head];
-    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[tq_cur_layer][tq_cur_head];
+    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[0][0];
+    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[0][0];
     for (int i = 0; i < TQ_DIM_HI; i++) x[outlier[i]] = hi[i];
     for (int i = 0; i < TQ_DIM_LO; i++) x[regular[i]] = lo[i];
 }
@@ -245,6 +254,22 @@ static void tq_unrotate_lo(const float * in, float * out) {
     for (int i = 0; i < TQ_DIM_LO; i++) {
         float sum = 0.0f;
         for (int j = 0; j < TQ_DIM_LO; j++) sum += tq_rot_lo_inv[i*TQ_DIM_LO+j] * in[j];
+        out[i] = sum;
+    }
+}
+
+// Rotate full 128-dim vector: out = Π_v * in (for V cache, no split)
+static void tq_rotate_v(const float * in, float * out) {
+    for (int i = 0; i < TQ_DIM; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < TQ_DIM; j++) sum += tq_rot_v_fwd[i*TQ_DIM+j] * in[j];
+        out[i] = sum;
+    }
+}
+static void tq_unrotate_v(const float * in, float * out) {
+    for (int i = 0; i < TQ_DIM; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < TQ_DIM; j++) sum += tq_rot_v_inv[i*TQ_DIM+j] * in[j];
         out[i] = sum;
     }
 }
@@ -646,8 +671,8 @@ void dequantize_row_tqk_35(const block_tqk_35 * GGML_RESTRICT x, float * GGML_RE
 }
 
 // ---------------------------------------------------------------------------
-// TQV 2.5: hi=3-bit MSE (centroids_8_d32), lo=2-bit MSE (centroids_4_d96)
-// Pure MSE reconstruction — no QJL. Ideal for V cache.
+// TQV 2.5: 128×128 rotation, no outlier split, d=128 centroids
+// hi=3-bit MSE (first 32 rotated channels), lo=2-bit MSE (last 96)
 // ---------------------------------------------------------------------------
 
 void quantize_row_tqv_25_ref(const float * GGML_RESTRICT x, block_tqv_25 * GGML_RESTRICT y, int64_t k) {
@@ -656,32 +681,28 @@ void quantize_row_tqv_25_ref(const float * GGML_RESTRICT x, block_tqv_25 * GGML_
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
-        const float * xb_orig = x + i * TQV_BLOCK_SIZE;
+        const float * xb = x + i * TQV_BLOCK_SIZE;
 
-        // Split into outlier (hi) and regular (lo) channel subsets (per-layer)
-        float hi_raw[TQV_N_OUTLIER], lo_raw[TQV_N_REGULAR];
-        tq_split_channels(xb_orig, hi_raw, lo_raw);
+        // Single norm for full vector
+        float norm = 0.0f;
+        for (int j = 0; j < TQ_DIM; j++) norm += xb[j] * xb[j];
+        norm = sqrtf(norm);
 
-        // Rotate each subset independently
-        float hi_rot[TQV_N_OUTLIER], lo_rot[TQV_N_REGULAR];
-        tq_rotate_hi(hi_raw, hi_rot);
-        tq_rotate_lo(lo_raw, lo_rot);
+        y[i].norm_hi = GGML_FP32_TO_FP16(norm);
+        y[i].norm_lo = GGML_FP32_TO_FP16(0.0f); // unused
 
-        float sum_hi = 0.0f, sum_lo = 0.0f;
-        for (int j = 0; j < TQV_N_OUTLIER; j++) sum_hi += hi_rot[j] * hi_rot[j];
-        for (int j = 0; j < TQV_N_REGULAR; j++) sum_lo += lo_rot[j] * lo_rot[j];
-        float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
+        if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
+        float inv = 1.0f / norm;
 
-        y[i].norm_hi = GGML_FP32_TO_FP16(norm_hi);
-        y[i].norm_lo = GGML_FP32_TO_FP16(norm_lo);
+        // Normalize and rotate full 128-dim vector
+        float xhat[TQ_DIM], rot[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) xhat[j] = xb[j] * inv;
+        tq_rotate_v(xhat, rot);
 
-        if (norm_hi == 0.0f && norm_lo == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
-        float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
-        float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
-
-        quant_hi_mse(hi_rot, inv_hi, y[i].qs_hi, centroids_8_d32, 8, 3, TQV_N_OUTLIER);
-        quant_lo_mse(lo_rot, inv_lo, y[i].qs_lo, centroids_4_d96, 4, 2, TQV_N_REGULAR, 0);
+        // Quantize: first 32 → qs_hi (3-bit, 8 centroids), last 96 → qs_lo (2-bit, 4 centroids)
+        // Both use d=128 centroids
+        quant_hi_mse(rot, 1.0f, y[i].qs_hi, centroids_8, 8, 3, TQV_N_OUTLIER);
+        quant_lo_mse(rot, 1.0f, y[i].qs_lo, centroids_4, 4, 2, TQV_N_REGULAR, TQV_N_OUTLIER);
     }
 }
 
@@ -691,25 +712,24 @@ void dequantize_row_tqv_25(const block_tqv_25 * GGML_RESTRICT x, float * GGML_RE
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
-        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
-        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float norm = GGML_FP16_TO_FP32(x[i].norm_hi);
 
-        float hi_rot[TQV_N_OUTLIER], lo_rot[TQV_N_REGULAR];
-        dequant_hi_mse(x[i].qs_hi, centroids_8_d32, 3, TQV_N_OUTLIER, norm_hi, hi_rot);
-        dequant_lo_mse(x[i].qs_lo, centroids_4_d96, 2, TQV_N_REGULAR, norm_lo, lo_rot, 0);
+        // Dequant: centroids → full 128-dim rotated vector
+        float rot[TQ_DIM];
+        dequant_hi_mse(x[i].qs_hi, centroids_8, 3, TQV_N_OUTLIER, 1.0f, rot);
+        dequant_lo_mse(x[i].qs_lo, centroids_4, 2, TQV_N_REGULAR, 1.0f, rot, TQV_N_OUTLIER);
 
-        // Unrotate each subset and merge back
-        float hi_orig[TQV_N_OUTLIER], lo_orig[TQV_N_REGULAR];
-        tq_unrotate_hi(hi_rot, hi_orig);
-        tq_unrotate_lo(lo_rot, lo_orig);
-        tq_merge_channels(hi_orig, lo_orig, y + i * TQV_BLOCK_SIZE);
+        // Unrotate full vector and scale by norm
+        float tmp[TQ_DIM];
+        tq_unrotate_v(rot, tmp);
+        for (int j = 0; j < TQ_DIM; j++) y[i * TQV_BLOCK_SIZE + j] = norm * tmp[j];
     }
 }
 
 // ---------------------------------------------------------------------------
-// TQV 3.5: hi=4-bit MSE (centroids_16, d=128 approx), lo=3-bit MSE (centroids_8_d96)
-// Pure MSE reconstruction — no QJL. Ideal for V cache.
+// TQV 3.5: 128×128 rotation, no outlier split, d=128 centroids
+// hi=4-bit MSE (first 32 rotated channels), lo=3-bit MSE (last 96)
+// Per RotateKV paper: V has no outliers, use simple offline rotation.
 // ---------------------------------------------------------------------------
 
 void quantize_row_tqv_35_ref(const float * GGML_RESTRICT x, block_tqv_35 * GGML_RESTRICT y, int64_t k) {
@@ -718,33 +738,28 @@ void quantize_row_tqv_35_ref(const float * GGML_RESTRICT x, block_tqv_35 * GGML_
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
-        const float * xb_orig = x + i * TQV_BLOCK_SIZE;
+        const float * xb = x + i * TQV_BLOCK_SIZE;
 
-        // Split into outlier (hi) and regular (lo) channel subsets (per-layer)
-        float hi_raw[TQV_N_OUTLIER], lo_raw[TQV_N_REGULAR];
-        tq_split_channels(xb_orig, hi_raw, lo_raw);
+        // Single norm for full vector
+        float norm = 0.0f;
+        for (int j = 0; j < TQ_DIM; j++) norm += xb[j] * xb[j];
+        norm = sqrtf(norm);
 
-        // Rotate each subset independently
-        float hi_rot[TQV_N_OUTLIER], lo_rot[TQV_N_REGULAR];
-        tq_rotate_hi(hi_raw, hi_rot);
-        tq_rotate_lo(lo_raw, lo_rot);
+        y[i].norm_hi = GGML_FP32_TO_FP16(norm);
+        y[i].norm_lo = GGML_FP32_TO_FP16(0.0f);
 
-        float sum_hi = 0.0f, sum_lo = 0.0f;
-        for (int j = 0; j < TQV_N_OUTLIER; j++) sum_hi += hi_rot[j] * hi_rot[j];
-        for (int j = 0; j < TQV_N_REGULAR; j++) sum_lo += lo_rot[j] * lo_rot[j];
-        float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
+        if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
+        float inv = 1.0f / norm;
 
-        y[i].norm_hi = GGML_FP32_TO_FP16(norm_hi);
-        y[i].norm_lo = GGML_FP32_TO_FP16(norm_lo);
+        // Normalize and rotate full 128-dim
+        float xhat[TQ_DIM], rot[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) xhat[j] = xb[j] * inv;
+        tq_rotate_v(xhat, rot);
 
-        if (norm_hi == 0.0f && norm_lo == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
-        float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
-        float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
-
-        // NOTE: centroids_16 is d=128 approximation; no d=32 table for 4-bit yet
-        quant_hi_mse(hi_rot, inv_hi, y[i].qs_hi, centroids_16, 16, 4, TQV_N_OUTLIER);
-        quant_lo_mse(lo_rot, inv_lo, y[i].qs_lo, centroids_8_d96, 8, 3, TQV_N_REGULAR, 0);
+        // Quantize: first 32 → qs_hi (4-bit, 16 centroids), last 96 → qs_lo (3-bit, 8 centroids)
+        // Both use d=128 centroids
+        quant_hi_mse(rot, 1.0f, y[i].qs_hi, centroids_16, 16, 4, TQV_N_OUTLIER);
+        quant_lo_mse(rot, 1.0f, y[i].qs_lo, centroids_8, 8, 3, TQV_N_REGULAR, TQV_N_OUTLIER);
     }
 }
 
@@ -754,20 +769,15 @@ void dequantize_row_tqv_35(const block_tqv_35 * GGML_RESTRICT x, float * GGML_RE
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
-        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
-        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float norm = GGML_FP16_TO_FP32(x[i].norm_hi);
 
-        float hi_rot[TQV_N_OUTLIER], lo_rot[TQV_N_REGULAR];
-        // NOTE: centroids_16 is d=128 approximation
-        dequant_hi_mse(x[i].qs_hi, centroids_16, 4, TQV_N_OUTLIER, norm_hi, hi_rot);
-        dequant_lo_mse(x[i].qs_lo, centroids_8_d96, 3, TQV_N_REGULAR, norm_lo, lo_rot, 0);
+        float rot[TQ_DIM];
+        dequant_hi_mse(x[i].qs_hi, centroids_16, 4, TQV_N_OUTLIER, 1.0f, rot);
+        dequant_lo_mse(x[i].qs_lo, centroids_8, 3, TQV_N_REGULAR, 1.0f, rot, TQV_N_OUTLIER);
 
-        // Unrotate each subset and merge back
-        float hi_orig[TQV_N_OUTLIER], lo_orig[TQV_N_REGULAR];
-        tq_unrotate_hi(hi_rot, hi_orig);
-        tq_unrotate_lo(lo_rot, lo_orig);
-        tq_merge_channels(hi_orig, lo_orig, y + i * TQV_BLOCK_SIZE);
+        float tmp[TQ_DIM];
+        tq_unrotate_v(rot, tmp);
+        for (int j = 0; j < TQ_DIM; j++) y[i * TQV_BLOCK_SIZE + j] = norm * tmp[j];
     }
 }
 

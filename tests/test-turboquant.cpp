@@ -846,16 +846,16 @@ static void paper_turbo_quantize(
     matvec_t(Pi, recon_rotated.data(), output, d);
 }
 
-// Paper-exact centroids (same as in ggml-turbo-quant.c)
+// Exact Lloyd-Max centroids for Beta(63.5, 63.5) on [-1,1], d=128 (computed with scipy)
 static const float paper_centroids_8[8] = {  // 3-bit MSE, d=128
-    -0.1883988281f, -0.1181421705f, -0.0665887043f, -0.0216082019f,
-     0.0216082019f,  0.0665887043f,  0.1181421705f,  0.1883988281f,
+    -0.1883971860f, -0.1181397670f, -0.0665856080f, -0.0216043106f,
+     0.0216043106f,  0.0665856080f,  0.1181397670f,  0.1883971860f,
 };
 static const float paper_centroids_4[4] = {  // 2-bit MSE, d=128
-    -0.1330458627f, -0.0399983984f, 0.0399983984f, 0.1330458627f,
+    -0.1330415202f, -0.0399915952f, 0.0399915952f, 0.1330415202f,
 };
 static const float paper_centroids_2[2] = {  // 1-bit MSE, d=128
-    -0.0707250243f, 0.0707250243f,
+    -0.0706615727f, 0.0706615727f,
 };
 
 // Full pipeline roundtrip: rotate → quantize → dequantize → inverse rotate

@@ -4935,8 +4935,8 @@ static void ggml_compute_forward_set_rows_f32(
         else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
         if (layer >= 0) {
             tq_set_current_layer(layer, is_k);
-            // Accumulate on thread 0 only (single-threaded, avoids races on accum buffers)
-            if (params->ith == 0 && tq_is_calibrating()) {
+            // Accumulate K only (V has no outliers per RotateKV paper)
+            if (params->ith == 0 && is_k && tq_is_calibrating()) {
                 for (int64_t i03 = 0; i03 < ne03; ++i03) {
                     for (int64_t i02 = 0; i02 < ne02; ++i02) {
                         for (int64_t i = 0; i < nr; ++i) {
