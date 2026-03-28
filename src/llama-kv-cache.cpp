@@ -212,16 +212,115 @@ llama_kv_cache::llama_kv_cache(
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
-    // TurboQuant: detect turbo types and warn that rotation is not yet initialized
+    // TurboQuant: allocate and initialize rotation matrix for quantization quality
     const bool uses_turbo = (type_k == GGML_TYPE_TURBO3_0_PROD || type_k == GGML_TYPE_TURBO4_0_PROD ||
                              type_v == GGML_TYPE_TURBO3_0_PROD || type_v == GGML_TYPE_TURBO4_0_PROD ||
                              type_k == GGML_TYPE_TURBO3_0_MSE || type_k == GGML_TYPE_TURBO4_0_MSE ||
                              type_v == GGML_TYPE_TURBO3_0_MSE || type_v == GGML_TYPE_TURBO4_0_MSE);
     if (uses_turbo) {
-        // TODO(TurboQuant): allocate and initialize 128x128 rotation matrices here
-        // turbo_rotation     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 128);
-        // turbo_rotation_inv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 128);
-        LLAMA_LOG_WARN("%s: TurboQuant KV cache types detected but rotation matrices not yet initialized (stub)\n", __func__);
+        const uint32_t head_dim = hparams.n_embd_head_k(0);
+        GGML_ASSERT(head_dim == 128 && "TurboQuant currently only supports head_dim=128");
+
+        // Use the first layer's buffer type for the rotation matrix
+        ggml_backend_buffer_type_t rot_buft = offload
+            ? ggml_backend_dev_buffer_type(model.dev_layer(0))
+            : ggml_backend_cpu_buffer_type();
+
+        // Create a dedicated context for rotation matrices (2 tensors)
+        ggml_init_params rot_params = {
+            /*.mem_size   =*/ 4u * ggml_tensor_overhead(),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context * rot_ctx = ggml_init(rot_params);
+        GGML_ASSERT(rot_ctx && "failed to create rotation matrix context");
+
+        // Allocate both Π and Π^T as separate contiguous tensors
+        // This avoids ggml_cont(ggml_transpose(...)) in the graph which creates transient tensors
+        turbo_rotation = ggml_new_tensor_2d(rot_ctx, GGML_TYPE_F32, head_dim, head_dim);
+        ggml_format_name(turbo_rotation, "turbo_rot");
+        turbo_rotation_inv = ggml_new_tensor_2d(rot_ctx, GGML_TYPE_F32, head_dim, head_dim);
+        ggml_format_name(turbo_rotation_inv, "turbo_rot_inv");
+
+        // Allocate buffer (or dummy buffer for no_alloc memory estimation pass)
+        ggml_backend_buffer_t rot_buf;
+        if (model.hparams.no_alloc) {
+            rot_buf = ggml_backend_buft_alloc_buffer(rot_buft, /*size =*/ 0);
+            for (ggml_tensor * t = ggml_get_first_tensor(rot_ctx); t != nullptr; t = ggml_get_next_tensor(rot_ctx, t)) {
+                t->buffer = rot_buf;
+            }
+        } else {
+            rot_buf = ggml_backend_alloc_ctx_tensors_from_buft(rot_ctx, rot_buft);
+            GGML_ASSERT(rot_buf && "failed to allocate rotation matrix buffer");
+        }
+
+        // Generate random orthogonal matrix on CPU, then upload (skip for no_alloc)
+        if (!model.hparams.no_alloc) {
+            const int d = head_dim;
+            std::vector<float> gaussian(d * d);
+            std::vector<float> Q_mat(d * d);
+
+            // Deterministic seed for reproducibility
+            uint64_t seed = 0x5475524230524F54ULL;  // "TuRB0ROT"
+            auto lcg_next = [&seed]() -> float {
+                seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+                float u1 = ((float)(uint32_t)(seed >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+                seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+                float u2 = ((float)(uint32_t)(seed >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+                return sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+            };
+
+            // Fill with i.i.d. Gaussians
+            for (int i = 0; i < d * d; i++) {
+                gaussian[i] = lcg_next();
+            }
+
+            // QR decomposition via modified Gram-Schmidt
+            // Result: Q_mat is a d×d orthogonal matrix (column-major)
+            for (int j = 0; j < d; j++) {
+                // Copy column j
+                for (int i = 0; i < d; i++) {
+                    Q_mat[j * d + i] = gaussian[j * d + i];
+                }
+                // Orthogonalize against previous columns
+                for (int k = 0; k < j; k++) {
+                    float dot = 0.0f;
+                    for (int i = 0; i < d; i++) {
+                        dot += Q_mat[k * d + i] * Q_mat[j * d + i];
+                    }
+                    for (int i = 0; i < d; i++) {
+                        Q_mat[j * d + i] -= dot * Q_mat[k * d + i];
+                    }
+                }
+                // Normalize
+                float norm = 0.0f;
+                for (int i = 0; i < d; i++) {
+                    norm += Q_mat[j * d + i] * Q_mat[j * d + i];
+                }
+                norm = sqrtf(norm);
+                for (int i = 0; i < d; i++) {
+                    Q_mat[j * d + i] /= norm;
+                }
+            }
+
+            // Upload Π to device
+            ggml_backend_tensor_set(turbo_rotation, Q_mat.data(), 0, d * d * sizeof(float));
+
+            // Compute and upload Π^T (column-major transpose)
+            std::vector<float> Q_mat_T(d * d);
+            for (int r = 0; r < d; r++) {
+                for (int c = 0; c < d; c++) {
+                    Q_mat_T[c * d + r] = Q_mat[r * d + c];
+                }
+            }
+            ggml_backend_tensor_set(turbo_rotation_inv, Q_mat_T.data(), 0, d * d * sizeof(float));
+        } // !no_alloc
+
+        // Store context + buffer for lifetime management
+        ctxs_bufs.emplace_back(ggml_context_ptr(rot_ctx), ggml_backend_buffer_ptr(rot_buf));
+
+        LLAMA_LOG_INFO("%s: TurboQuant rotation matrix initialized (%d x %d, %.1f KB)\n",
+                       __func__, head_dim, head_dim, head_dim * head_dim * sizeof(float) / 1024.0f);
     }
 }
 
@@ -2257,6 +2356,14 @@ ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) cons
 
 ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rot() const {
+    return kv->get_turbo_rot_forward();
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rot_inv() const {
+    return kv->get_turbo_rot_inverse();
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {

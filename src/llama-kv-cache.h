@@ -340,6 +340,10 @@ public:
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
 
+    // TurboQuant rotation matrices (nullptr if not using turbo types)
+    ggml_tensor * get_turbo_rot() const;
+    ggml_tensor * get_turbo_rot_inv() const;
+
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be layed out contiguously in memory
     //   - k_cur  [n_embd_head_k, n_head_k, n_tokens]
