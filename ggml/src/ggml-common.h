@@ -275,45 +275,77 @@ static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 
 //
 // Rotation (Π) is applied at graph level, not in block functions.
 
-// TURBO3_0: 2.5 bits/coord — two independent instances
+// TURBO3_0_PROD: 2.5 bits/coord — TurboQuant_prod, two independent instances
 //   32 outlier channels: TurboQuant_prod(b=3) → 2-bit MSE (4 centroids) + 1-bit QJL
 //   96 regular channels: TurboQuant_prod(b=2) → 1-bit MSE (2 centroids) + 1-bit QJL
 //   Data: (32*3 + 96*2)/128 = 2.25 bpv + norms
-#define QK_TURBO3       128
-#define QK_TURBO3_HI    32
-#define QK_TURBO3_LO    96
-#define QR_TURBO3_0     1
+#define QK_TURBO3_PROD       128
+#define QK_TURBO3_PROD_HI    32
+#define QK_TURBO3_PROD_LO    96
+#define QR_TURBO3_0_PROD     1
 typedef struct {
-    ggml_half norm;                          // 2 bytes: original vector L2 norm
-    ggml_half rnorm_hi;                      // 2 bytes: residual norm for outlier QJL (32-dim)
-    ggml_half rnorm_lo;                      // 2 bytes: residual norm for regular QJL (96-dim)
-    uint8_t   qs_hi[QK_TURBO3_HI * 2 / 8];  // 8 bytes: 2-bit MSE indices (32 outlier channels)
-    uint8_t   qs_lo[QK_TURBO3_LO / 8];      // 12 bytes: 1-bit MSE indices (96 regular channels)
-    uint8_t   signs_hi[QK_TURBO3_HI / 8];   // 4 bytes: 1-bit QJL signs (32-dim, own S matrix)
-    uint8_t   signs_lo[QK_TURBO3_LO / 8];   // 12 bytes: 1-bit QJL signs (96-dim, own S matrix)
-} block_turbo3_0;
-static_assert(sizeof(block_turbo3_0) == 3*sizeof(ggml_half) + QK_TURBO3_HI*2/8 + QK_TURBO3_LO/8 + QK_TURBO3_HI/8 + QK_TURBO3_LO/8, "wrong turbo3_0 block size/padding");
+    ggml_half norm;                                    // 2 bytes: original vector L2 norm
+    ggml_half rnorm_hi;                                // 2 bytes: residual norm for outlier QJL (32-dim)
+    ggml_half rnorm_lo;                                // 2 bytes: residual norm for regular QJL (96-dim)
+    uint8_t   qs_hi[QK_TURBO3_PROD_HI * 2 / 8];       // 8 bytes: 2-bit MSE indices (32 outlier channels)
+    uint8_t   qs_lo[QK_TURBO3_PROD_LO / 8];           // 12 bytes: 1-bit MSE indices (96 regular channels)
+    uint8_t   signs_hi[QK_TURBO3_PROD_HI / 8];        // 4 bytes: 1-bit QJL signs (32-dim, own S matrix)
+    uint8_t   signs_lo[QK_TURBO3_PROD_LO / 8];        // 12 bytes: 1-bit QJL signs (96-dim, own S matrix)
+} block_turbo3_0_prod;
+static_assert(sizeof(block_turbo3_0_prod) == 3*sizeof(ggml_half) + QK_TURBO3_PROD_HI*2/8 + QK_TURBO3_PROD_LO/8 + QK_TURBO3_PROD_HI/8 + QK_TURBO3_PROD_LO/8, "wrong turbo3_0_prod block size/padding");
 // Total: 42 bytes for 128 elements
 
-// TURBO4_0: 3.5 bpv — two independent instances, same structure as TURBO3_0
+// TURBO4_0_PROD: 3.5 bpv — TurboQuant_prod, two independent instances
 //   32 outlier channels: TurboQuant_prod(b=4) → 3-bit MSE (8 centroids) + 1-bit QJL
 //   96 regular channels: TurboQuant_prod(b=3) → 2-bit MSE (4 centroids) + 1-bit QJL
 //   Data: (32*4 + 96*3)/128 = 3.25 bpv + norms
-#define QK_TURBO4       128
-#define QK_TURBO4_HI    32
-#define QK_TURBO4_LO    96
-#define QR_TURBO4_0     1
+#define QK_TURBO4_PROD       128
+#define QK_TURBO4_PROD_HI    32
+#define QK_TURBO4_PROD_LO    96
+#define QR_TURBO4_0_PROD     1
 typedef struct {
-    ggml_half norm;                              // 2 bytes: original vector L2 norm
-    ggml_half rnorm_hi;                          // 2 bytes: residual norm for outlier QJL (32-dim)
-    ggml_half rnorm_lo;                          // 2 bytes: residual norm for regular QJL (96-dim)
-    uint8_t   qs_hi[QK_TURBO4_HI * 3 / 8];      // 12 bytes: 3-bit MSE indices (32 outlier channels)
-    uint8_t   qs_lo[QK_TURBO4_LO * 2 / 8];      // 24 bytes: 2-bit MSE indices (96 regular channels)
-    uint8_t   signs_hi[QK_TURBO4_HI / 8];       // 4 bytes: 1-bit QJL signs (32-dim, own S)
-    uint8_t   signs_lo[QK_TURBO4_LO / 8];       // 12 bytes: 1-bit QJL signs (96-dim, own S)
-} block_turbo4_0;
-static_assert(sizeof(block_turbo4_0) == 3*sizeof(ggml_half) + QK_TURBO4_HI*3/8 + QK_TURBO4_LO*2/8 + QK_TURBO4_HI/8 + QK_TURBO4_LO/8, "wrong turbo4_0 block size/padding");
+    ggml_half norm;                                    // 2 bytes: original vector L2 norm
+    ggml_half rnorm_hi;                                // 2 bytes: residual norm for outlier QJL (32-dim)
+    ggml_half rnorm_lo;                                // 2 bytes: residual norm for regular QJL (96-dim)
+    uint8_t   qs_hi[QK_TURBO4_PROD_HI * 3 / 8];       // 12 bytes: 3-bit MSE indices (32 outlier channels)
+    uint8_t   qs_lo[QK_TURBO4_PROD_LO * 2 / 8];       // 24 bytes: 2-bit MSE indices (96 regular channels)
+    uint8_t   signs_hi[QK_TURBO4_PROD_HI / 8];        // 4 bytes: 1-bit QJL signs (32-dim, own S)
+    uint8_t   signs_lo[QK_TURBO4_PROD_LO / 8];        // 12 bytes: 1-bit QJL signs (96-dim, own S)
+} block_turbo4_0_prod;
+static_assert(sizeof(block_turbo4_0_prod) == 3*sizeof(ggml_half) + QK_TURBO4_PROD_HI*3/8 + QK_TURBO4_PROD_LO*2/8 + QK_TURBO4_PROD_HI/8 + QK_TURBO4_PROD_LO/8, "wrong turbo4_0_prod block size/padding");
 // Total: 58 bytes for 128 elements = 3.625 bpv
+
+// TURBO3_0_MSE: TurboQuant_mse at ~2.4 bpv — pure MSE, no QJL (for V cache)
+//   32 outlier channels: 3-bit MSE (8 centroids)
+//   96 regular channels: 2-bit MSE (4 centroids)
+//   Data: (32*3 + 96*2)/128 = 2.25 bpv + norm
+#define QK_TURBO3_MSE       128
+#define QK_TURBO3_MSE_HI    32
+#define QK_TURBO3_MSE_LO    96
+#define QR_TURBO3_0_MSE     1
+typedef struct {
+    ggml_half norm;                                    // 2 bytes: original vector L2 norm
+    uint8_t   qs_hi[QK_TURBO3_MSE_HI * 3 / 8];       // 12 bytes: 3-bit MSE indices (32 outlier channels, 8 centroids)
+    uint8_t   qs_lo[QK_TURBO3_MSE_LO * 2 / 8];       // 24 bytes: 2-bit MSE indices (96 regular channels, 4 centroids)
+} block_turbo3_0_mse;
+static_assert(sizeof(block_turbo3_0_mse) == sizeof(ggml_half) + QK_TURBO3_MSE_HI*3/8 + QK_TURBO3_MSE_LO*2/8, "wrong turbo3_0_mse block size/padding");
+// Total: 38 bytes for 128 elements = 2.375 bpv
+
+// TURBO4_0_MSE: TurboQuant_mse at ~3.4 bpv — pure MSE, no QJL (for V cache)
+//   32 outlier channels: 4-bit MSE (16 centroids)
+//   96 regular channels: 3-bit MSE (8 centroids)
+//   Data: (32*4 + 96*3)/128 = 3.25 bpv + norm
+#define QK_TURBO4_MSE       128
+#define QK_TURBO4_MSE_HI    32
+#define QK_TURBO4_MSE_LO    96
+#define QR_TURBO4_0_MSE     1
+typedef struct {
+    ggml_half norm;                                    // 2 bytes: original vector L2 norm
+    uint8_t   qs_hi[QK_TURBO4_MSE_HI * 4 / 8];       // 16 bytes: 4-bit MSE indices (32 outlier channels, 16 centroids)
+    uint8_t   qs_lo[QK_TURBO4_MSE_LO * 3 / 8];       // 36 bytes: 3-bit MSE indices (96 regular channels, 8 centroids)
+} block_turbo4_0_mse;
+static_assert(sizeof(block_turbo4_0_mse) == sizeof(ggml_half) + QK_TURBO4_MSE_HI*4/8 + QK_TURBO4_MSE_LO*3/8, "wrong turbo4_0_mse block size/padding");
+// Total: 54 bytes for 128 elements = 3.375 bpv
 
 //
 // Super-block quantization structures

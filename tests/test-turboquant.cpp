@@ -181,30 +181,30 @@ static int test_format_sanity(void) {
     // TURBO3_0
     {
         bool ok = true;
-        ok = ok && (ggml_type_size(GGML_TYPE_TURBO3_0)  == 42);
-        ok = ok && (ggml_blck_size(GGML_TYPE_TURBO3_0)  == 128);
-        ok = ok && (ggml_is_quantized(GGML_TYPE_TURBO3_0));
-        ok = ok && (strcmp(ggml_type_name(GGML_TYPE_TURBO3_0), "turbo3_0") == 0);
-        printf("  turbo3_0 format: %s (size=%zu blck=%d name=%s)\n",
+        ok = ok && (ggml_type_size(GGML_TYPE_TURBO3_0_PROD)  == 42);
+        ok = ok && (ggml_blck_size(GGML_TYPE_TURBO3_0_PROD)  == 128);
+        ok = ok && (ggml_is_quantized(GGML_TYPE_TURBO3_0_PROD));
+        ok = ok && (strcmp(ggml_type_name(GGML_TYPE_TURBO3_0_PROD), "tqk_lo") == 0);
+        printf("  tqk_lo format: %s (size=%zu blck=%d name=%s)\n",
                RESULT_STR[!ok],
-               ggml_type_size(GGML_TYPE_TURBO3_0),
-               (int)ggml_blck_size(GGML_TYPE_TURBO3_0),
-               ggml_type_name(GGML_TYPE_TURBO3_0));
+               ggml_type_size(GGML_TYPE_TURBO3_0_PROD),
+               (int)ggml_blck_size(GGML_TYPE_TURBO3_0_PROD),
+               ggml_type_name(GGML_TYPE_TURBO3_0_PROD));
         if (!ok) failures++;
     }
 
     // TURBO4_0
     {
         bool ok = true;
-        ok = ok && (ggml_type_size(GGML_TYPE_TURBO4_0)  == 58);
-        ok = ok && (ggml_blck_size(GGML_TYPE_TURBO4_0)  == 128);
-        ok = ok && (ggml_is_quantized(GGML_TYPE_TURBO4_0));
-        ok = ok && (strcmp(ggml_type_name(GGML_TYPE_TURBO4_0), "turbo4_0") == 0);
-        printf("  turbo4_0 format: %s (size=%zu blck=%d name=%s)\n",
+        ok = ok && (ggml_type_size(GGML_TYPE_TURBO4_0_PROD)  == 58);
+        ok = ok && (ggml_blck_size(GGML_TYPE_TURBO4_0_PROD)  == 128);
+        ok = ok && (ggml_is_quantized(GGML_TYPE_TURBO4_0_PROD));
+        ok = ok && (strcmp(ggml_type_name(GGML_TYPE_TURBO4_0_PROD), "tqk_hi") == 0);
+        printf("  tqk_hi format: %s (size=%zu blck=%d name=%s)\n",
                RESULT_STR[!ok],
-               ggml_type_size(GGML_TYPE_TURBO4_0),
-               (int)ggml_blck_size(GGML_TYPE_TURBO4_0),
-               ggml_type_name(GGML_TYPE_TURBO4_0));
+               ggml_type_size(GGML_TYPE_TURBO4_0_PROD),
+               (int)ggml_blck_size(GGML_TYPE_TURBO4_0_PROD),
+               ggml_type_name(GGML_TYPE_TURBO4_0_PROD));
         if (!ok) failures++;
     }
 
@@ -223,7 +223,7 @@ static int test_zero_vector(void) {
     {
         const int n = 128;
         std::vector<float> zeros(n, 0.0f);
-        auto r = do_roundtrip(GGML_TYPE_TURBO3_0, zeros.data(), n);
+        auto r = do_roundtrip(GGML_TYPE_TURBO3_0_PROD, zeros.data(), n);
         bool ok = (r.rmse_val == 0.0f) && !r.has_bad;
         printf("  turbo3_0 zero: %s (rmse=%e)\n", RESULT_STR[!ok], r.rmse_val);
         if (!ok) failures++;
@@ -233,7 +233,7 @@ static int test_zero_vector(void) {
     {
         const int n = 128;
         std::vector<float> zeros(n, 0.0f);
-        auto r = do_roundtrip(GGML_TYPE_TURBO4_0, zeros.data(), n);
+        auto r = do_roundtrip(GGML_TYPE_TURBO4_0_PROD, zeros.data(), n);
         bool ok = (r.rmse_val == 0.0f) && !r.has_bad;
         printf("  turbo4_0 zero: %s (rmse=%e)\n", RESULT_STR[!ok], r.rmse_val);
         if (!ok) failures++;
@@ -267,8 +267,8 @@ static int test_determinism(void) {
         if (!ok) failures++;
     };
 
-    check_determinism(GGML_TYPE_TURBO3_0, 128 * 4);
-    check_determinism(GGML_TYPE_TURBO4_0, 128 * 2);
+    check_determinism(GGML_TYPE_TURBO3_0_PROD, 128 * 4);
+    check_determinism(GGML_TYPE_TURBO4_0_PROD, 128 * 2);
     return failures;
 }
 
@@ -355,14 +355,14 @@ static int test_roundtrip_distributions(bool verbose) {
         }
 
         // TURBO3_0
-        auto r3 = do_roundtrip(GGML_TYPE_TURBO3_0, data_t3.data(), n_t3);
+        auto r3 = do_roundtrip(GGML_TYPE_TURBO3_0_PROD, data_t3.data(), n_t3);
         bool ok3 = (r3.rel_l2 < tests[t].threshold_rel_l2_t3) &&
                    (r3.cos_sim > tests[t].threshold_cos_t3) &&
                    !r3.has_bad;
         if (!ok3) failures++;
 
         // TURBO4_0
-        auto r4 = do_roundtrip(GGML_TYPE_TURBO4_0, data_t4.data(), n_t4);
+        auto r4 = do_roundtrip(GGML_TYPE_TURBO4_0_PROD, data_t4.data(), n_t4);
         bool ok4 = (r4.rel_l2 < tests[t].threshold_rel_l2_t4) &&
                    (r4.cos_sim > tests[t].threshold_cos_t4) &&
                    !r4.has_bad;
@@ -427,7 +427,7 @@ static int test_score_error(bool verbose) {
         // For TurboQuant on unit-norm Gaussian vectors, mean score error should be small
         // Paper: i.i.d. Gaussian QJL adds reconstruction noise but preserves inner products
         // Thresholds derived from theoretical MSE + QJL variance
-        float threshold_mean = (type == GGML_TYPE_TURBO3_0) ? 0.10f : 0.05f;
+        float threshold_mean = (type == GGML_TYPE_TURBO3_0_PROD) ? 0.10f : 0.05f;
         bool ok = (mean_err < threshold_mean);
         if (!ok) failures++;
 
@@ -439,8 +439,8 @@ static int test_score_error(bool verbose) {
         (void)verbose;
     };
 
-    test_score(GGML_TYPE_TURBO3_0, 128);
-    test_score(GGML_TYPE_TURBO4_0, 128);
+    test_score(GGML_TYPE_TURBO3_0_PROD, 128);
+    test_score(GGML_TYPE_TURBO4_0_PROD, 128);
 
     return failures;
 }
@@ -493,8 +493,8 @@ static int test_multiblock(void) {
                r.rel_l2, min_block_err, max_block_err);
     };
 
-    test_mb(GGML_TYPE_TURBO3_0, 128, 32);
-    test_mb(GGML_TYPE_TURBO4_0, 128, 32);
+    test_mb(GGML_TYPE_TURBO3_0_PROD, 128, 32);
+    test_mb(GGML_TYPE_TURBO4_0_PROD, 128, 32);
     return failures;
 }
 
@@ -516,7 +516,7 @@ static int test_norm_preservation(void) {
         }
 
         auto r = do_roundtrip(type, data.data(), n);
-        float norm_tol = (type == GGML_TYPE_TURBO3_0) ? 0.25f : 0.15f;
+        float norm_tol = (type == GGML_TYPE_TURBO3_0_PROD) ? 0.25f : 0.15f;
         bool ok = (fabsf(r.norm_ratio - 1.0f) < norm_tol) && !r.has_bad;
         if (!ok) failures++;
 
@@ -524,8 +524,8 @@ static int test_norm_preservation(void) {
                ggml_type_name(type), RESULT_STR[!ok], r.norm_ratio);
     };
 
-    test_np(GGML_TYPE_TURBO3_0, 128, 8);
-    test_np(GGML_TYPE_TURBO4_0, 128, 8);
+    test_np(GGML_TYPE_TURBO3_0_PROD, 128, 8);
+    test_np(GGML_TYPE_TURBO4_0_PROD, 128, 8);
     return failures;
 }
 
@@ -546,9 +546,9 @@ static int test_bit_packing(void) {
         for (int j = 0; j < n; j++) data[j] = prng_gaussian();
         for (int j = 0; j < n; j++) query[j] = prng_gaussian() * 0.1f;
 
-        auto r = do_roundtrip(GGML_TYPE_TURBO3_0, data, n);
+        auto r = do_roundtrip(GGML_TYPE_TURBO3_0_PROD, data, n);
 
-        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO3_0);
+        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO3_0_PROD);
         std::vector<uint8_t> qbuf(traits->type_size);
         float recon[128];
         traits->from_float_ref(data, qbuf.data(), n);
@@ -574,9 +574,9 @@ static int test_bit_packing(void) {
         for (int j = 0; j < n; j++) data[j] = prng_gaussian();
         for (int j = 0; j < n; j++) query[j] = prng_gaussian() * 0.1f;
 
-        auto r = do_roundtrip(GGML_TYPE_TURBO4_0, data, n);
+        auto r = do_roundtrip(GGML_TYPE_TURBO4_0_PROD, data, n);
 
-        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO4_0);
+        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO4_0_PROD);
         std::vector<uint8_t> qbuf(traits->type_size);
         float recon[128];
         traits->from_float_ref(data, qbuf.data(), n);
@@ -951,8 +951,8 @@ static int test_kv_cache_simulation(bool /*verbose*/) {
         bool  require_rotation_helps;
     };
     type_config types[] = {
-        { GGML_TYPE_TURBO3_0, 0.090f, false },  // paper: "marginal degradation" at 2.5 bpv (rotation may not help with small QJL dims)
-        { GGML_TYPE_TURBO4_0, 0.045f, true },  // paper: "quality neutral" at 3.5 bpw (3.75 total)
+        { GGML_TYPE_TURBO3_0_PROD, 0.090f, false },  // paper: "marginal degradation" at 2.5 bpv (rotation may not help with small QJL dims)
+        { GGML_TYPE_TURBO4_0_PROD, 0.045f, true },  // paper: "quality neutral" at 3.5 bpw (3.75 total)
     };
 
     const int n_vectors_per_dist = 200;
@@ -1108,13 +1108,13 @@ static int test_comparison(bool /*verbose*/) {
     // Use the actual KV cache types from llama.cpp --cache-type-k/v
     comparison comparisons[] = {
         // TURBO3_0 (2.5 bpv) — very aggressive, compare vs nearest KV cache types
-        { GGML_TYPE_TURBO3_0, "turbo3_0", 2.63f, GGML_TYPE_Q4_0,  "q4_0",  4.50f },
-        { GGML_TYPE_TURBO3_0, "turbo3_0", 2.63f, GGML_TYPE_Q8_0,  "q8_0",  8.50f },
+        { GGML_TYPE_TURBO3_0_PROD, "turbo3_0", 2.63f, GGML_TYPE_Q4_0,  "q4_0",  4.50f },
+        { GGML_TYPE_TURBO3_0_PROD, "turbo3_0", 2.63f, GGML_TYPE_Q8_0,  "q8_0",  8.50f },
         // TURBO4_0 (3.5 bpv) — the key claim: q4_0-level quality at 22% less storage
-        { GGML_TYPE_TURBO4_0, "turbo4_0", 3.63f, GGML_TYPE_Q4_0,  "q4_0",  4.50f },
-        { GGML_TYPE_TURBO4_0, "turbo4_0", 3.63f, GGML_TYPE_Q4_1,  "q4_1",  5.00f },
-        { GGML_TYPE_TURBO4_0, "turbo4_0", 3.63f, GGML_TYPE_Q5_0,  "q5_0",  5.50f },
-        { GGML_TYPE_TURBO4_0, "turbo4_0", 3.63f, GGML_TYPE_Q8_0,  "q8_0",  8.50f },
+        { GGML_TYPE_TURBO4_0_PROD, "turbo4_0", 3.63f, GGML_TYPE_Q4_0,  "q4_0",  4.50f },
+        { GGML_TYPE_TURBO4_0_PROD, "turbo4_0", 3.63f, GGML_TYPE_Q4_1,  "q4_1",  5.00f },
+        { GGML_TYPE_TURBO4_0_PROD, "turbo4_0", 3.63f, GGML_TYPE_Q5_0,  "q5_0",  5.50f },
+        { GGML_TYPE_TURBO4_0_PROD, "turbo4_0", 3.63f, GGML_TYPE_Q8_0,  "q8_0",  8.50f },
     };
     const int n_comparisons = sizeof(comparisons) / sizeof(comparisons[0]);
 
@@ -1468,8 +1468,8 @@ static int test_attention_fidelity(bool /*verbose*/) {
     };
     // Actual KV cache types from llama.cpp --cache-type-k/v, sorted by bpv
     type_entry types[] = {
-        { GGML_TYPE_TURBO3_0, "turbo3_0", 2.63f, true  },
-        { GGML_TYPE_TURBO4_0, "turbo4_0", 3.63f, true  },
+        { GGML_TYPE_TURBO3_0_PROD, "turbo3_0", 2.63f, true  },
+        { GGML_TYPE_TURBO4_0_PROD, "turbo4_0", 3.63f, true  },
         { GGML_TYPE_Q4_0,     "q4_0",     4.50f, false },
         { GGML_TYPE_Q4_1,     "q4_1",     5.00f, false },
         { GGML_TYPE_Q5_0,     "q5_0",     5.50f, false },
@@ -1564,6 +1564,644 @@ static int test_attention_fidelity(bool /*verbose*/) {
 }
 
 // ---------------------------------------------------------------------------
+// Test K2: Long-context stress test
+// ---------------------------------------------------------------------------
+
+static int test_long_context(bool /*verbose*/) {
+    int failures = 0;
+    printf("\n=== Test K2: Long-context stress (softmax_KL vs sequence length) ===\n");
+
+    const int d = 128;
+    const int n_queries = 50;
+    const int seq_lengths[] = { 64, 256, 1024, 4096 };
+    const int n_seq = sizeof(seq_lengths) / sizeof(seq_lengths[0]);
+
+    struct method_entry {
+        const char * name;
+        float bpv;
+        ggml_type type;
+        bool is_turbo;
+    };
+    method_entry methods[] = {
+        { "turbo3_0", 2.63f, GGML_TYPE_TURBO3_0_PROD, true  },
+        { "turbo4_0", 3.63f, GGML_TYPE_TURBO4_0_PROD, true  },
+        { "q4_0",     4.50f, GGML_TYPE_Q4_0,     false },
+        { "q5_0",     5.50f, GGML_TYPE_Q5_0,     false },
+        { "q8_0",     8.50f, GGML_TYPE_Q8_0,     false },
+    };
+    const int n_methods = sizeof(methods) / sizeof(methods[0]);
+
+    // QR rotation for turbo types
+    prng_seed(314159);
+    std::vector<float> Q_rot(d * d);
+    gen_random_orthogonal(Q_rot.data(), d);
+
+    for (int i = 0; i < GGML_TYPE_COUNT; i++) {
+        ggml_quantize_init((ggml_type)i);
+    }
+
+    printf("  %10s %5s |", "type", "bpv");
+    for (int s = 0; s < n_seq; s++) printf("  %5d keys", seq_lengths[s]);
+    printf("\n  ----------------+");
+    for (int s = 0; s < n_seq; s++) printf("------------");
+    printf("\n");
+
+    for (int mi = 0; mi < n_methods; mi++) {
+        auto & m = methods[mi];
+        const auto * traits = ggml_get_type_traits(m.type);
+        const auto * traits_cpu = ggml_get_type_traits_cpu(m.type);
+
+        if (!m.is_turbo && (!traits_cpu->from_float || !traits->to_float || d % traits->blck_size != 0))
+            continue;
+
+        printf("  %10s %4.1fb |", m.name, m.bpv);
+
+        for (int si = 0; si < n_seq; si++) {
+            int n_keys = seq_lengths[si];
+
+            prng_seed(88880000 + si * 1000);
+            std::vector<float> keys(n_keys * d);
+            for (int k = 0; k < n_keys; k++) {
+                float ns = 0.5f + prng_uniform(0.0f, 2.0f);
+                switch (k % 6) {
+                    case 0: gen_kv_lognormal_outlier(keys.data()+k*d, d, ns); break;
+                    case 1: gen_kv_powerlaw(keys.data()+k*d, d, ns); break;
+                    case 2: gen_kv_correlated(keys.data()+k*d, d, ns); break;
+                    case 3: gen_kv_heavy_tail(keys.data()+k*d, d, ns); break;
+                    case 4: gen_kv_sparse(keys.data()+k*d, d, ns); break;
+                    case 5: gen_kv_asymmetric(keys.data()+k*d, d, ns); break;
+                }
+            }
+
+            size_t qsz = traits->type_size;
+            std::vector<std::vector<float>> rkeys(n_keys, std::vector<float>(d));
+
+            for (int k = 0; k < n_keys; k++) {
+                if (m.is_turbo) {
+                    std::vector<float> rot(d), deq(d);
+                    std::vector<uint8_t> qb(qsz);
+                    rotate_qr(keys.data()+k*d, rot.data(), Q_rot.data(), d);
+                    traits->from_float_ref(rot.data(), qb.data(), d);
+                    traits->to_float(qb.data(), deq.data(), d);
+                    rotate_qr_inv(deq.data(), rkeys[k].data(), Q_rot.data(), d);
+                } else {
+                    size_t qs = (size_t)(d / traits->blck_size) * traits->type_size;
+                    std::vector<uint8_t> qb(qs);
+                    traits_cpu->from_float(keys.data()+k*d, qb.data(), d);
+                    traits->to_float(qb.data(), rkeys[k].data(), d);
+                }
+            }
+
+            double sum_kl = 0.0;
+            prng_seed(99990000 + si);
+            for (int q = 0; q < n_queries; q++) {
+                std::vector<float> query(d);
+                gen_gaussian_normalized(query.data(), d, 1.0f);
+
+                std::vector<float> so(n_keys), sq(n_keys);
+                for (int k = 0; k < n_keys; k++) {
+                    so[k] = vec_dot(query.data(), keys.data()+k*d, d);
+                    sq[k] = vec_dot(query.data(), rkeys[k].data(), d);
+                }
+                float sc = 1.0f / sqrtf((float)d);
+                std::vector<float> ao(n_keys), aq(n_keys);
+                for (int k = 0; k < n_keys; k++) { ao[k] = so[k]*sc; aq[k] = sq[k]*sc; }
+                softmax(ao.data(), n_keys);
+                softmax(aq.data(), n_keys);
+                sum_kl += kl_divergence(ao.data(), aq.data(), n_keys);
+            }
+            printf("  %10.6f", (float)(sum_kl / n_queries));
+        }
+        printf("\n");
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test K3: Adversarial flat-attention stress test
+// ---------------------------------------------------------------------------
+// Create keys that are deliberately close in score so softmax must distinguish
+// small differences. This mimics scenarios where multiple tokens are equally
+// relevant (e.g., multi-document QA, long-range dependencies).
+
+static int test_adversarial_attention(bool /*verbose*/) {
+    int failures = 0;
+    printf("\n=== Test K3: Adversarial flat-attention stress test ===\n");
+
+    const int d = 128;
+    const int n_queries = 100;
+
+    struct method_entry {
+        const char * name;
+        float bpv;
+        ggml_type type;
+        bool is_turbo;
+    };
+    method_entry methods[] = {
+        { "turbo3_0", 2.63f, GGML_TYPE_TURBO3_0_PROD, true  },
+        { "turbo4_0", 3.63f, GGML_TYPE_TURBO4_0_PROD, true  },
+        { "q4_0",     4.50f, GGML_TYPE_Q4_0,     false },
+        { "q5_0",     5.50f, GGML_TYPE_Q5_0,     false },
+        { "q8_0",     8.50f, GGML_TYPE_Q8_0,     false },
+    };
+    const int n_methods = sizeof(methods) / sizeof(methods[0]);
+
+    // QR rotation for turbo types
+    prng_seed(314159);
+    std::vector<float> Q_rot(d * d);
+    gen_random_orthogonal(Q_rot.data(), d);
+
+    for (int i = 0; i < GGML_TYPE_COUNT; i++) {
+        ggml_quantize_init((ggml_type)i);
+    }
+
+    // Scenarios with increasing difficulty
+    struct scenario {
+        const char * name;
+        int n_keys;
+        float noise;       // how much to perturb keys from the base direction
+        int n_needles;     // how many "target" keys to plant
+    };
+    scenario scenarios[] = {
+        { "easy (10 random keys)",            10,   1.0f,   1 },
+        { "medium (100 similar keys)",       100,   0.1f,   1 },
+        { "hard (1000 similar keys)",       1000,   0.05f,  1 },
+        { "needle (1000 keys, 3 needles)",  1000,   0.05f,  3 },
+        { "flat (256 near-identical keys)",  256,   0.01f,  1 },
+    };
+    const int n_scenarios = sizeof(scenarios) / sizeof(scenarios[0]);
+
+    for (int si = 0; si < n_scenarios; si++) {
+        auto & sc = scenarios[si];
+        printf("\n  Scenario: %s\n", sc.name);
+        printf("  %10s %5s |  softmax_KL  top1_acc  needle_in_top5\n", "type", "bpv");
+        printf("  ----------------+--------------------------------------\n");
+
+        // Generate keys: mostly similar, with a few "needle" keys
+        prng_seed(55550000 + si * 1000);
+
+        // Base direction (all keys are near this)
+        std::vector<float> base_dir(d);
+        gen_gaussian_normalized(base_dir.data(), d, 1.0f);
+
+        std::vector<float> keys(sc.n_keys * d);
+        // Most keys: base_dir + small noise
+        for (int k = 0; k < sc.n_keys; k++) {
+            for (int j = 0; j < d; j++) {
+                keys[k*d + j] = base_dir[j] + sc.noise * prng_gaussian();
+            }
+            // Normalize to unit norm
+            float nrm = vec_norm(keys.data() + k*d, d);
+            if (nrm > 1e-12f) {
+                for (int j = 0; j < d; j++) keys[k*d + j] /= nrm;
+            }
+        }
+
+        // Plant needles: keys that are slightly more aligned with the query
+        // The query will be base_dir + small perturbation, so needles should
+        // score slightly higher than the background
+        std::vector<int> needle_ids;
+        for (int n = 0; n < sc.n_needles; n++) {
+            int nid = prng_next() % sc.n_keys;
+            needle_ids.push_back(nid);
+            // Make this key 5% more aligned with base_dir
+            for (int j = 0; j < d; j++) {
+                keys[nid*d + j] = base_dir[j] * 1.05f + sc.noise * 0.5f * prng_gaussian();
+            }
+            float nrm = vec_norm(keys.data() + nid*d, d);
+            if (nrm > 1e-12f) {
+                for (int j = 0; j < d; j++) keys[nid*d + j] /= nrm;
+            }
+        }
+
+        for (int mi = 0; mi < n_methods; mi++) {
+            auto & m = methods[mi];
+            const auto * traits = ggml_get_type_traits(m.type);
+            const auto * traits_cpu = ggml_get_type_traits_cpu(m.type);
+
+            if (!m.is_turbo && (!traits_cpu->from_float || !traits->to_float || d % traits->blck_size != 0))
+                continue;
+
+            // Quantize all keys
+            size_t qsz = traits->type_size;
+            std::vector<std::vector<float>> rkeys(sc.n_keys, std::vector<float>(d));
+            for (int k = 0; k < sc.n_keys; k++) {
+                if (m.is_turbo) {
+                    std::vector<float> rot(d), deq(d);
+                    std::vector<uint8_t> qb(qsz);
+                    rotate_qr(keys.data()+k*d, rot.data(), Q_rot.data(), d);
+                    traits->from_float_ref(rot.data(), qb.data(), d);
+                    traits->to_float(qb.data(), deq.data(), d);
+                    rotate_qr_inv(deq.data(), rkeys[k].data(), Q_rot.data(), d);
+                } else {
+                    size_t qs = (size_t)(d / traits->blck_size) * traits->type_size;
+                    std::vector<uint8_t> qb(qs);
+                    traits_cpu->from_float(keys.data()+k*d, qb.data(), d);
+                    traits->to_float(qb.data(), rkeys[k].data(), d);
+                }
+            }
+
+            // Test with queries that are slight perturbations of base_dir
+            double sum_kl = 0.0;
+            int top1_correct = 0;
+            int needle_in_top5 = 0;
+
+            prng_seed(77770000 + si);
+            for (int q = 0; q < n_queries; q++) {
+                std::vector<float> query(d);
+                // Query = base_dir + small perturbation (so all keys score similarly)
+                for (int j = 0; j < d; j++) {
+                    query[j] = base_dir[j] + sc.noise * 0.3f * prng_gaussian();
+                }
+                float qnrm = vec_norm(query.data(), d);
+                for (int j = 0; j < d; j++) query[j] /= qnrm;
+
+                std::vector<float> so(sc.n_keys), sq(sc.n_keys);
+                for (int k = 0; k < sc.n_keys; k++) {
+                    so[k] = vec_dot(query.data(), keys.data()+k*d, d);
+                    sq[k] = vec_dot(query.data(), rkeys[k].data(), d);
+                }
+
+                // Softmax KL
+                float scale = 1.0f / sqrtf((float)d);
+                std::vector<float> ao(sc.n_keys), aq(sc.n_keys);
+                for (int k = 0; k < sc.n_keys; k++) { ao[k] = so[k]*scale; aq[k] = sq[k]*scale; }
+                softmax(ao.data(), sc.n_keys);
+                softmax(aq.data(), sc.n_keys);
+                sum_kl += kl_divergence(ao.data(), aq.data(), sc.n_keys);
+
+                // Top-1 accuracy
+                int am_o = 0, am_q = 0;
+                for (int k = 1; k < sc.n_keys; k++) {
+                    if (so[k] > so[am_o]) am_o = k;
+                    if (sq[k] > sq[am_q]) am_q = k;
+                }
+                if (am_o == am_q) top1_correct++;
+
+                // Needle retrieval: is any needle in the top-5 of quantized scores?
+                // (Check if any needle that was in orig top-5 is also in quant top-5)
+                std::vector<int> top5_orig(sc.n_keys), top5_quant(sc.n_keys);
+                for (int k = 0; k < sc.n_keys; k++) { top5_orig[k] = k; top5_quant[k] = k; }
+                std::partial_sort(top5_orig.begin(), top5_orig.begin()+5, top5_orig.end(),
+                    [&](int a, int b) { return so[a] > so[b]; });
+                std::partial_sort(top5_quant.begin(), top5_quant.begin()+5, top5_quant.end(),
+                    [&](int a, int b) { return sq[a] > sq[b]; });
+
+                for (int ni = 0; ni < (int)needle_ids.size(); ni++) {
+                    bool in_orig_top5 = false, in_quant_top5 = false;
+                    for (int t = 0; t < 5 && t < sc.n_keys; t++) {
+                        if (top5_orig[t] == needle_ids[ni]) in_orig_top5 = true;
+                        if (top5_quant[t] == needle_ids[ni]) in_quant_top5 = true;
+                    }
+                    if (in_orig_top5 && in_quant_top5) needle_in_top5++;
+                }
+            }
+
+            float mean_kl = (float)(sum_kl / n_queries);
+            float top1 = (float)top1_correct / n_queries * 100.0f;
+            float needle_pct = (float)needle_in_top5 / (n_queries * (int)needle_ids.size()) * 100.0f;
+
+            printf("  %10s %4.1fb |  %10.6f   %5.1f%%     %5.1f%%\n",
+                   m.name, m.bpv, mean_kl, top1, needle_pct);
+        }
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test K4: Seed sweep — test sensitivity to S and rotation randomness
+// ---------------------------------------------------------------------------
+// The unbiasedness theorem is over the randomness of S. A single fixed S
+// may have bad realizations. Sweep seeds to check if results are stable.
+
+static int test_seed_sweep(bool /*verbose*/) {
+    int failures = 0;
+    printf("\n=== Test K4: Seed sweep (20 seeds for S and rotation) ===\n");
+
+    const int d = 128;
+    const int n_keys = 1000;
+    const int n_queries = 50;
+    const int n_seeds = 20;
+    const float noise = 0.05f;  // hard scenario from K3
+
+    struct method_entry {
+        const char * name;
+        float bpv;
+        ggml_type type;
+        bool is_turbo;
+    };
+    method_entry methods[] = {
+        { "turbo4_0", 3.63f, GGML_TYPE_TURBO4_0_PROD, true  },
+        { "q4_0",     4.50f, GGML_TYPE_Q4_0,     false },
+    };
+    const int n_methods = sizeof(methods) / sizeof(methods[0]);
+
+    for (int i = 0; i < GGML_TYPE_COUNT; i++) {
+        ggml_quantize_init((ggml_type)i);
+    }
+
+    printf("  Hard scenario: %d similar keys, noise=%.2f, needle 5%% stronger\n", n_keys, noise);
+    printf("  Sweeping %d seeds for rotation + QJL matrix\n\n", n_seeds);
+
+    for (int mi = 0; mi < n_methods; mi++) {
+        auto & m = methods[mi];
+        const auto * traits = ggml_get_type_traits(m.type);
+        const auto * traits_cpu = ggml_get_type_traits_cpu(m.type);
+
+        if (!m.is_turbo && (!traits_cpu->from_float || !traits->to_float || d % traits->blck_size != 0))
+            continue;
+
+        printf("  %s (%.1f bpv):\n", m.name, m.bpv);
+        printf("    seed | top1_acc  needle_top5  softmax_KL\n");
+        printf("    -----+-----------------------------------\n");
+
+        float sum_top1 = 0, sum_needle = 0;
+        double sum_kl = 0;
+
+        for (int seed = 0; seed < n_seeds; seed++) {
+            // Generate fresh rotation for each seed (turbo only)
+            prng_seed(1000000 + seed * 7919);
+            std::vector<float> Q_rot(d * d);
+            if (m.is_turbo) {
+                gen_random_orthogonal(Q_rot.data(), d);
+            }
+
+            // Generate keys: mostly similar, one needle
+            prng_seed(2000000 + seed * 6271);
+            std::vector<float> base_dir(d);
+            gen_gaussian_normalized(base_dir.data(), d, 1.0f);
+
+            std::vector<float> keys(n_keys * d);
+            for (int k = 0; k < n_keys; k++) {
+                for (int j = 0; j < d; j++) {
+                    keys[k*d + j] = base_dir[j] + noise * prng_gaussian();
+                }
+                float nrm = vec_norm(keys.data() + k*d, d);
+                for (int j = 0; j < d; j++) keys[k*d + j] /= nrm;
+            }
+            // Plant needle
+            int needle_id = prng_next() % n_keys;
+            for (int j = 0; j < d; j++) {
+                keys[needle_id*d + j] = base_dir[j] * 1.05f + noise * 0.5f * prng_gaussian();
+            }
+            float nrm = vec_norm(keys.data() + needle_id*d, d);
+            for (int j = 0; j < d; j++) keys[needle_id*d + j] /= nrm;
+
+            // Quantize keys
+            size_t qsz = traits->type_size;
+            std::vector<std::vector<float>> rkeys(n_keys, std::vector<float>(d));
+            for (int k = 0; k < n_keys; k++) {
+                if (m.is_turbo) {
+                    std::vector<float> rot(d), deq(d);
+                    std::vector<uint8_t> qb(qsz);
+                    rotate_qr(keys.data()+k*d, rot.data(), Q_rot.data(), d);
+                    traits->from_float_ref(rot.data(), qb.data(), d);
+                    traits->to_float(qb.data(), deq.data(), d);
+                    rotate_qr_inv(deq.data(), rkeys[k].data(), Q_rot.data(), d);
+                } else {
+                    size_t qs = (size_t)(d / traits->blck_size) * traits->type_size;
+                    std::vector<uint8_t> qb(qs);
+                    traits_cpu->from_float(keys.data()+k*d, qb.data(), d);
+                    traits->to_float(qb.data(), rkeys[k].data(), d);
+                }
+            }
+
+            int top1_ok = 0, needle_ok = 0;
+            double seed_kl = 0;
+            prng_seed(3000000 + seed * 4111);
+            for (int q = 0; q < n_queries; q++) {
+                std::vector<float> query(d);
+                for (int j = 0; j < d; j++) query[j] = base_dir[j] + noise * 0.3f * prng_gaussian();
+                float qn = vec_norm(query.data(), d);
+                for (int j = 0; j < d; j++) query[j] /= qn;
+
+                std::vector<float> so(n_keys), sq(n_keys);
+                for (int k = 0; k < n_keys; k++) {
+                    so[k] = vec_dot(query.data(), keys.data()+k*d, d);
+                    sq[k] = vec_dot(query.data(), rkeys[k].data(), d);
+                }
+
+                int am_o = 0, am_q = 0;
+                for (int k = 1; k < n_keys; k++) {
+                    if (so[k] > so[am_o]) am_o = k;
+                    if (sq[k] > sq[am_q]) am_q = k;
+                }
+                if (am_o == am_q) top1_ok++;
+
+                // Needle in top-5?
+                std::vector<int> idx(n_keys);
+                for (int k = 0; k < n_keys; k++) idx[k] = k;
+                std::partial_sort(idx.begin(), idx.begin()+5, idx.end(),
+                    [&](int a, int b) { return sq[a] > sq[b]; });
+                for (int t = 0; t < 5; t++) {
+                    if (idx[t] == needle_id) { needle_ok++; break; }
+                }
+
+                float sc = 1.0f / sqrtf((float)d);
+                std::vector<float> ao(n_keys), aq(n_keys);
+                for (int k = 0; k < n_keys; k++) { ao[k] = so[k]*sc; aq[k] = sq[k]*sc; }
+                softmax(ao.data(), n_keys);
+                softmax(aq.data(), n_keys);
+                seed_kl += kl_divergence(ao.data(), aq.data(), n_keys);
+            }
+
+            float t1 = (float)top1_ok / n_queries * 100.0f;
+            float np = (float)needle_ok / n_queries * 100.0f;
+            float kl = (float)(seed_kl / n_queries);
+            sum_top1 += t1; sum_needle += np; sum_kl += kl;
+
+            printf("    %4d | %5.1f%%     %5.1f%%       %10.6f\n", seed, t1, np, kl);
+        }
+
+        printf("    -----+-----------------------------------\n");
+        printf("    mean | %5.1f%%     %5.1f%%       %10.6f\n",
+               sum_top1 / n_seeds, sum_needle / n_seeds, (float)(sum_kl / n_seeds));
+        printf("\n");
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test K5: QJL diagnostic — centroid-only vs centroid+QJL
+// ---------------------------------------------------------------------------
+
+static int test_qjl_diagnostic(bool /*verbose*/) {
+    int failures = 0;
+    printf("\n=== Test K5: QJL diagnostic (centroid-only vs centroid+QJL) ===\n");
+
+    const int d = 128;
+    const int n_vectors = 500;
+
+    // Generate random unit-norm vectors
+    prng_seed(12345);
+
+    const auto * traits4 = ggml_get_type_traits(GGML_TYPE_TURBO4_0_PROD);
+    size_t qsz4 = traits4->type_size;
+
+    // Measure: for each vector, compare original vs centroid-only vs centroid+QJL
+    double sum_l2_centroid = 0, sum_l2_qjl = 0;
+    double sum_score_centroid = 0, sum_score_qjl = 0;
+    int centroid_better_count = 0;
+
+    for (int v = 0; v < n_vectors; v++) {
+        std::vector<float> input(d), query(d);
+        gen_gaussian_normalized(input.data(), d, 1.0f);
+        gen_gaussian_normalized(query.data(), d, 1.0f);
+
+        // Quantize
+        std::vector<uint8_t> qbuf(qsz4);
+        traits4->from_float_ref(input.data(), qbuf.data(), d);
+
+        // Dequantize (normal, with QJL)
+        std::vector<float> recon_qjl(d);
+        traits4->to_float(qbuf.data(), recon_qjl.data(), d);
+
+        // Dequantize centroid-only: manually decode without QJL correction
+        // Read norm from block, reconstruct centroids only
+        // Block layout: norm(2) + rnorm_hi(2) + rnorm_lo(2) + qs_hi(12) + qs_lo(24) + signs_hi(4) + signs_lo(12)
+        const uint8_t * blk = qbuf.data();
+        uint16_t norm_bits, rnorm_hi_bits, rnorm_lo_bits;
+        memcpy(&norm_bits, blk, 2);
+        memcpy(&rnorm_hi_bits, blk + 2, 2);
+        memcpy(&rnorm_lo_bits, blk + 4, 2);
+        float norm = ggml_fp16_to_fp32(norm_bits);
+
+        // Centroid-only reconstruction
+        std::vector<float> recon_centroid(d);
+        // Hi channels [0,32): 3-bit packed in qs_hi starting at offset 6
+        const uint8_t * qs_hi = blk + 6;
+        for (int j = 0; j < 32; j++) {
+            int bp = j*3, bi = bp>>3, sh = bp&7;
+            int idx = (sh <= 5) ? (qs_hi[bi]>>sh)&7 : ((qs_hi[bi]>>sh)|(qs_hi[bi+1]<<(8-sh)))&7;
+            recon_centroid[j] = norm * paper_centroids_8[idx];
+        }
+        // Lo channels [32,128): 2-bit packed in qs_lo starting at offset 6+12=18
+        const uint8_t * qs_lo = blk + 18;
+        for (int j = 0; j < 96; j++) {
+            int idx = (qs_lo[j/4] >> ((j%4)*2)) & 0x3;
+            recon_centroid[32 + j] = norm * paper_centroids_4[idx];
+        }
+
+        // Compute errors
+        float l2_centroid = relative_l2_error(input.data(), recon_centroid.data(), d);
+        float l2_qjl = relative_l2_error(input.data(), recon_qjl.data(), d);
+        sum_l2_centroid += l2_centroid;
+        sum_l2_qjl += l2_qjl;
+
+        float score_orig = vec_dot(query.data(), input.data(), d);
+        float score_centroid = vec_dot(query.data(), recon_centroid.data(), d);
+        float score_qjl = vec_dot(query.data(), recon_qjl.data(), d);
+        float err_centroid = fabsf(score_orig - score_centroid);
+        float err_qjl = fabsf(score_orig - score_qjl);
+        sum_score_centroid += err_centroid;
+        sum_score_qjl += err_qjl;
+
+        if (err_centroid < err_qjl) centroid_better_count++;
+    }
+
+    float mean_l2_c = (float)(sum_l2_centroid / n_vectors);
+    float mean_l2_q = (float)(sum_l2_qjl / n_vectors);
+    float mean_sc_c = (float)(sum_score_centroid / n_vectors);
+    float mean_sc_q = (float)(sum_score_qjl / n_vectors);
+
+    printf("  %d unit-norm vectors, TURBO4_0 (no rotation)\n\n", n_vectors);
+    printf("  metric          centroid-only   centroid+QJL\n");
+    printf("  ----------------+-------------------------------\n");
+    printf("  mean rel_l2:     %10.4f      %10.4f\n", mean_l2_c, mean_l2_q);
+    printf("  mean score_err:  %10.6f      %10.6f\n", mean_sc_c, mean_sc_q);
+    printf("  centroid wins score: %d / %d (%.1f%%)\n",
+           centroid_better_count, n_vectors, 100.0f * centroid_better_count / n_vectors);
+
+    if (mean_sc_q > mean_sc_c * 1.5f) {
+        printf("  WARNING: QJL is making score error WORSE (%.1fx)\n", mean_sc_q / mean_sc_c);
+    }
+
+    // --- The real test: inner-product BIAS (mean of signed error, not absolute) ---
+    // Paper's theorem: E[<y, x_hat>] = <y, x> for centroid+QJL
+    // Centroid-only has multiplicative bias of 2/pi at b=1
+    printf("\n  Inner-product BIAS test (signed error, should be ~0 for QJL):\n");
+    printf("  Sweeping 50 seeds, 200 random (x,y) pairs each\n\n");
+
+    double total_bias_centroid = 0, total_bias_qjl = 0;
+    double total_var_centroid = 0, total_var_qjl = 0;
+    int total_pairs = 0;
+
+    for (int seed = 0; seed < 50; seed++) {
+        prng_seed(8000000 + seed * 3571);
+
+        double seed_bias_c = 0, seed_bias_q = 0;
+
+        for (int p = 0; p < 200; p++) {
+            std::vector<float> x(d), y(d);
+            gen_gaussian_normalized(x.data(), d, 1.0f);
+            gen_gaussian_normalized(y.data(), d, 1.0f);
+
+            std::vector<uint8_t> qb(qsz4);
+            std::vector<float> recon_qjl(d);
+            traits4->from_float_ref(x.data(), qb.data(), d);
+            traits4->to_float(qb.data(), recon_qjl.data(), d);
+
+            // Centroid-only reconstruction (same decode as above)
+            std::vector<float> recon_c(d);
+            const uint8_t * blk = qb.data();
+            uint16_t nb;
+            memcpy(&nb, blk, 2);
+            float nm = ggml_fp16_to_fp32(nb);
+            const uint8_t * qh = blk + 6;
+            for (int j = 0; j < 32; j++) {
+                int bp = j*3, bi = bp>>3, sh = bp&7;
+                int idx = (sh <= 5) ? (qh[bi]>>sh)&7 : ((qh[bi]>>sh)|(qh[bi+1]<<(8-sh)))&7;
+                recon_c[j] = nm * paper_centroids_8[idx];
+            }
+            const uint8_t * ql = blk + 18;
+            for (int j = 0; j < 96; j++) {
+                int idx = (ql[j/4] >> ((j%4)*2)) & 0x3;
+                recon_c[32+j] = nm * paper_centroids_4[idx];
+            }
+
+            float dot_orig = vec_dot(y.data(), x.data(), d);
+            float dot_c = vec_dot(y.data(), recon_c.data(), d);
+            float dot_q = vec_dot(y.data(), recon_qjl.data(), d);
+
+            // Signed error (bias = mean of this should be ~0 for unbiased)
+            float err_c = dot_c - dot_orig;
+            float err_q = dot_q - dot_orig;
+
+            seed_bias_c += err_c;
+            seed_bias_q += err_q;
+            total_bias_centroid += err_c;
+            total_bias_qjl += err_q;
+            total_var_centroid += err_c * err_c;
+            total_var_qjl += err_q * err_q;
+            total_pairs++;
+        }
+    }
+
+    float mean_bias_c = (float)(total_bias_centroid / total_pairs);
+    float mean_bias_q = (float)(total_bias_qjl / total_pairs);
+    float var_c = (float)(total_var_centroid / total_pairs - mean_bias_c * mean_bias_c);
+    float var_q = (float)(total_var_qjl / total_pairs - mean_bias_q * mean_bias_q);
+
+    printf("  metric          centroid-only   centroid+QJL\n");
+    printf("  ----------------+-------------------------------\n");
+    printf("  mean bias:       %+10.6f      %+10.6f\n", mean_bias_c, mean_bias_q);
+    printf("  variance:        %10.6f      %10.6f\n", var_c, var_q);
+    printf("  std dev:         %10.6f      %10.6f\n", sqrtf(var_c), sqrtf(var_q));
+    printf("\n");
+    if (fabsf(mean_bias_q) < fabsf(mean_bias_c)) {
+        printf("  QJL reduces bias: %.4f → %.4f (%.1fx reduction)\n",
+               fabsf(mean_bias_c), fabsf(mean_bias_q), fabsf(mean_bias_c) / fmaxf(fabsf(mean_bias_q), 1e-10f));
+    } else {
+        printf("  QJL does NOT reduce bias — possible implementation issue\n");
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
 // Test L: Paper-exact vs our implementation vs baselines
 // ---------------------------------------------------------------------------
 
@@ -1650,7 +2288,7 @@ static int test_paper_reference(bool /*verbose*/) {
     ours_t4.bpw = 4.25f;
     ours_t4.recon_keys.resize(n_keys, std::vector<float>(d));
     {
-        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO4_0);
+        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO4_0_PROD);
         size_t qsz = traits->type_size;
         for (int k = 0; k < n_keys; k++) {
             std::vector<float> rotated(d), dequant(d);
@@ -1668,7 +2306,7 @@ static int test_paper_reference(bool /*verbose*/) {
     ours_t3.bpw = 2.50f;
     ours_t3.recon_keys.resize(n_keys, std::vector<float>(d));
     {
-        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO3_0);
+        const auto * traits = ggml_get_type_traits(GGML_TYPE_TURBO3_0_PROD);
         size_t qsz = traits->type_size;
         for (int k = 0; k < n_keys; k++) {
             std::vector<float> rotated(d), dequant(d);
@@ -1879,16 +2517,555 @@ static int test_d1536_simulation(bool /*verbose*/) {
 }
 
 // ---------------------------------------------------------------------------
+// Test N: MSE variant format / structural sanity
+// ---------------------------------------------------------------------------
+
+static int test_mse_format_sanity(void) {
+    int failures = 0;
+    printf("\n=== Test N: MSE variant format / structural sanity ===\n");
+
+    // TURBO3_0_MSE
+    {
+        bool ok = true;
+        ok = ok && (ggml_type_size(GGML_TYPE_TURBO3_0_MSE)  == 38);
+        ok = ok && (ggml_blck_size(GGML_TYPE_TURBO3_0_MSE)  == 128);
+        ok = ok && (ggml_is_quantized(GGML_TYPE_TURBO3_0_MSE));
+        ok = ok && (strcmp(ggml_type_name(GGML_TYPE_TURBO3_0_MSE), "tqv_lo") == 0);
+        printf("  tqv_lo format: %s (size=%zu blck=%d name=%s)\n",
+               RESULT_STR[!ok],
+               ggml_type_size(GGML_TYPE_TURBO3_0_MSE),
+               (int)ggml_blck_size(GGML_TYPE_TURBO3_0_MSE),
+               ggml_type_name(GGML_TYPE_TURBO3_0_MSE));
+        if (!ok) failures++;
+    }
+
+    // TURBO4_0_MSE
+    {
+        bool ok = true;
+        ok = ok && (ggml_type_size(GGML_TYPE_TURBO4_0_MSE)  == 54);
+        ok = ok && (ggml_blck_size(GGML_TYPE_TURBO4_0_MSE)  == 128);
+        ok = ok && (ggml_is_quantized(GGML_TYPE_TURBO4_0_MSE));
+        ok = ok && (strcmp(ggml_type_name(GGML_TYPE_TURBO4_0_MSE), "tqv_hi") == 0);
+        printf("  tqv_hi format: %s (size=%zu blck=%d name=%s)\n",
+               RESULT_STR[!ok],
+               ggml_type_size(GGML_TYPE_TURBO4_0_MSE),
+               (int)ggml_blck_size(GGML_TYPE_TURBO4_0_MSE),
+               ggml_type_name(GGML_TYPE_TURBO4_0_MSE));
+        if (!ok) failures++;
+    }
+
+    // MSE blocks are smaller than PROD blocks (no QJL overhead)
+    {
+        bool ok = true;
+        ok = ok && (ggml_type_size(GGML_TYPE_TURBO3_0_MSE) < ggml_type_size(GGML_TYPE_TURBO3_0_PROD));
+        ok = ok && (ggml_type_size(GGML_TYPE_TURBO4_0_MSE) < ggml_type_size(GGML_TYPE_TURBO4_0_PROD));
+        printf("  MSE < PROD block size: %s (t3: %zu < %zu, t4: %zu < %zu)\n",
+               RESULT_STR[!ok],
+               ggml_type_size(GGML_TYPE_TURBO3_0_MSE), ggml_type_size(GGML_TYPE_TURBO3_0_PROD),
+               ggml_type_size(GGML_TYPE_TURBO4_0_MSE), ggml_type_size(GGML_TYPE_TURBO4_0_PROD));
+        if (!ok) failures++;
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test N2: MSE zero vector and determinism
+// ---------------------------------------------------------------------------
+
+static int test_mse_zero_and_determinism(void) {
+    int failures = 0;
+    printf("\n=== Test N2: MSE zero vector and determinism ===\n");
+
+    for (auto type : {GGML_TYPE_TURBO3_0_MSE, GGML_TYPE_TURBO4_0_MSE}) {
+        const int n = 128;
+        const auto * traits = ggml_get_type_traits(type);
+
+        // Zero roundtrip
+        {
+            std::vector<float> zeros(n, 0.0f);
+            auto r = do_roundtrip(type, zeros.data(), n);
+            bool ok = (r.rmse_val == 0.0f) && !r.has_bad;
+            printf("  %s zero: %s (rmse=%e)\n", ggml_type_name(type), RESULT_STR[!ok], r.rmse_val);
+            if (!ok) failures++;
+        }
+
+        // Determinism
+        {
+            size_t qsz = traits->type_size;
+            prng_seed(42);
+            std::vector<float> data(n);
+            for (int i = 0; i < n; i++) data[i] = prng_gaussian();
+
+            std::vector<uint8_t> q1(qsz), q2(qsz);
+            traits->from_float_ref(data.data(), q1.data(), n);
+            traits->from_float_ref(data.data(), q2.data(), n);
+
+            bool ok = (memcmp(q1.data(), q2.data(), qsz) == 0);
+            printf("  %s determinism: %s\n", ggml_type_name(type), RESULT_STR[!ok]);
+            if (!ok) failures++;
+        }
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test O: MSE vs PROD reconstruction quality (WITH rotation)
+// ---------------------------------------------------------------------------
+// Paper: MSE variant minimizes reconstruction error because it uses all b bits
+// for centroids instead of spending 1 bit on QJL.
+// PyTorch validation: MSE consistently wins on per-vector MSE.
+// Full pipeline: rotate → quantize → dequantize → inverse rotate.
+
+static int test_mse_vs_prod_reconstruction(bool verbose) {
+    int failures = 0;
+    printf("\n=== Test O: MSE vs PROD reconstruction quality (with rotation) ===\n");
+    printf("  (Paper: MSE minimizes reconstruction; PROD trades MSE for unbiased inner products)\n\n");
+
+    const int d = 128;
+    const int n_vectors = 500;
+
+    // Shared rotation matrix (one per "head")
+    prng_seed(314159);
+    std::vector<float> Q_rot(d * d);
+    gen_random_orthogonal(Q_rot.data(), d);
+
+    struct type_pair {
+        ggml_type prod;
+        ggml_type mse;
+        const char * label;
+    };
+    type_pair pairs[] = {
+        { GGML_TYPE_TURBO3_0_PROD, GGML_TYPE_TURBO3_0_MSE, "turbo3" },
+        { GGML_TYPE_TURBO4_0_PROD, GGML_TYPE_TURBO4_0_MSE, "turbo4" },
+    };
+
+    for (auto & p : pairs) {
+        double sum_l2_prod = 0, sum_l2_mse = 0;
+        double sum_cos_prod = 0, sum_cos_mse = 0;
+        int mse_wins = 0;
+
+        prng_seed(77777);
+        for (int v = 0; v < n_vectors; v++) {
+            std::vector<float> data(d);
+            float norm_scale = 0.5f + prng_uniform(0.0f, 2.0f);
+            switch (v % 6) {
+                case 0: gen_kv_lognormal_outlier(data.data(), d, norm_scale); break;
+                case 1: gen_kv_powerlaw(data.data(), d, norm_scale); break;
+                case 2: gen_kv_correlated(data.data(), d, norm_scale); break;
+                case 3: gen_kv_heavy_tail(data.data(), d, norm_scale); break;
+                case 4: gen_kv_sparse(data.data(), d, norm_scale); break;
+                case 5: gen_kv_asymmetric(data.data(), d, norm_scale); break;
+            }
+
+            auto r_prod = do_roundtrip_rotated(p.prod, data.data(), d, Q_rot.data());
+            auto r_mse  = do_roundtrip_rotated(p.mse,  data.data(), d, Q_rot.data());
+
+            sum_l2_prod += r_prod.rel_l2;
+            sum_l2_mse  += r_mse.rel_l2;
+            sum_cos_prod += r_prod.cos_sim;
+            sum_cos_mse  += r_mse.cos_sim;
+            if (r_mse.rel_l2 < r_prod.rel_l2) mse_wins++;
+        }
+
+        float mean_l2_prod = (float)(sum_l2_prod / n_vectors);
+        float mean_l2_mse  = (float)(sum_l2_mse  / n_vectors);
+        float mean_cos_prod = (float)(sum_cos_prod / n_vectors);
+        float mean_cos_mse  = (float)(sum_cos_mse  / n_vectors);
+        float win_pct = 100.0f * mse_wins / n_vectors;
+
+        // MSE variant MUST have lower reconstruction error
+        bool ok = (mean_l2_mse < mean_l2_prod) && (win_pct > 60.0f);
+        if (!ok) failures++;
+
+        printf("  %s: %s\n", p.label, RESULT_STR[!ok]);
+        printf("    PROD  rel_L2=%.4f  cos=%.4f\n", mean_l2_prod, mean_cos_prod);
+        printf("    MSE   rel_L2=%.4f  cos=%.4f  (%.1f%% lower error)\n",
+               mean_l2_mse, mean_cos_mse,
+               100.0f * (1.0f - mean_l2_mse / mean_l2_prod));
+        printf("    MSE wins on %d/%d vectors (%.1f%%)\n", mse_wins, n_vectors, win_pct);
+
+        (void)verbose;
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test P: PROD vs MSE inner product preservation (WITH rotation)
+// ---------------------------------------------------------------------------
+// Paper Theorem 2: TurboQuant_prod gives UNBIASED inner product estimates.
+// Paper Section 1.1, Lemma 4: TurboQuant_mse is BIASED (scaled by 2/π at 1-bit).
+// PyTorch test findings:
+//   - test_mse_only_inner_product_bias: MSE bias visible at all bit-widths
+//   - test_inner_product_unbiasedness: PROD near-zero bias, corr 0.80-0.98
+// Full pipeline: rotate key → quantize → dequantize → inverse rotate, then dot with query.
+
+static int test_prod_vs_mse_inner_product(bool verbose) {
+    int failures = 0;
+    printf("\n=== Test P: PROD vs MSE inner product preservation (with rotation) ===\n");
+    printf("  (Paper: PROD is unbiased for inner products; MSE is biased)\n\n");
+
+    const int d = 128;
+    const int n_pairs = 2000;
+
+    // Rotation matrix
+    prng_seed(314159);
+    std::vector<float> Q_rot(d * d);
+    gen_random_orthogonal(Q_rot.data(), d);
+
+    struct type_pair {
+        ggml_type prod;
+        ggml_type mse;
+        const char * label;
+        float max_prod_mean_err;
+    };
+    type_pair pairs[] = {
+        { GGML_TYPE_TURBO3_0_PROD, GGML_TYPE_TURBO3_0_MSE, "turbo3", 0.10f },
+        { GGML_TYPE_TURBO4_0_PROD, GGML_TYPE_TURBO4_0_MSE, "turbo4", 0.05f },
+    };
+
+    for (auto & p : pairs) {
+        prng_seed(12345);
+
+        double sum_err_prod = 0, sum_err_mse = 0;
+        double sum_bias_prod = 0, sum_bias_mse = 0;
+        double sum_sq_orig = 0;
+        double sum_orig_prod = 0, sum_sq_prod = 0;
+        double sum_orig_mse = 0, sum_sq_mse = 0;
+        int prod_closer = 0;
+
+        for (int i = 0; i < n_pairs; i++) {
+            std::vector<float> query(d), key(d);
+            gen_gaussian_normalized(query.data(), d, 1.0f);
+            gen_gaussian_normalized(key.data(), d, 1.0f);
+
+            float score_orig = vec_dot(query.data(), key.data(), d);
+            sum_sq_orig += score_orig * score_orig;
+
+            // PROD: rotate → quantize → dequantize → unrotate → dot with query
+            float score_prod;
+            {
+                const auto * traits = ggml_get_type_traits(p.prod);
+                std::vector<float> rotated(d), dequant(d), recon(d);
+                std::vector<uint8_t> qbuf(traits->type_size);
+                rotate_qr(key.data(), rotated.data(), Q_rot.data(), d);
+                traits->from_float_ref(rotated.data(), qbuf.data(), d);
+                traits->to_float(qbuf.data(), dequant.data(), d);
+                rotate_qr_inv(dequant.data(), recon.data(), Q_rot.data(), d);
+                score_prod = vec_dot(query.data(), recon.data(), d);
+            }
+
+            // MSE: same pipeline
+            float score_mse;
+            {
+                const auto * traits = ggml_get_type_traits(p.mse);
+                std::vector<float> rotated(d), dequant(d), recon(d);
+                std::vector<uint8_t> qbuf(traits->type_size);
+                rotate_qr(key.data(), rotated.data(), Q_rot.data(), d);
+                traits->from_float_ref(rotated.data(), qbuf.data(), d);
+                traits->to_float(qbuf.data(), dequant.data(), d);
+                rotate_qr_inv(dequant.data(), recon.data(), Q_rot.data(), d);
+                score_mse = vec_dot(query.data(), recon.data(), d);
+            }
+
+            sum_err_prod += fabsf(score_orig - score_prod);
+            sum_err_mse  += fabsf(score_orig - score_mse);
+            sum_bias_prod += (score_prod - score_orig);
+            sum_bias_mse  += (score_mse  - score_orig);
+            sum_orig_prod += score_orig * score_prod;
+            sum_sq_prod   += score_prod * score_prod;
+            sum_orig_mse  += score_orig * score_mse;
+            sum_sq_mse    += score_mse  * score_mse;
+
+            if (fabsf(score_orig - score_prod) < fabsf(score_orig - score_mse)) prod_closer++;
+        }
+
+        float mean_err_prod = (float)(sum_err_prod / n_pairs);
+        float mean_err_mse  = (float)(sum_err_mse  / n_pairs);
+        float bias_prod = (float)(sum_bias_prod / n_pairs);
+        float bias_mse  = (float)(sum_bias_mse  / n_pairs);
+        float corr_prod = (float)(sum_orig_prod / n_pairs) / sqrtf((float)(sum_sq_orig / n_pairs) * (float)(sum_sq_prod / n_pairs));
+        float corr_mse  = (float)(sum_orig_mse  / n_pairs) / sqrtf((float)(sum_sq_orig / n_pairs) * (float)(sum_sq_mse  / n_pairs));
+        float prod_win_pct = 100.0f * prod_closer / n_pairs;
+
+        bool prod_ok = (mean_err_prod < p.max_prod_mean_err);
+        bool ok = prod_ok;
+        if (!ok) failures++;
+
+        printf("  %s: %s\n", p.label, RESULT_STR[!ok]);
+        printf("    PROD  mean_err=%.5f  bias=%+.5f  corr=%.4f\n",
+               mean_err_prod, bias_prod, corr_prod);
+        printf("    MSE   mean_err=%.5f  bias=%+.5f  corr=%.4f\n",
+               mean_err_mse, bias_mse, corr_mse);
+        printf("    PROD closer on %d/%d pairs (%.1f%%)\n",
+               prod_closer, n_pairs, prod_win_pct);
+
+        (void)verbose;
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test Q: Combined K=PROD, V=MSE attention simulation (WITH rotation)
+// ---------------------------------------------------------------------------
+// The intended usage: PROD for K cache (unbiased attention scores),
+// MSE for V cache (lower reconstruction error for weighted sums).
+// Full pipeline with rotation on both K and V.
+
+static int test_combined_kv_attention(bool verbose) {
+    int failures = 0;
+    printf("\n=== Test Q: Combined K=PROD V=MSE attention simulation (with rotation) ===\n");
+    printf("  (Intended usage: PROD for keys, MSE for values)\n\n");
+
+    const int d = 128;
+    const int n_keys = 64;
+    const int n_queries = 100;
+
+    // Rotation matrix (shared by K and V in real usage)
+    prng_seed(314159);
+    std::vector<float> Q_rot(d * d);
+    gen_random_orthogonal(Q_rot.data(), d);
+
+    struct config {
+        const char * name;
+        ggml_type type_k;
+        ggml_type type_v;
+    };
+    config configs[] = {
+        { "prod_k + mse_v (intended)",   GGML_TYPE_TURBO4_0_PROD, GGML_TYPE_TURBO4_0_MSE  },
+        { "prod_k + prod_v",             GGML_TYPE_TURBO4_0_PROD, GGML_TYPE_TURBO4_0_PROD },
+        { "mse_k  + mse_v",             GGML_TYPE_TURBO4_0_MSE,  GGML_TYPE_TURBO4_0_MSE  },
+        { "mse_k  + prod_v",            GGML_TYPE_TURBO4_0_MSE,  GGML_TYPE_TURBO4_0_PROD },
+    };
+    const int n_configs = sizeof(configs) / sizeof(configs[0]);
+
+    // Generate keys and values with realistic distributions
+    prng_seed(42424242);
+    std::vector<float> keys(n_keys * d), values(n_keys * d);
+    for (int k = 0; k < n_keys; k++) {
+        float ns = 0.5f + prng_uniform(0.0f, 2.0f);
+        switch (k % 6) {
+            case 0: gen_kv_lognormal_outlier(keys.data() + k*d, d, ns); break;
+            case 1: gen_kv_powerlaw(keys.data() + k*d, d, ns); break;
+            case 2: gen_kv_correlated(keys.data() + k*d, d, ns); break;
+            case 3: gen_kv_heavy_tail(keys.data() + k*d, d, ns); break;
+            case 4: gen_kv_sparse(keys.data() + k*d, d, ns); break;
+            case 5: gen_kv_asymmetric(keys.data() + k*d, d, ns); break;
+        }
+        gen_gaussian_normalized(values.data() + k*d, d, 0.5f + prng_uniform(0.0f, 1.5f));
+    }
+
+    // Generate queries
+    std::vector<float> queries(n_queries * d);
+    for (int q = 0; q < n_queries; q++) {
+        gen_gaussian_normalized(queries.data() + q*d, d, 1.0f);
+    }
+
+    printf("  %-30s  output_cos  output_L2  score_KL  top1_acc\n", "config");
+    printf("  %s\n", "------------------------------  ----------  ---------  --------  --------");
+
+    for (int ci = 0; ci < n_configs; ci++) {
+        auto & cfg = configs[ci];
+        const auto * traits_k = ggml_get_type_traits(cfg.type_k);
+        const auto * traits_v = ggml_get_type_traits(cfg.type_v);
+
+        // Quantize all keys and values through rotation pipeline
+        std::vector<std::vector<float>> recon_keys(n_keys, std::vector<float>(d));
+        std::vector<std::vector<float>> recon_values(n_keys, std::vector<float>(d));
+
+        for (int k = 0; k < n_keys; k++) {
+            // Key: rotate → quantize → dequantize → unrotate
+            {
+                std::vector<float> rotated(d), dequant(d);
+                std::vector<uint8_t> qbuf(traits_k->type_size);
+                rotate_qr(keys.data() + k*d, rotated.data(), Q_rot.data(), d);
+                traits_k->from_float_ref(rotated.data(), qbuf.data(), d);
+                traits_k->to_float(qbuf.data(), dequant.data(), d);
+                rotate_qr_inv(dequant.data(), recon_keys[k].data(), Q_rot.data(), d);
+            }
+            // Value: same pipeline
+            {
+                std::vector<float> rotated(d), dequant(d);
+                std::vector<uint8_t> qbuf(traits_v->type_size);
+                rotate_qr(values.data() + k*d, rotated.data(), Q_rot.data(), d);
+                traits_v->from_float_ref(rotated.data(), qbuf.data(), d);
+                traits_v->to_float(qbuf.data(), dequant.data(), d);
+                rotate_qr_inv(dequant.data(), recon_values[k].data(), Q_rot.data(), d);
+            }
+        }
+
+        // Run attention for each query
+        double sum_output_cos = 0;
+        double sum_output_l2 = 0;
+        double sum_score_kl = 0;
+        int top1_correct = 0;
+
+        for (int q = 0; q < n_queries; q++) {
+            const float * query = queries.data() + q*d;
+
+            std::vector<float> scores_orig(n_keys), scores_quant(n_keys);
+            for (int k = 0; k < n_keys; k++) {
+                scores_orig[k]  = vec_dot(query, keys.data() + k*d, d);
+                scores_quant[k] = vec_dot(query, recon_keys[k].data(), d);
+            }
+
+            // Top-1 accuracy
+            int am_o = 0, am_q = 0;
+            for (int k = 1; k < n_keys; k++) {
+                if (scores_orig[k] > scores_orig[am_o]) am_o = k;
+                if (scores_quant[k] > scores_quant[am_q]) am_q = k;
+            }
+            if (am_o == am_q) top1_correct++;
+
+            // Softmax
+            float scale = 1.0f / sqrtf((float)d);
+            std::vector<float> attn_orig(n_keys), attn_quant(n_keys);
+            for (int k = 0; k < n_keys; k++) {
+                attn_orig[k] = scores_orig[k] * scale;
+                attn_quant[k] = scores_quant[k] * scale;
+            }
+            softmax(attn_orig.data(), n_keys);
+            softmax(attn_quant.data(), n_keys);
+
+            sum_score_kl += kl_divergence(attn_orig.data(), attn_quant.data(), n_keys);
+
+            // Attention output: sum(attn_weight * value)
+            std::vector<float> output_orig(d, 0.0f), output_quant(d, 0.0f);
+            for (int k = 0; k < n_keys; k++) {
+                for (int j = 0; j < d; j++) {
+                    output_orig[j]  += attn_orig[k]  * (values.data() + k*d)[j];
+                    output_quant[j] += attn_quant[k] * recon_values[k][j];
+                }
+            }
+
+            sum_output_cos += cosine_sim(output_orig.data(), output_quant.data(), d);
+            sum_output_l2  += relative_l2_error(output_orig.data(), output_quant.data(), d);
+        }
+
+        float mean_cos = (float)(sum_output_cos / n_queries);
+        float mean_l2  = (float)(sum_output_l2  / n_queries);
+        float mean_kl  = (float)(sum_score_kl   / n_queries);
+        float top1_pct = (float)top1_correct / n_queries * 100.0f;
+
+        printf("  %-30s  %10.6f  %9.6f  %8.6f  %6.1f%%\n",
+               cfg.name, mean_cos, mean_l2, mean_kl, top1_pct);
+    }
+
+    printf("\n  (No hard pass/fail — informational comparison of all K/V type combinations)\n");
+
+    (void)verbose;
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test R: MSE distortion vs paper bounds (WITH rotation)
+// ---------------------------------------------------------------------------
+// Paper Theorem 1: D_mse = E[||x - x̃||²] ≤ sqrt(3π)/2 · 1/4^b for ||x||=1
+// Specific values: b=1: 0.36, b=2: 0.117, b=3: 0.03, b=4: 0.009
+// PyTorch findings: all measured MSE well within bounds (ratio 0.53-0.87x)
+//
+// Our two-tier types have effective data rates of 2.25 and 3.25 bits/channel
+// (not 3 and 4). D_mse should fall between the bounds for the two bit-widths
+// used in the hi and lo channels.
+
+static int test_mse_distortion_bounds(bool verbose) {
+    int failures = 0;
+    printf("\n=== Test R: MSE distortion vs paper bounds (with rotation) ===\n");
+    printf("  (Paper: b=2 → D_mse≈0.117, b=3 → 0.03, b=4 → 0.009)\n\n");
+
+    const int d = 128;
+    const int n_vectors = 1000;
+
+    // Rotation matrix
+    prng_seed(314159);
+    std::vector<float> Q_rot(d * d);
+    gen_random_orthogonal(Q_rot.data(), d);
+
+    struct entry {
+        ggml_type type;
+        const char * label;
+        float bpv_data;           // effective data bits/channel (not counting norms)
+        // Expected D_mse range based on the hi/lo channel bit-widths
+        float expected_lower;     // D_mse for the higher bit-width
+        float expected_upper;     // D_mse for the lower bit-width
+    };
+    entry entries[] = {
+        // turbo3_0_mse: hi=3b, lo=2b → 2.25 bpc data → between b=2 and b=3
+        { GGML_TYPE_TURBO3_0_MSE,  "turbo3_0_mse  (2.25 bpc)", 2.25f, 0.03f,  0.117f },
+        // turbo4_0_mse: hi=4b, lo=3b → 3.25 bpc data → between b=3 and b=4
+        { GGML_TYPE_TURBO4_0_MSE,  "turbo4_0_mse  (3.25 bpc)", 3.25f, 0.009f, 0.03f  },
+        // PROD for comparison (MSE stage uses 1 fewer bit per channel)
+        { GGML_TYPE_TURBO3_0_PROD, "turbo3_0_prod (1.25 bpc MSE)", 1.25f, 0.0f, 0.0f },
+        { GGML_TYPE_TURBO4_0_PROD, "turbo4_0_prod (2.25 bpc MSE)", 2.25f, 0.0f, 0.0f },
+    };
+
+    for (auto & e : entries) {
+        prng_seed(54321);
+
+        double sum_dmse = 0;
+        for (int v = 0; v < n_vectors; v++) {
+            std::vector<float> data(d);
+            gen_gaussian_normalized(data.data(), d, 1.0f);
+
+            // Full pipeline: rotate → quantize → dequantize → unrotate
+            const auto * traits = ggml_get_type_traits(e.type);
+            std::vector<float> rotated(d), dequant(d), recon(d);
+            std::vector<uint8_t> qbuf(traits->type_size);
+
+            rotate_qr(data.data(), rotated.data(), Q_rot.data(), d);
+            traits->from_float_ref(rotated.data(), qbuf.data(), d);
+            traits->to_float(qbuf.data(), dequant.data(), d);
+            rotate_qr_inv(dequant.data(), recon.data(), Q_rot.data(), d);
+
+            double sq_err = 0;
+            for (int j = 0; j < d; j++) {
+                double diff = data[j] - recon[j];
+                sq_err += diff * diff;
+            }
+            sum_dmse += sq_err;  // ||x - x̃||² for unit-norm vector
+        }
+        float measured_dmse = (float)(sum_dmse / n_vectors);
+
+        bool ok = true;
+        if (e.expected_upper > 0) {
+            // Should fall within the expected range (with 2x slack for two-tier split)
+            ok = (measured_dmse < e.expected_upper * 2.0f);
+        }
+        if (!ok) failures++;
+
+        printf("  %-35s  D_mse=%.6f", e.label, measured_dmse);
+        if (e.expected_upper > 0) {
+            printf("  (paper: %.3f-%.3f)", e.expected_lower, e.expected_upper);
+        }
+        printf("  %s\n", RESULT_STR[!ok]);
+    }
+
+    printf("\n  Note: PROD D_mse is higher because its MSE stage uses b-1 bits (rest is QJL)\n");
+    printf("  Note: Effective bpc = (32*hi_bits + 96*lo_bits) / 128, not counting norm overhead\n");
+
+    (void)verbose;
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 int main(int argc, char * argv[]) {
     bool verbose = false;
+    bool bench = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) {
             verbose = true;
+        } else if (strcmp(argv[i], "-bench") == 0 || strcmp(argv[i], "--bench") == 0) {
+            bench = true;
         } else {
-            fprintf(stderr, "error: unknown argument: %s\n", argv[i]);
+            fprintf(stderr, "usage: %s [-v] [-bench]\n", argv[0]);
+            fprintf(stderr, "  -v      verbose output\n");
+            fprintf(stderr, "  -bench  run slow benchmarks (K-M) in addition to fast tests (A-I)\n");
             return 1;
         }
     }
@@ -1897,9 +3074,13 @@ int main(int argc, char * argv[]) {
 
     printf("TurboQuant reference implementation tests\n");
     printf("==========================================\n");
+    if (!bench) {
+        printf("(fast mode — use -bench for full benchmarks)\n");
+    }
 
     int total_failures = 0;
 
+    // --- Fast correctness tests (A-I) ---
     total_failures += test_format_sanity();
     total_failures += test_zero_vector();
     total_failures += test_determinism();
@@ -1909,10 +3090,28 @@ int main(int argc, char * argv[]) {
     total_failures += test_norm_preservation();
     total_failures += test_bit_packing();
     total_failures += test_kv_cache_simulation(verbose);
+
+    // --- MSE variant tests (N-R) ---
+    total_failures += test_mse_format_sanity();
+    total_failures += test_mse_zero_and_determinism();
+    total_failures += test_mse_vs_prod_reconstruction(verbose);
+    total_failures += test_prod_vs_mse_inner_product(verbose);
+    total_failures += test_combined_kv_attention(verbose);
+    total_failures += test_mse_distortion_bounds(verbose);
+
+    if (!bench) goto done;
+
+    // --- Slow benchmarks (J-M) — run with -bench ---
     total_failures += test_comparison(verbose);
     total_failures += test_attention_fidelity(verbose);
+    total_failures += test_long_context(verbose);
+    total_failures += test_adversarial_attention(verbose);
+    total_failures += test_seed_sweep(verbose);
+    total_failures += test_qjl_diagnostic(verbose);
     total_failures += test_paper_reference(verbose);
     total_failures += test_d1536_simulation(verbose);
+
+    done:
 
     printf("\n==========================================\n");
     if (total_failures > 0) {

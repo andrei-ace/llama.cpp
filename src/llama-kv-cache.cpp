@@ -213,8 +213,10 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
     // TurboQuant: detect turbo types and warn that rotation is not yet initialized
-    const bool uses_turbo = (type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 ||
-                             type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0);
+    const bool uses_turbo = (type_k == GGML_TYPE_TURBO3_0_PROD || type_k == GGML_TYPE_TURBO4_0_PROD ||
+                             type_v == GGML_TYPE_TURBO3_0_PROD || type_v == GGML_TYPE_TURBO4_0_PROD ||
+                             type_k == GGML_TYPE_TURBO3_0_MSE || type_k == GGML_TYPE_TURBO4_0_MSE ||
+                             type_v == GGML_TYPE_TURBO3_0_MSE || type_v == GGML_TYPE_TURBO4_0_MSE);
     if (uses_turbo) {
         // TODO(TurboQuant): allocate and initialize 128x128 rotation matrices here
         // turbo_rotation     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 128);

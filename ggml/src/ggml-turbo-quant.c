@@ -24,6 +24,13 @@ static const float centroids_8[8] = {
      0.0216082019f,  0.0665887043f,  0.1181421705f,  0.1883988281f,
 };
 
+static const float centroids_16[16] = {  // 4-bit MSE, d=128
+    -0.2376827302f, -0.1808574273f, -0.1418271941f, -0.1103094608f,
+    -0.0828467454f, -0.0577864193f, -0.0341609484f, -0.0113059237f,
+     0.0113059237f,  0.0341609484f,  0.0577864193f,  0.0828467454f,
+     0.1103094608f,  0.1418271941f,  0.1808574273f,  0.2376827302f,
+};
+
 static const float centroids_4[4] = {
     -0.1330458627f, -0.0399983984f, 0.0399983984f, 0.1330458627f,
 };
@@ -181,17 +188,17 @@ static void dequant_lo(const uint8_t * qs, const float * corr,
 }
 
 // ---------------------------------------------------------------------------
-// TURBO3_0: hi=b3(centroids_4, 2-bit), lo=b2(centroids_2, 1-bit)
+// TURBO3_0_PROD: hi=b3(centroids_4, 2-bit), lo=b2(centroids_2, 1-bit)
 // ---------------------------------------------------------------------------
 
-void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK_TURBO3 == 0);
-    const int64_t nb = k / QK_TURBO3;
+void quantize_row_turbo3_0_prod_ref(const float * GGML_RESTRICT x, block_turbo3_0_prod * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO3_PROD == 0);
+    const int64_t nb = k / QK_TURBO3_PROD;
 
     for (int64_t i = 0; i < nb; i++) {
-        const float * xb = x + i * QK_TURBO3;
+        const float * xb = x + i * QK_TURBO3_PROD;
         float sum_sq = 0.0f;
-        for (int j = 0; j < QK_TURBO3; j++) sum_sq += xb[j] * xb[j];
+        for (int j = 0; j < QK_TURBO3_PROD; j++) sum_sq += xb[j] * xb[j];
         float norm = sqrtf(sum_sq);
 
         y[i].norm = GGML_FP32_TO_FP16(norm);
@@ -203,44 +210,44 @@ void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * G
         if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
         float inv = 1.0f / norm;
 
-        float res_hi[QK_TURBO3_HI], res_lo[QK_TURBO3_LO];
-        quant_hi(xb, inv, y[i].qs_hi, centroids_4, 4, 2, QK_TURBO3_HI, res_hi);
-        quant_lo(xb, inv, y[i].qs_lo, centroids_2, 2, 1, QK_TURBO3_LO, QK_TURBO3_HI, res_lo);
+        float res_hi[QK_TURBO3_PROD_HI], res_lo[QK_TURBO3_PROD_LO];
+        quant_hi(xb, inv, y[i].qs_hi, centroids_4, 4, 2, QK_TURBO3_PROD_HI, res_hi);
+        quant_lo(xb, inv, y[i].qs_lo, centroids_2, 2, 1, QK_TURBO3_PROD_LO, QK_TURBO3_PROD_HI, res_lo);
 
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, QK_TURBO3_HI, QJL_SEED_32));
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, QK_TURBO3_LO, QJL_SEED_96));
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, QK_TURBO3_PROD_HI, QJL_SEED_32));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, QK_TURBO3_PROD_LO, QJL_SEED_96));
     }
 }
 
-void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK_TURBO3 == 0);
-    const int64_t nb = k / QK_TURBO3;
+void dequantize_row_turbo3_0_prod(const block_turbo3_0_prod * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO3_PROD == 0);
+    const int64_t nb = k / QK_TURBO3_PROD;
 
     for (int64_t i = 0; i < nb; i++) {
         float norm = GGML_FP16_TO_FP32(x[i].norm);
-        float * yb = y + i * QK_TURBO3;
+        float * yb = y + i * QK_TURBO3_PROD;
 
-        float ch[QK_TURBO3_HI], cl[QK_TURBO3_LO];
-        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), ch, QK_TURBO3_HI, QJL_SEED_32);
-        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), cl, QK_TURBO3_LO, QJL_SEED_96);
+        float ch[QK_TURBO3_PROD_HI], cl[QK_TURBO3_PROD_LO];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), ch, QK_TURBO3_PROD_HI, QJL_SEED_32);
+        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), cl, QK_TURBO3_PROD_LO, QJL_SEED_96);
 
-        dequant_hi(x[i].qs_hi, ch, centroids_4, 2, QK_TURBO3_HI, norm, yb);
-        dequant_lo(x[i].qs_lo, cl, centroids_2, 1, QK_TURBO3_LO, norm, yb, QK_TURBO3_HI);
+        dequant_hi(x[i].qs_hi, ch, centroids_4, 2, QK_TURBO3_PROD_HI, norm, yb);
+        dequant_lo(x[i].qs_lo, cl, centroids_2, 1, QK_TURBO3_PROD_LO, norm, yb, QK_TURBO3_PROD_HI);
     }
 }
 
 // ---------------------------------------------------------------------------
-// TURBO4_0: hi=b4(centroids_8, 3-bit), lo=b3(centroids_4, 2-bit)
+// TURBO4_0_PROD: hi=b4(centroids_8, 3-bit), lo=b3(centroids_4, 2-bit)
 // ---------------------------------------------------------------------------
 
-void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK_TURBO4 == 0);
-    const int64_t nb = k / QK_TURBO4;
+void quantize_row_turbo4_0_prod_ref(const float * GGML_RESTRICT x, block_turbo4_0_prod * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO4_PROD == 0);
+    const int64_t nb = k / QK_TURBO4_PROD;
 
     for (int64_t i = 0; i < nb; i++) {
-        const float * xb = x + i * QK_TURBO4;
+        const float * xb = x + i * QK_TURBO4_PROD;
         float sum_sq = 0.0f;
-        for (int j = 0; j < QK_TURBO4; j++) sum_sq += xb[j] * xb[j];
+        for (int j = 0; j < QK_TURBO4_PROD; j++) sum_sq += xb[j] * xb[j];
         float norm = sqrtf(sum_sq);
 
         y[i].norm = GGML_FP32_TO_FP16(norm);
@@ -252,28 +259,184 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
         if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
         float inv = 1.0f / norm;
 
-        float res_hi[QK_TURBO4_HI], res_lo[QK_TURBO4_LO];
-        quant_hi(xb, inv, y[i].qs_hi, centroids_8, 8, 3, QK_TURBO4_HI, res_hi);
-        quant_lo(xb, inv, y[i].qs_lo, centroids_4, 4, 2, QK_TURBO4_LO, QK_TURBO4_HI, res_lo);
+        float res_hi[QK_TURBO4_PROD_HI], res_lo[QK_TURBO4_PROD_LO];
+        quant_hi(xb, inv, y[i].qs_hi, centroids_8, 8, 3, QK_TURBO4_PROD_HI, res_hi);
+        quant_lo(xb, inv, y[i].qs_lo, centroids_4, 4, 2, QK_TURBO4_PROD_LO, QK_TURBO4_PROD_HI, res_lo);
 
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, QK_TURBO4_HI, QJL_SEED_32));
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, QK_TURBO4_LO, QJL_SEED_96));
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, QK_TURBO4_PROD_HI, QJL_SEED_32));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, QK_TURBO4_PROD_LO, QJL_SEED_96));
     }
 }
 
-void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK_TURBO4 == 0);
-    const int64_t nb = k / QK_TURBO4;
+void dequantize_row_turbo4_0_prod(const block_turbo4_0_prod * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO4_PROD == 0);
+    const int64_t nb = k / QK_TURBO4_PROD;
 
     for (int64_t i = 0; i < nb; i++) {
         float norm = GGML_FP16_TO_FP32(x[i].norm);
-        float * yb = y + i * QK_TURBO4;
+        float * yb = y + i * QK_TURBO4_PROD;
 
-        float ch[QK_TURBO4_HI], cl[QK_TURBO4_LO];
-        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), ch, QK_TURBO4_HI, QJL_SEED_32);
-        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), cl, QK_TURBO4_LO, QJL_SEED_96);
+        float ch[QK_TURBO4_PROD_HI], cl[QK_TURBO4_PROD_LO];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), ch, QK_TURBO4_PROD_HI, QJL_SEED_32);
+        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), cl, QK_TURBO4_PROD_LO, QJL_SEED_96);
 
-        dequant_hi(x[i].qs_hi, ch, centroids_8, 3, QK_TURBO4_HI, norm, yb);
-        dequant_lo(x[i].qs_lo, cl, centroids_4, 2, QK_TURBO4_LO, norm, yb, QK_TURBO4_HI);
+        dequant_hi(x[i].qs_hi, ch, centroids_8, 3, QK_TURBO4_PROD_HI, norm, yb);
+        dequant_lo(x[i].qs_lo, cl, centroids_4, 2, QK_TURBO4_PROD_LO, norm, yb, QK_TURBO4_PROD_HI);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TurboQuant_mse helpers: pure MSE quantize/dequantize (no QJL)
+// ---------------------------------------------------------------------------
+
+// 4-bit packing helpers
+static inline void pk4(uint8_t * q, int j, int v) {
+    q[j / 2] |= (uint8_t)(v << ((j % 2) * 4));
+}
+
+static inline int up4(const uint8_t * q, int j) {
+    return (q[j / 2] >> ((j % 2) * 4)) & 0xF;
+}
+
+// MSE-only dequantize helpers (no QJL correction)
+static void dequant_hi_mse(const uint8_t * qs, const float * c, int bits, int n_hi,
+                            float norm, float * out) {
+    for (int j = 0; j < n_hi; j++) {
+        int idx;
+        if (bits == 2) {
+            idx = (qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+        } else if (bits == 3) {
+            idx = up3(qs, j);
+        } else {  // bits == 4
+            idx = up4(qs, j);
+        }
+        out[j] = norm * c[idx];
+    }
+}
+
+static void dequant_lo_mse(const uint8_t * qs, const float * c, int bits, int n_lo,
+                            float norm, float * out, int offset) {
+    for (int j = 0; j < n_lo; j++) {
+        int idx;
+        if (bits == 1) {
+            idx = (qs[j / 8] >> (j % 8)) & 1;
+        } else if (bits == 2) {
+            idx = (qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+        } else {  // bits == 3
+            idx = up3(qs, j);
+        }
+        out[offset + j] = norm * c[idx];
+    }
+}
+
+// MSE-only quantize helpers (no QJL, just centroid + packing)
+static void quant_hi_mse(const float * xb, float inv_norm, uint8_t * qs,
+                          const float * c, int n_c, int bits, int n_hi) {
+    memset(qs, 0, (n_hi * bits + 7) / 8);
+    for (int j = 0; j < n_hi; j++) {
+        float xn = xb[j] * inv_norm;
+        int idx = nearest(xn, c, n_c);
+        if (bits == 2) {
+            qs[j / 4] |= (uint8_t)(idx << ((j % 4) * 2));
+        } else if (bits == 3) {
+            pk3(qs, j, idx);
+        } else {  // bits == 4
+            pk4(qs, j, idx);
+        }
+    }
+}
+
+static void quant_lo_mse(const float * xb, float inv_norm, uint8_t * qs,
+                          const float * c, int n_c, int bits, int n_lo, int offset) {
+    memset(qs, 0, (n_lo * bits + 7) / 8);
+    for (int j = 0; j < n_lo; j++) {
+        float xn = xb[offset + j] * inv_norm;
+        int idx;
+        if (bits == 1) {
+            idx = (xn >= 0.0f) ? 1 : 0;
+            qs[j / 8] |= (uint8_t)(idx << (j % 8));
+        } else if (bits == 2) {
+            idx = nearest(xn, c, n_c);
+            qs[j / 4] |= (uint8_t)(idx << ((j % 4) * 2));
+        } else {  // bits == 3
+            idx = nearest(xn, c, n_c);
+            pk3(qs, j, idx);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TURBO3_0_MSE: hi=3-bit MSE (centroids_8), lo=2-bit MSE (centroids_4)
+// Pure MSE reconstruction — no QJL. Ideal for V cache.
+// ---------------------------------------------------------------------------
+
+void quantize_row_turbo3_0_mse_ref(const float * GGML_RESTRICT x, block_turbo3_0_mse * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO3_MSE == 0);
+    const int64_t nb = k / QK_TURBO3_MSE;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * QK_TURBO3_MSE;
+        float sum_sq = 0.0f;
+        for (int j = 0; j < QK_TURBO3_MSE; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
+
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+
+        if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
+        float inv = 1.0f / norm;
+
+        quant_hi_mse(xb, inv, y[i].qs_hi, centroids_8, 8, 3, QK_TURBO3_MSE_HI);
+        quant_lo_mse(xb, inv, y[i].qs_lo, centroids_4, 4, 2, QK_TURBO3_MSE_LO, QK_TURBO3_MSE_HI);
+    }
+}
+
+void dequantize_row_turbo3_0_mse(const block_turbo3_0_mse * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO3_MSE == 0);
+    const int64_t nb = k / QK_TURBO3_MSE;
+
+    for (int64_t i = 0; i < nb; i++) {
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+        float * yb = y + i * QK_TURBO3_MSE;
+
+        dequant_hi_mse(x[i].qs_hi, centroids_8, 3, QK_TURBO3_MSE_HI, norm, yb);
+        dequant_lo_mse(x[i].qs_lo, centroids_4, 2, QK_TURBO3_MSE_LO, norm, yb, QK_TURBO3_MSE_HI);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TURBO4_0_MSE: hi=4-bit MSE (centroids_16), lo=3-bit MSE (centroids_8)
+// Pure MSE reconstruction — no QJL. Ideal for V cache.
+// ---------------------------------------------------------------------------
+
+void quantize_row_turbo4_0_mse_ref(const float * GGML_RESTRICT x, block_turbo4_0_mse * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO4_MSE == 0);
+    const int64_t nb = k / QK_TURBO4_MSE;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * QK_TURBO4_MSE;
+        float sum_sq = 0.0f;
+        for (int j = 0; j < QK_TURBO4_MSE; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
+
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+
+        if (norm == 0.0f) { memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi)); memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo)); continue; }
+        float inv = 1.0f / norm;
+
+        quant_hi_mse(xb, inv, y[i].qs_hi, centroids_16, 16, 4, QK_TURBO4_MSE_HI);
+        quant_lo_mse(xb, inv, y[i].qs_lo, centroids_8, 8, 3, QK_TURBO4_MSE_LO, QK_TURBO4_MSE_HI);
+    }
+}
+
+void dequantize_row_turbo4_0_mse(const block_turbo4_0_mse * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO4_MSE == 0);
+    const int64_t nb = k / QK_TURBO4_MSE;
+
+    for (int64_t i = 0; i < nb; i++) {
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+        float * yb = y + i * QK_TURBO4_MSE;
+
+        dequant_hi_mse(x[i].qs_hi, centroids_16, 4, QK_TURBO4_MSE_HI, norm, yb);
+        dequant_lo_mse(x[i].qs_lo, centroids_8, 3, QK_TURBO4_MSE_LO, norm, yb, QK_TURBO4_MSE_HI);
     }
 }
