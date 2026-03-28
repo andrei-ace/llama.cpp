@@ -367,31 +367,28 @@ void llama_kv_cache::tq_try_finish_calibration() {
         if ((int)l.il > max_layer_id) max_layer_id = (int)l.il;
     }
 
-    static const int TQ_MIN_CALIB_VECTORS = 256;
-
     // Check CPU-side accumulators first (works when KV cache is on CPU)
     const int min_count = tq_min_accum_count(max_layer_id + 1);
-    if (min_count >= TQ_MIN_CALIB_VECTORS) {
+    if (min_count > 0) {
         tq_finish_calibration();
         return;
     }
 
     // GPU offload path: CPU accumulators are empty because set_rows runs on GPU.
-    // Check if enough tokens exist in the KV cache by counting used cells.
+    // Check if any tokens exist in the KV cache.
     uint32_t min_used = UINT32_MAX;
     for (uint32_t s = 0; s < n_stream; s++) {
         uint32_t used = v_cells[s].used_max_p1();
         if (used < min_used) min_used = used;
     }
 
-    if (min_used < (uint32_t)TQ_MIN_CALIB_VECTORS) {
-        LLAMA_LOG_DEBUG("%s: TurboQuant calibration: %d tokens in KV cache (need %d), continuing...\n",
-                        __func__, (int)min_used, TQ_MIN_CALIB_VECTORS);
+    if (min_used == 0) {
         return;
     }
 
-    // Read back fp16 K data from GPU and accumulate channel magnitudes on CPU
-    LLAMA_LOG_INFO("%s: TurboQuant GPU calibration — reading back K cache for outlier detection...\n", __func__);
+    // Read back ALL fp16 K data from GPU and accumulate channel magnitudes on CPU
+    LLAMA_LOG_INFO("%s: TurboQuant GPU calibration — reading back %d tokens for outlier detection...\n",
+                   __func__, (int)min_used);
 
     for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
         ggml_tensor * k_tensor = layers[ikv].k;
@@ -404,7 +401,7 @@ void llama_kv_cache::tq_try_finish_calibration() {
 
         for (uint32_t s = 0; s < n_stream; s++) {
             const uint32_t max_cell = v_cells[s].used_max_p1();
-            for (uint32_t cell = 0; cell < max_cell && cell < (uint32_t)TQ_MIN_CALIB_VECTORS; cell++) {
+            for (uint32_t cell = 0; cell < max_cell; cell++) {
                 if (v_cells[s].is_empty(cell)) continue;
                 const size_t offset = (s * get_size() + cell) * fp16_row_sz;
 
