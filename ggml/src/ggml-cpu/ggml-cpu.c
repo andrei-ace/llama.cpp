@@ -405,6 +405,12 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
+    [GGML_TYPE_TURBO3_0_MSE] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqv_25_ref,
+    },
+    [GGML_TYPE_TURBO4_0_MSE] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqv_35_ref,
+    },
 };
 
 const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type) {
@@ -1166,6 +1172,16 @@ static void ggml_compute_forward_mul_mat_one_chunk(
 
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
+
+    // TurboQuant: set per-layer context for vec_dot on K/V cache tensors
+    {
+        const struct ggml_tensor * root = src0;
+        while (root->view_src) root = root->view_src;
+        int layer = -1; int is_k = 1;
+        if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
+        else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
+        if (layer >= 0) { tq_set_current_layer(layer, is_k); }
+    }
 
     GGML_TENSOR_BINARY_OP_LOCALS
 

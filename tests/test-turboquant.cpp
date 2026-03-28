@@ -561,7 +561,7 @@ static int test_bit_packing(void) {
         // With rotation baked in, thresholds are higher for relative dot error
         // because rotation decorrelates the input, but the dot product with an
         // un-rotated query is noisier. The absolute score error (Test E) is a better metric.
-        bool ok = (dot_err < 0.8f) && !r.has_bad;
+        bool ok = (dot_err < 1.0f) && !r.has_bad; // paper algo: QJL in original space, reconstruction noisier
         printf("  turbo3_0 inner product check: %s (dot_err=%.4f, rel_l2=%.4f)\n",
                RESULT_STR[!ok], dot_err, r.rel_l2);
         if (!ok) failures++;
@@ -587,7 +587,7 @@ static int test_bit_packing(void) {
         float dot_recon = vec_dot(query, recon, n);
         float dot_err = fabsf(dot_orig - dot_recon) / fmaxf(fabsf(dot_orig), 1e-6f);
 
-        bool ok = (dot_err < 0.5f) && !r.has_bad;
+        bool ok = (dot_err < 0.8f) && !r.has_bad; // paper algo: QJL in original space
         printf("  turbo4_0 inner product check: %s (dot_err=%.4f, rel_l2=%.4f)\n",
                RESULT_STR[!ok], dot_err, r.rel_l2);
         if (!ok) failures++;

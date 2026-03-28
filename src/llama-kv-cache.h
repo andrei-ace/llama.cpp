@@ -203,6 +203,11 @@ public:
     ggml_tensor * get_turbo_rot_forward() const { return turbo_rotation; }
     ggml_tensor * get_turbo_rot_inverse() const { return turbo_rotation_inv; }
 
+    // TurboQuant outlier calibration
+    bool is_tq_calibrating() const { return tq_calibrating_; }
+    void tq_try_finish_calibration(); // checks min accumulation threshold
+    void tq_finish_calibration();     // unconditionally locks and re-quantizes
+
 private:
     const llama_model & model;
     const llama_hparams & hparams;
@@ -256,6 +261,11 @@ private:
     // TurboQuant rotation matrices (nullptr if not using turbo types)
     ggml_tensor * turbo_rotation     = nullptr;
     ggml_tensor * turbo_rotation_inv = nullptr;
+
+    // TurboQuant outlier calibration state
+    ggml_type target_type_k = GGML_TYPE_F16;  // user-requested TQ type (cache starts as fp16)
+    ggml_type target_type_v = GGML_TYPE_F16;
+    bool tq_calibrating_ = false;             // true during prompt (cache is fp16, accumulating)
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;

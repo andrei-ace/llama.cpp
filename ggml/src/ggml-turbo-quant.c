@@ -10,10 +10,12 @@
 
 #include "ggml-quants.h"
 #include "ggml-impl.h"
+#include "ggml-cpu/quants.h"
 
 #include <math.h>
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 
 // ---------------------------------------------------------------------------
 // Centroids: exact Lloyd-Max for Beta((d-1)/2, (d-1)/2)
@@ -77,7 +79,34 @@ static float tq_rot_hi_inv[TQ_DIM_HI * TQ_DIM_HI];
 static float tq_rot_lo_fwd[TQ_DIM_LO * TQ_DIM_LO];  // Π_lo (row-major)
 static float tq_rot_lo_inv[TQ_DIM_LO * TQ_DIM_LO];
 
-// Outlier channel indices (sorted): which 32 of 128 channels are outliers
+// ---------------------------------------------------------------------------
+// Per-layer-per-head outlier channel registry (populated during calibration)
+// With GQA, different KV heads may have different outlier patterns.
+// ---------------------------------------------------------------------------
+
+#define TQ_MAX_LAYERS 256
+#define TQ_MAX_HEADS   128
+
+// Per-layer-per-head outlier/regular channel indices (K and V may differ)
+static int   tq_k_outlier_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_HI];
+static int   tq_k_regular_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_LO];
+static int   tq_v_outlier_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_HI];
+static int   tq_v_regular_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_LO];
+static int   tq_layer_calibrated[TQ_MAX_LAYERS];
+
+// Calibration accumulators — per layer, per head
+static float tq_k_accum[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM];
+static float tq_v_accum[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM];
+static int   tq_k_accum_n[TQ_MAX_LAYERS]; // count of tokens (not blocks)
+static int   tq_v_accum_n[TQ_MAX_LAYERS];
+static int   tq_calibration_active = 1;
+
+// Thread-local current context (set by CPU backend before quantize/dequantize/vec_dot)
+static _Thread_local int tq_cur_layer = 0;
+static _Thread_local int tq_cur_head  = 0;  // block index within row = KV head index
+static _Thread_local int tq_cur_is_k  = 1;  // 1 = K cache, 0 = V cache
+
+// Legacy single-layer state (kept for fallback first-vector detection)
 static int   tq_outlier_ch[TQ_DIM_HI];
 static int   tq_regular_ch[TQ_DIM_LO];
 static int   tq_initialized = 0;
@@ -119,9 +148,22 @@ static void tq_init_rotations(void) {
     if (tq_initialized) return;
     tq_gen_orthogonal(tq_rot_hi_fwd, tq_rot_hi_inv, TQ_DIM_HI, 0x5475524230484932ULL); // "TuRB0HI2"
     tq_gen_orthogonal(tq_rot_lo_fwd, tq_rot_lo_inv, TQ_DIM_LO, 0x54755242304C4F36ULL); // "TuRB0LO6"
-    // Default outlier channels: first 32 (will be overridden by detection)
+    // Default outlier channels: first 32 (will be overridden by calibration)
     for (int i = 0; i < TQ_DIM_HI; i++) tq_outlier_ch[i] = i;
     for (int i = 0; i < TQ_DIM_LO; i++) tq_regular_ch[i] = TQ_DIM_HI + i;
+    // Initialize per-layer-per-head registries to default (channels 0-31 = outlier)
+    for (int l = 0; l < TQ_MAX_LAYERS; l++) {
+        for (int h = 0; h < TQ_MAX_HEADS; h++) {
+            for (int i = 0; i < TQ_DIM_HI; i++) {
+                tq_k_outlier_reg[l][h][i] = i;
+                tq_v_outlier_reg[l][h][i] = i;
+            }
+            for (int i = 0; i < TQ_DIM_LO; i++) {
+                tq_k_regular_reg[l][h][i] = TQ_DIM_HI + i;
+                tq_v_regular_reg[l][h][i] = TQ_DIM_HI + i;
+            }
+        }
+    }
     tq_initialized = 1;
 }
 
@@ -159,16 +201,20 @@ static void tq_detect_outliers(const float * x) {
     tq_outliers_detected = 1;
 }
 
-// Extract hi/lo channel subsets from a 128-dim vector
+// Extract hi/lo channel subsets from a 128-dim vector (uses per-layer-per-head registry)
 static void tq_split_channels(const float * x, float * hi, float * lo) {
-    for (int i = 0; i < TQ_DIM_HI; i++) hi[i] = x[tq_outlier_ch[i]];
-    for (int i = 0; i < TQ_DIM_LO; i++) lo[i] = x[tq_regular_ch[i]];
+    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[tq_cur_layer][tq_cur_head];
+    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[tq_cur_layer][tq_cur_head];
+    for (int i = 0; i < TQ_DIM_HI; i++) hi[i] = x[outlier[i]];
+    for (int i = 0; i < TQ_DIM_LO; i++) lo[i] = x[regular[i]];
 }
 
-// Merge hi/lo channel subsets back into 128-dim vector
+// Merge hi/lo channel subsets back into 128-dim vector (uses per-layer-per-head registry)
 static void tq_merge_channels(const float * hi, const float * lo, float * x) {
-    for (int i = 0; i < TQ_DIM_HI; i++) x[tq_outlier_ch[i]] = hi[i];
-    for (int i = 0; i < TQ_DIM_LO; i++) x[tq_regular_ch[i]] = lo[i];
+    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[tq_cur_layer][tq_cur_head];
+    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[tq_cur_layer][tq_cur_head];
+    for (int i = 0; i < TQ_DIM_HI; i++) x[outlier[i]] = hi[i];
+    for (int i = 0; i < TQ_DIM_LO; i++) x[regular[i]] = lo[i];
 }
 
 // Rotate hi subset: out = Π_hi * in
@@ -424,12 +470,10 @@ void quantize_row_tqk_25_ref(const float * GGML_RESTRICT x, block_tqk_25 * GGML_
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * xb = x + i * TQK_BLOCK_SIZE;
 
-        // Detect outlier channels from first vector
-        tq_detect_outliers(xb);
-
-        // Split into outlier (hi) and regular (lo) channel subsets
+        // Split into outlier (hi) and regular (lo) channel subsets (per-layer)
         float hi_raw[TQK_N_OUTLIER], lo_raw[TQK_N_REGULAR];
         tq_split_channels(xb, hi_raw, lo_raw);
 
@@ -456,12 +500,23 @@ void quantize_row_tqk_25_ref(const float * GGML_RESTRICT x, block_tqk_25 * GGML_
         float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
         float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
 
-        float res_hi[TQK_N_OUTLIER], res_lo[TQK_N_REGULAR];
-        quant_hi(hi_rot, inv_hi, y[i].qs_hi, centroids_4_d32, 4, 2, TQK_N_OUTLIER, res_hi);
-        quant_lo(lo_rot, inv_lo, y[i].qs_lo, centroids_2_d96, 2, 1, TQK_N_REGULAR, 0, res_lo);
+        float res_hi_dummy[TQK_N_OUTLIER], res_lo_dummy[TQK_N_REGULAR];
+        quant_hi(hi_rot, inv_hi, y[i].qs_hi, centroids_4_d32, 4, 2, TQK_N_OUTLIER, res_hi_dummy);
+        quant_lo(lo_rot, inv_lo, y[i].qs_lo, centroids_2_d96, 2, 1, TQK_N_REGULAR, 0, res_lo_dummy);
 
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, TQK_N_OUTLIER, QJL_SEED_32));
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, TQK_N_REGULAR, QJL_SEED_96));
+        // Paper Algorithm 2: residual in original subset space
+        float yhi[TQK_N_OUTLIER], ylo[TQK_N_REGULAR];
+        for (int j = 0; j < TQK_N_OUTLIER; j++) yhi[j] = centroids_4_d32[(y[i].qs_hi[j/4] >> ((j%4)*2)) & 0x3];
+        for (int j = 0; j < TQK_N_REGULAR; j++) ylo[j] = centroids_2_d96[(y[i].qs_lo[j/8] >> (j%8)) & 1];
+        float hi_rec[TQK_N_OUTLIER], lo_rec[TQK_N_REGULAR];
+        tq_unrotate_hi(yhi, hi_rec);
+        tq_unrotate_lo(ylo, lo_rec);
+        float r_hi[TQK_N_OUTLIER], r_lo[TQK_N_REGULAR];
+        for (int j = 0; j < TQK_N_OUTLIER; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+        for (int j = 0; j < TQK_N_REGULAR; j++) r_lo[j] = lo_raw[j] - norm_lo * lo_rec[j];
+
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQK_N_OUTLIER, QJL_SEED_32));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(r_lo, y[i].signs_lo, TQK_N_REGULAR, QJL_SEED_96));
     }
 }
 
@@ -471,21 +526,27 @@ void dequantize_row_tqk_25(const block_tqk_25 * GGML_RESTRICT x, float * GGML_RE
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+
+        // Paper DEQUANT_prod: MSE recon in original space + QJL correction
+        float yhi[TQK_N_OUTLIER], ylo[TQK_N_REGULAR];
+        for (int j = 0; j < TQK_N_OUTLIER; j++) yhi[j] = centroids_4_d32[(x[i].qs_hi[j/4] >> ((j%4)*2)) & 0x3];
+        for (int j = 0; j < TQK_N_REGULAR; j++) ylo[j] = centroids_2_d96[(x[i].qs_lo[j/8] >> (j%8)) & 1];
+
+        float hi_orig[TQK_N_OUTLIER], lo_orig[TQK_N_REGULAR];
+        tq_unrotate_hi(yhi, hi_orig);
+        tq_unrotate_lo(ylo, lo_orig);
+        for (int j = 0; j < TQK_N_OUTLIER; j++) hi_orig[j] *= norm_hi;
+        for (int j = 0; j < TQK_N_REGULAR; j++) lo_orig[j] *= norm_lo;
 
         float corr_hi[TQK_N_OUTLIER], corr_lo[TQK_N_REGULAR];
         qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQK_N_OUTLIER, QJL_SEED_32);
         qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_REGULAR, QJL_SEED_96);
+        for (int j = 0; j < TQK_N_OUTLIER; j++) hi_orig[j] += corr_hi[j];
+        for (int j = 0; j < TQK_N_REGULAR; j++) lo_orig[j] += corr_lo[j];
 
-        float hi_rot[TQK_N_OUTLIER], lo_rot[TQK_N_REGULAR];
-        dequant_hi(x[i].qs_hi, corr_hi, centroids_4_d32, 2, TQK_N_OUTLIER, norm_hi, hi_rot);
-        dequant_lo(x[i].qs_lo, corr_lo, centroids_2_d96, 1, TQK_N_REGULAR, norm_lo, lo_rot, 0);
-
-        // Unrotate each subset and merge back
-        float hi_orig[TQK_N_OUTLIER], lo_orig[TQK_N_REGULAR];
-        tq_unrotate_hi(hi_rot, hi_orig);
-        tq_unrotate_lo(lo_rot, lo_orig);
         tq_merge_channels(hi_orig, lo_orig, y + i * TQK_BLOCK_SIZE);
     }
 }
@@ -500,9 +561,8 @@ void quantize_row_tqk_35_ref(const float * GGML_RESTRICT x, block_tqk_35 * GGML_
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * xb = x + i * TQK_BLOCK_SIZE;
-
-        tq_detect_outliers(xb);
 
         float hi_raw[TQK_N_OUTLIER], lo_raw[TQK_N_REGULAR];
         tq_split_channels(xb, hi_raw, lo_raw);
@@ -528,12 +588,27 @@ void quantize_row_tqk_35_ref(const float * GGML_RESTRICT x, block_tqk_35 * GGML_
         float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
         float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
 
-        float res_hi[TQK_N_OUTLIER], res_lo[TQK_N_REGULAR];
-        quant_hi(hi_rot, inv_hi, y[i].qs_hi, centroids_8_d32, 8, 3, TQK_N_OUTLIER, res_hi);
-        quant_lo(lo_rot, inv_lo, y[i].qs_lo, centroids_4_d96, 4, 2, TQK_N_REGULAR, 0, res_lo);
+        // MSE quantize (in normalized-rotated space, same as before)
+        float res_hi_dummy[TQK_N_OUTLIER], res_lo_dummy[TQK_N_REGULAR];
+        quant_hi(hi_rot, inv_hi, y[i].qs_hi, centroids_8_d32, 8, 3, TQK_N_OUTLIER, res_hi_dummy);
+        quant_lo(lo_rot, inv_lo, y[i].qs_lo, centroids_4_d96, 4, 2, TQK_N_REGULAR, 0, res_lo_dummy);
 
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(res_hi, y[i].signs_hi, TQK_N_OUTLIER, QJL_SEED_32));
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(res_lo, y[i].signs_lo, TQK_N_REGULAR, QJL_SEED_96));
+        // Paper Algorithm 2: residual in original subset space
+        // DEQUANT_mse: ỹ = centroids[idx], x̂_rec = Π^T · ỹ, x_rec = norm * x̂_rec
+        float yhi[TQK_N_OUTLIER], ylo[TQK_N_REGULAR];
+        for (int j = 0; j < TQK_N_OUTLIER; j++) yhi[j] = centroids_8_d32[up3(y[i].qs_hi, j)];
+        for (int j = 0; j < TQK_N_REGULAR; j++) ylo[j] = centroids_4_d96[(y[i].qs_lo[j/4] >> ((j%4)*2)) & 0x3];
+        float hi_rec[TQK_N_OUTLIER], lo_rec[TQK_N_REGULAR];
+        tq_unrotate_hi(yhi, hi_rec);
+        tq_unrotate_lo(ylo, lo_rec);
+        // r = x_raw - norm * x̂_rec
+        float r_hi[TQK_N_OUTLIER], r_lo[TQK_N_REGULAR];
+        for (int j = 0; j < TQK_N_OUTLIER; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+        for (int j = 0; j < TQK_N_REGULAR; j++) r_lo[j] = lo_raw[j] - norm_lo * lo_rec[j];
+
+        // QJL on residual in original subset space
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQK_N_OUTLIER, QJL_SEED_32));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(r_lo, y[i].signs_lo, TQK_N_REGULAR, QJL_SEED_96));
     }
 }
 
@@ -543,20 +618,29 @@ void dequantize_row_tqk_35(const block_tqk_35 * GGML_RESTRICT x, float * GGML_RE
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
+        // Paper DEQUANT_prod: x̃_mse + x̃_qjl
+        // Step 1: MSE reconstruction — centroids → unrotate → scale by norm
+        float yhi[TQK_N_OUTLIER], ylo[TQK_N_REGULAR];
+        for (int j = 0; j < TQK_N_OUTLIER; j++) yhi[j] = centroids_8_d32[up3(x[i].qs_hi, j)];
+        for (int j = 0; j < TQK_N_REGULAR; j++) ylo[j] = centroids_4_d96[(x[i].qs_lo[j/4] >> ((j%4)*2)) & 0x3];
+
+        float hi_orig[TQK_N_OUTLIER], lo_orig[TQK_N_REGULAR];
+        tq_unrotate_hi(yhi, hi_orig);
+        tq_unrotate_lo(ylo, lo_orig);
+        for (int j = 0; j < TQK_N_OUTLIER; j++) hi_orig[j] *= norm_hi;
+        for (int j = 0; j < TQK_N_REGULAR; j++) lo_orig[j] *= norm_lo;
+
+        // Step 2: QJL correction in original subset space
         float corr_hi[TQK_N_OUTLIER], corr_lo[TQK_N_REGULAR];
         qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQK_N_OUTLIER, QJL_SEED_32);
         qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_REGULAR, QJL_SEED_96);
+        for (int j = 0; j < TQK_N_OUTLIER; j++) hi_orig[j] += corr_hi[j];
+        for (int j = 0; j < TQK_N_REGULAR; j++) lo_orig[j] += corr_lo[j];
 
-        float hi_rot[TQK_N_OUTLIER], lo_rot[TQK_N_REGULAR];
-        dequant_hi(x[i].qs_hi, corr_hi, centroids_8_d32, 3, TQK_N_OUTLIER, norm_hi, hi_rot);
-        dequant_lo(x[i].qs_lo, corr_lo, centroids_4_d96, 2, TQK_N_REGULAR, norm_lo, lo_rot, 0);
-
-        float hi_orig[TQK_N_OUTLIER], lo_orig[TQK_N_REGULAR];
-        tq_unrotate_hi(hi_rot, hi_orig);
-        tq_unrotate_lo(lo_rot, lo_orig);
         tq_merge_channels(hi_orig, lo_orig, y + i * TQK_BLOCK_SIZE);
     }
 }
@@ -572,12 +656,10 @@ void quantize_row_tqv_25_ref(const float * GGML_RESTRICT x, block_tqv_25 * GGML_
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * xb_orig = x + i * TQV_BLOCK_SIZE;
 
-        // Detect outlier channels from first vector
-        tq_detect_outliers(xb_orig);
-
-        // Split into outlier (hi) and regular (lo) channel subsets
+        // Split into outlier (hi) and regular (lo) channel subsets (per-layer)
         float hi_raw[TQV_N_OUTLIER], lo_raw[TQV_N_REGULAR];
         tq_split_channels(xb_orig, hi_raw, lo_raw);
 
@@ -609,6 +691,7 @@ void dequantize_row_tqv_25(const block_tqv_25 * GGML_RESTRICT x, float * GGML_RE
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
@@ -635,12 +718,10 @@ void quantize_row_tqv_35_ref(const float * GGML_RESTRICT x, block_tqv_35 * GGML_
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * xb_orig = x + i * TQV_BLOCK_SIZE;
 
-        // Detect outlier channels from first vector
-        tq_detect_outliers(xb_orig);
-
-        // Split into outlier (hi) and regular (lo) channel subsets
+        // Split into outlier (hi) and regular (lo) channel subsets (per-layer)
         float hi_raw[TQV_N_OUTLIER], lo_raw[TQV_N_REGULAR];
         tq_split_channels(xb_orig, hi_raw, lo_raw);
 
@@ -673,6 +754,7 @@ void dequantize_row_tqv_35(const block_tqv_35 * GGML_RESTRICT x, float * GGML_RE
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
@@ -768,12 +850,12 @@ void ggml_vec_dot_tqk_25_f32(
     float sumf = 0.0f;
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * q = y + i * TQK_BLOCK_SIZE;
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
         // Split query by outlier channels, rotate each subset
-        tq_detect_outliers(q);
         float hi_raw[TQK_N_OUTLIER], lo_raw[TQK_N_REGULAR];
         tq_split_channels(q, hi_raw, lo_raw);
         float q_rot_hi[TQK_N_OUTLIER], q_rot_lo[TQK_N_REGULAR];
@@ -792,13 +874,13 @@ void ggml_vec_dot_tqk_25_f32(
         }
         float mse_dot = mse_dot_hi * norm_hi + mse_dot_lo * norm_lo;
 
-        // Step 3: split QJL correction (independent per partition)
-        float qjl_hi = qjl_asymmetric_dot(q_rot_hi, TQK_N_OUTLIER, QJL_SEED_32,
+        // Paper: QJL correction uses raw query (not rotated), residual is in original space
+        float qjl_hi = qjl_asymmetric_dot(hi_raw, TQK_N_OUTLIER, QJL_SEED_32,
                                             x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot(q_rot_lo, TQK_N_REGULAR, QJL_SEED_96,
+        float qjl_lo = qjl_asymmetric_dot(lo_raw, TQK_N_REGULAR, QJL_SEED_96,
                                             x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
 
-        sumf += mse_dot + norm_hi * qjl_hi + norm_lo * qjl_lo;
+        sumf += mse_dot + qjl_hi + qjl_lo;
     }
 
     *s = sumf;
@@ -822,11 +904,11 @@ void ggml_vec_dot_tqk_35_f32(
     float sumf = 0.0f;
 
     for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * q = y + i * TQK_BLOCK_SIZE;
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
-        tq_detect_outliers(q);
         float hi_raw[TQK_N_OUTLIER], lo_raw[TQK_N_REGULAR];
         tq_split_channels(q, hi_raw, lo_raw);
         float q_rot_hi[TQK_N_OUTLIER], q_rot_lo[TQK_N_REGULAR];
@@ -844,13 +926,143 @@ void ggml_vec_dot_tqk_35_f32(
         }
         float mse_dot = mse_dot_hi * norm_hi + mse_dot_lo * norm_lo;
 
-        float qjl_hi = qjl_asymmetric_dot(q_rot_hi, TQK_N_OUTLIER, QJL_SEED_32,
+        // Paper: QJL correction uses raw query (not rotated), residual is in original space
+        float qjl_hi = qjl_asymmetric_dot(hi_raw, TQK_N_OUTLIER, QJL_SEED_32,
                                             x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot(q_rot_lo, TQK_N_REGULAR, QJL_SEED_96,
+        float qjl_lo = qjl_asymmetric_dot(lo_raw, TQK_N_REGULAR, QJL_SEED_96,
                                             x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
 
-        sumf += mse_dot + norm_hi * qjl_hi + norm_lo * qjl_lo;
+        sumf += mse_dot + qjl_hi + qjl_lo;
     }
 
     *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// Public API: per-layer outlier calibration
+// ---------------------------------------------------------------------------
+
+void tq_set_current_layer(int layer, int is_k) {
+    tq_cur_layer = (layer >= 0 && layer < TQ_MAX_LAYERS) ? layer : 0;
+    tq_cur_is_k  = is_k;
+}
+
+void tq_set_current_head(int head) {
+    tq_cur_head = (head >= 0 && head < TQ_MAX_HEADS) ? head : 0;
+}
+
+int tq_is_calibrating(void) {
+    return tq_calibration_active;
+}
+
+void tq_accumulate_channels(int layer, int is_k, const float * x, int64_t k) {
+    if (layer < 0 || layer >= TQ_MAX_LAYERS) return;
+    const int64_t nb = k / TQ_DIM;
+    int * count = is_k ? &tq_k_accum_n[layer] : &tq_v_accum_n[layer];
+    for (int64_t b = 0; b < nb && b < TQ_MAX_HEADS; b++) {
+        float * accum = is_k ? tq_k_accum[layer][b] : tq_v_accum[layer][b];
+        const float * xb = x + b * TQ_DIM;
+        for (int i = 0; i < TQ_DIM; i++) {
+            accum[i] += fabsf(xb[i]);
+        }
+    }
+    (*count)++; // count tokens, not blocks
+}
+
+// Detect outlier channels from accumulated magnitudes for one (layer, head, is_k)
+static void tq_detect_outliers_for_head(int layer, int head, int is_k) {
+    float * accum   = is_k ? tq_k_accum[layer][head]       : tq_v_accum[layer][head];
+    int   * outlier = is_k ? tq_k_outlier_reg[layer][head]  : tq_v_outlier_reg[layer][head];
+    int   * regular = is_k ? tq_k_regular_reg[layer][head]  : tq_v_regular_reg[layer][head];
+
+    // Check if any data accumulated for this head
+    float total = 0.0f;
+    for (int i = 0; i < TQ_DIM; i++) total += accum[i];
+    if (total == 0.0f) return; // no data — keep defaults
+
+    // Sort channels by accumulated magnitude (descending)
+    int order[TQ_DIM];
+    for (int i = 0; i < TQ_DIM; i++) order[i] = i;
+    for (int i = 1; i < TQ_DIM; i++) {
+        int key_idx = order[i]; float key_mag = accum[key_idx];
+        int j = i - 1;
+        while (j >= 0 && accum[order[j]] < key_mag) { order[j+1] = order[j]; j--; }
+        order[j+1] = key_idx;
+    }
+
+    // Top 32 by magnitude = outliers
+    for (int i = 0; i < TQ_DIM_HI; i++) outlier[i] = order[i];
+    // Sort outlier indices ascending for consistent ordering
+    for (int i = 1; i < TQ_DIM_HI; i++) {
+        int key = outlier[i]; int j = i - 1;
+        while (j >= 0 && outlier[j] > key) { outlier[j+1] = outlier[j]; j--; }
+        outlier[j+1] = key;
+    }
+    // Remaining = regular channels
+    int ri = 0;
+    for (int i = 0; i < TQ_DIM; i++) {
+        int is_outlier_ch = 0;
+        for (int j = 0; j < TQ_DIM_HI; j++) { if (outlier[j] == i) { is_outlier_ch = 1; break; } }
+        if (!is_outlier_ch) regular[ri++] = i;
+    }
+}
+
+int tq_min_accum_count(int n_layers) {
+    int min_count = 0x7FFFFFFF;
+    for (int l = 0; l < n_layers && l < TQ_MAX_LAYERS; l++) {
+        // Skip layers with no data (filtered/unused layers, or MLA with no V cache)
+        if (tq_k_accum_n[l] == 0 && tq_v_accum_n[l] == 0) continue;
+        // Only include K/V counts if that cache actually has data (MLA has no V)
+        if (tq_k_accum_n[l] > 0 && tq_k_accum_n[l] < min_count) min_count = tq_k_accum_n[l];
+        if (tq_v_accum_n[l] > 0 && tq_v_accum_n[l] < min_count) min_count = tq_v_accum_n[l];
+    }
+    return min_count == 0x7FFFFFFF ? 0 : min_count;
+}
+
+void tq_lock_outliers_from_accum(int n_layers) {
+    tq_init_rotations();
+    for (int l = 0; l < n_layers && l < TQ_MAX_LAYERS; l++) {
+        for (int h = 0; h < TQ_MAX_HEADS; h++) {
+            tq_detect_outliers_for_head(l, h, 1); // K
+            tq_detect_outliers_for_head(l, h, 0); // V
+        }
+        tq_layer_calibrated[l] = 1;
+    }
+    tq_calibration_active = 0;
+
+    // Debug: print outlier channels for first 2 layers, all active heads
+    fprintf(stderr, "tq_lock: %d layers, %d tokens accumulated (K layer0)\n",
+            n_layers, tq_k_accum_n[0]);
+    for (int l = 0; l < 2 && l < n_layers; l++) {
+        for (int h = 0; h < 8; h++) {
+            // Check if this head has data
+            float total = 0.0f;
+            for (int i = 0; i < TQ_DIM; i++) total += tq_k_accum[l][h][i];
+            if (total == 0.0f) break;
+            fprintf(stderr, "  K layer=%d head=%d outliers: [", l, h);
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%d ", tq_k_outlier_reg[l][h][i]);
+            fprintf(stderr, "...]\n");
+        }
+    }
+}
+
+void tq_reset_calibration(void) {
+    memset(tq_k_accum, 0, sizeof(tq_k_accum));
+    memset(tq_v_accum, 0, sizeof(tq_v_accum));
+    memset(tq_k_accum_n, 0, sizeof(tq_k_accum_n));
+    memset(tq_v_accum_n, 0, sizeof(tq_v_accum_n));
+    memset(tq_layer_calibrated, 0, sizeof(tq_layer_calibrated));
+    tq_calibration_active = 1;
+    for (int l = 0; l < TQ_MAX_LAYERS; l++) {
+        for (int h = 0; h < TQ_MAX_HEADS; h++) {
+            for (int i = 0; i < TQ_DIM_HI; i++) {
+                tq_k_outlier_reg[l][h][i] = i;
+                tq_v_outlier_reg[l][h][i] = i;
+            }
+            for (int i = 0; i < TQ_DIM_LO; i++) {
+                tq_k_regular_reg[l][h][i] = TQ_DIM_HI + i;
+                tq_v_regular_reg[l][h][i] = TQ_DIM_HI + i;
+            }
+        }
+    }
 }

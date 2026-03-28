@@ -5,12 +5,22 @@
 #include "llama-model.h"
 #include "llama-context.h"
 
+// TurboQuant calibration API (from ggml-turbo-quant.c)
+extern "C" {
+    void tq_set_current_layer(int layer, int is_k);
+    void tq_lock_outliers_from_accum(int n_layers);
+    int  tq_is_calibrating(void);
+    int  tq_min_accum_count(int n_layers);
+    void tq_reset_calibration(void);
+}
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 //
@@ -99,6 +109,24 @@ llama_kv_cache::llama_kv_cache(
 
     const bool is_mla = hparams.is_mla();
 
+    // TurboQuant: start with fp16 for calibration, lock outliers after prompt
+    const bool uses_turbo_k = (type_k == GGML_TYPE_TURBO3_0_PROD || type_k == GGML_TYPE_TURBO4_0_PROD ||
+                               type_k == GGML_TYPE_TURBO3_0_MSE  || type_k == GGML_TYPE_TURBO4_0_MSE);
+    const bool uses_turbo_v = (type_v == GGML_TYPE_TURBO3_0_PROD || type_v == GGML_TYPE_TURBO4_0_PROD ||
+                               type_v == GGML_TYPE_TURBO3_0_MSE  || type_v == GGML_TYPE_TURBO4_0_MSE);
+    ggml_type alloc_type_k = type_k;
+    ggml_type alloc_type_v = type_v;
+    if (uses_turbo_k || uses_turbo_v) {
+        target_type_k = type_k;
+        target_type_v = type_v;
+        if (uses_turbo_k) { alloc_type_k = GGML_TYPE_F16; }
+        if (uses_turbo_v) { alloc_type_v = GGML_TYPE_F16; }
+        tq_calibrating_ = true;
+        // P1: Reset global calibration state for this new context
+        tq_reset_calibration();
+        LLAMA_LOG_INFO("%s: TurboQuant calibration enabled — starting with fp16 K/V cache\n", __func__);
+    }
+
     for (uint32_t il = 0; il < hparams.n_layer; il++) {
         if (!hparams.has_kv(il)) {
             LLAMA_LOG_DEBUG("%s: layer %3d: does not have KV cache\n", __func__, il);
@@ -135,8 +163,8 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, alloc_type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, alloc_type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
         has_k && ggml_format_name(k, "cache_k_l%d", il);
         has_v && ggml_format_name(v, "cache_v_l%d", il);
@@ -322,6 +350,209 @@ llama_kv_cache::llama_kv_cache(
         LLAMA_LOG_INFO("%s: TurboQuant rotation matrix initialized (%d x %d, %.1f KB)\n",
                        __func__, head_dim, head_dim, head_dim * head_dim * sizeof(float) / 1024.0f);
     }
+}
+
+void llama_kv_cache::tq_try_finish_calibration() {
+    if (!tq_calibrating_) return;
+
+    // Find max model layer id to check accumulation across all actual layers
+    int max_layer_id = 0;
+    for (const auto & l : layers) {
+        if ((int)l.il > max_layer_id) max_layer_id = (int)l.il;
+    }
+    const int min_count = tq_min_accum_count(max_layer_id + 1);
+
+    static const int TQ_MIN_CALIB_VECTORS = 128;
+
+    if (min_count < TQ_MIN_CALIB_VECTORS) {
+        LLAMA_LOG_DEBUG("%s: TurboQuant calibration: %d tokens accumulated (need %d), continuing...\n",
+                        __func__, min_count, TQ_MIN_CALIB_VECTORS);
+        return;
+    }
+
+    tq_finish_calibration();
+}
+
+void llama_kv_cache::tq_finish_calibration() {
+    if (!tq_calibrating_) return;
+
+    // Use max model layer id (not dense count) since accumulators are keyed by model layer id
+    int max_layer_id = 0;
+    for (const auto & l : layers) {
+        if ((int)l.il > max_layer_id) max_layer_id = (int)l.il;
+    }
+
+    // 1. Lock outlier channels from accumulated statistics
+    tq_lock_outliers_from_accum(max_layer_id + 1);
+
+    // 2. Create new TQ tensors and re-quantize fp16 → TQ for each layer
+    const uint32_t kv_sz = get_size();
+
+    // Group layers by backend buffer type (same pattern as constructor)
+    std::map<ggml_backend_buffer_type_t, ggml_context *> tq_ctx_map;
+    auto tq_ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
+        auto it = tq_ctx_map.find(buft);
+        if (it != tq_ctx_map.end()) return it->second;
+        // Need space for: K tensor + V tensor + k_stream views + v_stream views per layer
+        const size_t tensors_per_layer = 2 + 2 * n_stream;
+        ggml_init_params params = {
+            /*.mem_size   =*/ tensors_per_layer * (int)layers.size() * ggml_tensor_overhead() + 1024,
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context * ctx = ggml_init(params);
+        tq_ctx_map[buft] = ctx;
+        return ctx;
+    };
+
+    // Create TQ tensors for each layer
+    std::vector<ggml_tensor *> tq_k_tensors((int)layers.size(), nullptr);
+    std::vector<ggml_tensor *> tq_v_tensors((int)layers.size(), nullptr);
+
+    for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        ggml_tensor * old_k = layers[ikv].k;
+        ggml_tensor * old_v = layers[ikv].v;
+
+        // Use same backend as the old tensor
+        ggml_backend_buffer_type_t buft = old_k ? ggml_backend_buffer_get_type(old_k->buffer)
+                                                : ggml_backend_cpu_buffer_type();
+        ggml_context * ctx = tq_ctx_for_buft(buft);
+
+        if (old_k && target_type_k != old_k->type) {
+            tq_k_tensors[ikv] = ggml_new_tensor_3d(ctx, target_type_k, old_k->ne[0], old_k->ne[1], old_k->ne[2]);
+            ggml_format_name(tq_k_tensors[ikv], "cache_k_l%d", layers[ikv].il);
+        }
+        if (old_v && target_type_v != old_v->type) {
+            tq_v_tensors[ikv] = ggml_new_tensor_3d(ctx, target_type_v, old_v->ne[0], old_v->ne[1], old_v->ne[2]);
+            ggml_format_name(tq_v_tensors[ikv], "cache_v_l%d", layers[ikv].il);
+        }
+    }
+
+    // Allocate backend buffers for the new TQ tensors
+    for (auto & [buft, ctx] : tq_ctx_map) {
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
+        if (!buf) {
+            LLAMA_LOG_ERROR("%s: failed to allocate TQ buffer\n", __func__);
+            tq_calibrating_ = false;
+            return;
+        }
+        ggml_backend_buffer_clear(buf, 0);
+        ctxs_bufs.emplace_back(ggml_context_ptr(ctx), ggml_backend_buffer_ptr(buf));
+    }
+
+    // 3. Re-quantize fp16 data → TQ for each layer's occupied cells
+    for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        // K cache
+        if (tq_k_tensors[ikv]) {
+            ggml_tensor * old_k = layers[ikv].k;
+            ggml_tensor * new_k = tq_k_tensors[ikv];
+            const int64_t n_embd = old_k->ne[0];
+            const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
+            const size_t tq_row_sz   = ggml_row_size(target_type_k, n_embd);
+
+            tq_set_current_layer(layers[ikv].il, 1); // K — use model layer ID, not dense index
+            std::vector<float> tmp(n_embd);
+
+            for (uint32_t s = 0; s < n_stream; s++) {
+                const uint32_t max_cell = v_cells[s].used_max_p1();
+                for (uint32_t cell = 0; cell < max_cell; cell++) {
+                    if (v_cells[s].is_empty(cell)) continue;
+                    const size_t offset_fp16 = (s * kv_sz + cell) * fp16_row_sz;
+                    const size_t offset_tq   = (s * kv_sz + cell) * tq_row_sz;
+
+                    // fp16 → f32
+                    std::vector<ggml_fp16_t> fp16_buf(n_embd);
+                    ggml_backend_tensor_get(old_k, fp16_buf.data(), offset_fp16, n_embd * sizeof(ggml_fp16_t));
+                    ggml_fp16_to_fp32_row(fp16_buf.data(), tmp.data(), n_embd);
+
+                    // f32 → TQ
+                    const auto * traits = ggml_get_type_traits_cpu(target_type_k);
+                    std::vector<uint8_t> tq_buf(tq_row_sz);
+                    traits->from_float(tmp.data(), tq_buf.data(), n_embd);
+                    ggml_backend_tensor_set(new_k, tq_buf.data(), offset_tq, tq_row_sz);
+                }
+            }
+
+            layers[ikv].k = new_k;
+            // Rebuild k_stream views
+            layers[ikv].k_stream.clear();
+            for (uint32_t s = 0; s < n_stream; s++) {
+                // Note: views need a ggml_context, reuse the TQ context
+                ggml_context * vctx = tq_ctx_map.begin()->second;
+                layers[ikv].k_stream.push_back(
+                    ggml_view_2d(vctx, new_k, n_embd, kv_sz, new_k->nb[1], s * new_k->nb[2]));
+            }
+        }
+
+        // V cache
+        if (tq_v_tensors[ikv]) {
+            ggml_tensor * old_v = layers[ikv].v;
+            ggml_tensor * new_v = tq_v_tensors[ikv];
+            const int64_t n_embd = old_v->ne[0];
+            const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
+            const size_t tq_row_sz   = ggml_row_size(target_type_v, n_embd);
+
+            tq_set_current_layer(layers[ikv].il, 0); // V — use model layer ID
+            std::vector<float> tmp(n_embd);
+
+            for (uint32_t s = 0; s < n_stream; s++) {
+                const uint32_t max_cell = v_cells[s].used_max_p1();
+                for (uint32_t cell = 0; cell < max_cell; cell++) {
+                    if (v_cells[s].is_empty(cell)) continue;
+                    const size_t offset_fp16 = (s * kv_sz + cell) * fp16_row_sz;
+                    const size_t offset_tq   = (s * kv_sz + cell) * tq_row_sz;
+
+                    std::vector<ggml_fp16_t> fp16_buf(n_embd);
+                    ggml_backend_tensor_get(old_v, fp16_buf.data(), offset_fp16, n_embd * sizeof(ggml_fp16_t));
+                    ggml_fp16_to_fp32_row(fp16_buf.data(), tmp.data(), n_embd);
+
+                    const auto * traits = ggml_get_type_traits_cpu(target_type_v);
+                    std::vector<uint8_t> tq_buf(tq_row_sz);
+                    traits->from_float(tmp.data(), tq_buf.data(), n_embd);
+                    ggml_backend_tensor_set(new_v, tq_buf.data(), offset_tq, tq_row_sz);
+                }
+            }
+
+            layers[ikv].v = new_v;
+            layers[ikv].v_stream.clear();
+            for (uint32_t s = 0; s < n_stream; s++) {
+                ggml_context * vctx = tq_ctx_map.begin()->second;
+                layers[ikv].v_stream.push_back(
+                    ggml_view_2d(vctx, new_v, n_embd, kv_sz, new_v->nb[1], s * new_v->nb[2]));
+            }
+        }
+    }
+
+    // 4. Free old fp16 buffers — identify them by checking which ctxs_bufs entries
+    //    contain tensors that are no longer referenced by any layer
+    {
+        std::set<ggml_backend_buffer_t> active_bufs;
+        for (const auto & l : layers) {
+            if (l.k && l.k->buffer) active_bufs.insert(l.k->buffer);
+            if (l.v && l.v->buffer) active_bufs.insert(l.v->buffer);
+        }
+        if (turbo_rotation && turbo_rotation->buffer) active_bufs.insert(turbo_rotation->buffer);
+
+        size_t freed = 0;
+        auto it = ctxs_bufs.begin();
+        while (it != ctxs_bufs.end()) {
+            ggml_backend_buffer_t buf = it->second.get();
+            if (buf && active_bufs.find(buf) == active_bufs.end()) {
+                freed += ggml_backend_buffer_get_size(buf);
+                it = ctxs_bufs.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (freed > 0) {
+            LLAMA_LOG_INFO("%s: freed %.2f MiB of old fp16 KV buffers\n", __func__, freed / (1024.0f * 1024.0f));
+        }
+    }
+
+    tq_calibrating_ = false;
+    LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers (K: %s, V: %s)\n",
+                   __func__, (int)layers.size(),
+                   ggml_type_name(target_type_k), ggml_type_name(target_type_v));
 }
 
 void llama_kv_cache::clear(bool data) {
