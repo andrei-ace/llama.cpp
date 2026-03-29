@@ -119,6 +119,10 @@ static _Thread_local int tq_cur_layer = 0;
 static _Thread_local int tq_cur_head  = 0;  // block index within row = KV head index
 static _Thread_local int tq_cur_is_k  = 1;  // 1 = K cache, 0 = V cache
 
+// Forward declarations for sink dispatch (defined after globals)
+static bool tq_try_sink_dot(int n, float * GGML_RESTRICT s, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int64_t tq_block_size_bytes);
+static bool tq_try_sink_dequant(const void * x, float * y, int64_t k, int64_t tq_block_size_bytes);
+
 // Per-layer fp16 sink registry (set once after calibration, read by vec_dot)
 static const void * tq_sink_k_base[TQ_MAX_LAYERS];      // start of TQ K tensor data per layer
 static const void * tq_sink_fp16_base[TQ_MAX_LAYERS];    // start of fp16 sink tensor data per layer
@@ -326,29 +330,133 @@ static float tq_gaussian(void) {
 #define QJL_SEED_96   0x514A4C60ULL
 #define QJL_SEED_128  0x514A4C80ULL
 
+// Pre-computed QJL matrix (generated once, reused everywhere)
+static float tq_qjl_mat_32[TQ_DIM_HI * TQ_DIM_HI];  // 32×32 = 4KB
+static int   tq_qjl_mat_initialized = 0;
+
+static void tq_init_qjl_matrices(void) {
+    if (tq_qjl_mat_initialized) return;
+    // Forward declaration — tq_get_qjl_matrix is defined later
+    // Use inline generation instead
+    uint64_t st = QJL_SEED_32;
+    for (int i = 0; i < TQ_DIM_HI; i++) {
+        for (int j = 0; j < TQ_DIM_HI; j++) {
+            st = st * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u1 = ((float)(uint32_t)(st >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+            st = st * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u2 = ((float)(uint32_t)(st >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+            tq_qjl_mat_32[i * TQ_DIM_HI + j] = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+        }
+    }
+    tq_qjl_mat_initialized = 1;
+}
+
 static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed) {
-    tq_seed(seed);
+    (void)seed;
+    tq_init_qjl_matrices();
+    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : NULL;
+
     float rnorm_sq = 0.0f;
     for (int j = 0; j < m; j++) rnorm_sq += r[j] * r[j];
 
     memset(signs, 0, (m + 7) / 8);
-    for (int i = 0; i < m; i++) {
-        float proj = 0.0f;
-        for (int j = 0; j < m; j++) proj += tq_gaussian() * r[j];
-        if (proj >= 0.0f) signs[i / 8] |= (uint8_t)(1 << (i % 8));
+    if (S) {
+        for (int i = 0; i < m; i++) {
+            float proj = 0.0f;
+            for (int j = 0; j < m; j++) proj += S[i * m + j] * r[j];
+            if (proj >= 0.0f) signs[i / 8] |= (uint8_t)(1 << (i % 8));
+        }
+    } else {
+        tq_seed(seed);
+        for (int i = 0; i < m; i++) {
+            float proj = 0.0f;
+            for (int j = 0; j < m; j++) proj += tq_gaussian() * r[j];
+            if (proj >= 0.0f) signs[i / 8] |= (uint8_t)(1 << (i % 8));
+        }
     }
     return sqrtf(rnorm_sq);
 }
 
 static void qjl_inverse(const uint8_t * signs, float rnorm, float * corr, int m, uint64_t seed) {
+    (void)seed;
+    tq_init_qjl_matrices();
+    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : NULL;
+
     memset(corr, 0, m * sizeof(float));
-    tq_seed(seed);
-    for (int i = 0; i < m; i++) {
-        float z = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
-        for (int j = 0; j < m; j++) corr[j] += tq_gaussian() * z;
+    if (S) {
+        for (int i = 0; i < m; i++) {
+            float z = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+            for (int j = 0; j < m; j++) corr[j] += S[i * m + j] * z;
+        }
+    } else {
+        tq_seed(seed);
+        for (int i = 0; i < m; i++) {
+            float z = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+            for (int j = 0; j < m; j++) corr[j] += tq_gaussian() * z;
+        }
     }
     float scale = 1.2533141f / (float)m * rnorm;
     for (int j = 0; j < m; j++) corr[j] *= scale;
+}
+
+// ---------------------------------------------------------------------------
+// Sink dispatch helper: check if vx is a sink position, do fp16 dot
+// ---------------------------------------------------------------------------
+
+static bool tq_try_sink_dot(int n, float * GGML_RESTRICT s,
+                            const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy,
+                            int64_t tq_block_size_bytes) {
+    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return false;
+    const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
+    const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
+    int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
+    int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
+    int64_t kv_size        = tq_sink_kv_size[tq_cur_layer];
+    if (!k_base || !fp16_base || k_stride <= 0) return false;
+
+    int64_t byte_off   = (const char *)vx - k_base;
+    int64_t stream_sz  = k_stride * kv_size;
+    int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
+    int64_t within     = byte_off - stream_idx * stream_sz;
+    int64_t pos        = within / k_stride;
+    int64_t head_off   = within % k_stride;
+    int64_t head_idx   = head_off / tq_block_size_bytes;
+
+    if (pos < 0 || pos >= tq_sink_n_global) return false;
+
+    int64_t fp16_row = stream_idx * kv_size + pos;
+    const ggml_half * k_fp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * n * (int64_t)sizeof(ggml_half));
+    const float * q = (const float *)vy;
+    float dot = 0.0f;
+    for (int j = 0; j < n; j++) dot += GGML_FP16_TO_FP32(k_fp16[j]) * q[j];
+    *s = dot;
+    return true;
+}
+
+// Also for dequant (FA path): check if x is a sink position, write fp16→f32
+static bool tq_try_sink_dequant(const void * x, float * y, int64_t k, int64_t tq_block_size_bytes) {
+    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return false;
+    const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
+    const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
+    int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
+    int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
+    int64_t kv_size        = tq_sink_kv_size[tq_cur_layer];
+    if (!k_base || !fp16_base || k_stride <= 0) return false;
+
+    int64_t byte_off   = (const char *)x - k_base;
+    int64_t stream_sz  = k_stride * kv_size;
+    int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
+    int64_t within     = byte_off - stream_idx * stream_sz;
+    int64_t pos        = within / k_stride;
+    int64_t head_off   = within % k_stride;
+    int64_t head_idx   = head_off / tq_block_size_bytes;
+
+    if (pos < 0 || pos >= tq_sink_n_global) return false;
+
+    int64_t fp16_row = stream_idx * kv_size + pos;
+    const ggml_half * kfp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * k * (int64_t)sizeof(ggml_half));
+    for (int64_t j = 0; j < k; j++) y[j] = GGML_FP16_TO_FP32(kfp16[j]);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -833,16 +941,6 @@ static float qjl_project_query_element(const float * q_rot, int i, int m, uint64
     return proj;
 }
 
-// Pre-computed QJL matrices (generated once at init, reused for all vec_dot calls)
-static float tq_qjl_mat_32[TQ_DIM_HI * TQ_DIM_HI];  // 32×32 = 4KB
-static int   tq_qjl_mat_initialized = 0;
-
-static void tq_init_qjl_matrices(void) {
-    if (tq_qjl_mat_initialized) return;
-    tq_get_qjl_matrix(tq_qjl_mat_32, TQ_DIM_HI, QJL_SEED_32);
-    tq_qjl_mat_initialized = 1;
-}
-
 // QJL correction term using pre-computed matrix:
 // rnorm * sqrt(π/2) / m * <S @ q, sign(S @ r_k)>
 static float qjl_asymmetric_dot(const float * q_rot, int m, uint64_t seed,
@@ -1234,32 +1332,7 @@ void dequantize_row_tqk_had_mse4(const block_tqk_had_mse4 * GGML_RESTRICT x, flo
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
 
-    // Sink dispatch for dequantize (used by FA path)
-    if (tq_sink_n_global > 0 && tq_cur_layer >= 0 && tq_cur_layer < TQ_MAX_LAYERS) {
-        const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
-        const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
-        int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
-        int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
-        int64_t kv_size        = tq_sink_kv_size[tq_cur_layer];
-        if (k_base && fp16_base && k_stride > 0) {
-            int64_t byte_off   = (const char *)x - k_base;
-            int64_t stream_sz  = k_stride * kv_size;
-            int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
-            int64_t within     = byte_off - stream_idx * stream_sz;
-            int64_t pos        = within / k_stride;
-            int64_t head_off   = within % k_stride;
-            int64_t head_idx   = head_off / (int64_t)sizeof(block_tqk_had_mse4);
-            if (pos >= 0 && pos < tq_sink_n_global) {
-                // Return fp16→f32 converted data from sink buffer
-                int64_t fp16_row = stream_idx * kv_size + pos;
-                const ggml_half * kfp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * k * (int64_t)sizeof(ggml_half));
-                for (int64_t j = 0; j < k; j++) {
-                    y[j] = GGML_FP16_TO_FP32(kfp16[j]);
-                }
-                return;
-            }
-        }
-    }
+    if (tq_try_sink_dequant(x, y, k, sizeof(block_tqk_had_mse4))) return;
 
     for (int64_t i = 0; i < nb; i++) {
         float norm = GGML_FP16_TO_FP32(x[i].norm);
@@ -1285,37 +1358,7 @@ void ggml_vec_dot_tqk_had_mse4_f32(
     assert(nrc == 1);
     (void)bs; (void)bx; (void)by; (void)nrc;
 
-    // Sink dispatch: if this K block is within the sink range, use fp16 dot product
-    // vx points to one TQ block (one head of one KV position) in the permuted tensor.
-    // Compute the KV position from the byte offset using the per-KV-position stride.
-    if (tq_sink_n_global > 0 && tq_cur_layer >= 0 && tq_cur_layer < TQ_MAX_LAYERS) {
-        const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
-        const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
-        int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
-        int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
-        if (k_base && fp16_base && k_stride > 0) {
-            int64_t kv_size    = tq_sink_kv_size[tq_cur_layer];
-            int64_t byte_off   = (const char *)vx - k_base;
-            int64_t stream_sz  = k_stride * kv_size;
-            int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
-            int64_t within     = byte_off - stream_idx * stream_sz;
-            int64_t pos        = within / k_stride;
-            int64_t head_off   = within % k_stride;
-            int64_t head_idx   = head_off / (int64_t)sizeof(block_tqk_had_mse4);
-            if (pos >= 0 && pos < tq_sink_n_global) {
-                // fp16 row = (stream_idx * kv_size + pos), then offset by head
-                int64_t fp16_row = stream_idx * kv_size + pos;
-                const ggml_half * k_fp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * n * (int64_t)sizeof(ggml_half));
-                const float * q = (const float *)vy;
-                float dot = 0.0f;
-                for (int j = 0; j < n; j++) {
-                    dot += GGML_FP16_TO_FP32(k_fp16[j]) * q[j];
-                }
-                *s = dot;
-                return;
-            }
-        }
-    }
+    if (tq_try_sink_dot(n, s, vx, vy, sizeof(block_tqk_had_mse4))) return;
 
     const block_tqk_had_mse4 * GGML_RESTRICT x = (const block_tqk_had_mse4 *)vx;
     const float * GGML_RESTRICT y = (const float *)vy;
@@ -1414,6 +1457,7 @@ void quantize_row_tqk_5hi_3lo_qr_ref(const float * GGML_RESTRICT x, block_tqk_5h
 }
 
 void dequantize_row_tqk_5hi_3lo_qr(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    if (tq_try_sink_dequant(x, y, k, sizeof(block_tqk_5hi_3lo))) return;
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
@@ -1443,7 +1487,6 @@ void dequantize_row_tqk_5hi_3lo_qr(const block_tqk_5hi_3lo * GGML_RESTRICT x, fl
     }
 }
 
-// Asymmetric vec_dot for 5hi_3lo_qr
 void ggml_vec_dot_tqk_5hi_3lo_qr_f32(
         int n, float * GGML_RESTRICT s, size_t bs,
         const void * GGML_RESTRICT vx, size_t bx,
@@ -1451,6 +1494,8 @@ void ggml_vec_dot_tqk_5hi_3lo_qr_f32(
     assert(n % TQK_BLOCK_SIZE == 0);
     assert(nrc == 1);
     (void)bs; (void)bx; (void)by; (void)nrc;
+
+    if (tq_try_sink_dot(n, s, vx, vy, sizeof(block_tqk_5hi_3lo))) return;
 
     tq_init_rotations();
 
@@ -1571,6 +1616,7 @@ void quantize_row_tqk_5hi_3lo_fwht_ref(const float * GGML_RESTRICT x, block_tqk_
 }
 
 void dequantize_row_tqk_5hi_3lo_fwht(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    if (tq_try_sink_dequant(x, y, k, sizeof(block_tqk_5hi_3lo))) return;
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
@@ -1614,6 +1660,8 @@ void ggml_vec_dot_tqk_5hi_3lo_fwht_f32(
     assert(n % TQK_BLOCK_SIZE == 0);
     assert(nrc == 1);
     (void)bs; (void)bx; (void)by; (void)nrc;
+
+    if (tq_try_sink_dot(n, s, vx, vy, sizeof(block_tqk_5hi_3lo))) return;
 
     tq_init_rotations();
 

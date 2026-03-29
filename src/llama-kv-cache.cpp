@@ -401,36 +401,34 @@ llama_kv_cache::llama_kv_cache(
 void llama_kv_cache::set_tq_n_sinks(uint32_t n) {
     tq_n_sinks_ = n;
     if (n == 0 || layers.empty()) return;
+    if (layers[0].k_sink) return; // already allocated
 
-    // For types that skip calibration (e.g. had_mse4), allocate k_sink now.
-    // For calibrated types, k_sink is allocated in tq_finish_calibration().
-    if (tq_calibrating_) return; // will be handled later
+    // Allocate fp16 sink buffer for all layers
+    const size_t n_sink_tensors = layers.size();
+    ggml_init_params sink_params = {
+        /*.mem_size   =*/ n_sink_tensors * ggml_tensor_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * sink_ctx = ggml_init(sink_params);
+    GGML_ASSERT(sink_ctx);
 
-    // Check if K is already quantized (not fp16) — means no calibration phase
-    if (layers[0].k && layers[0].k->type != GGML_TYPE_F16 && !layers[0].k_sink) {
-        const size_t n_sink_tensors = layers.size();
-        ggml_init_params sink_params = {
-            /*.mem_size   =*/ n_sink_tensors * ggml_tensor_overhead(),
-            /*.mem_buffer =*/ NULL,
-            /*.no_alloc   =*/ true,
-        };
-        ggml_context * sink_ctx = ggml_init(sink_params);
-        GGML_ASSERT(sink_ctx);
+    for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        ggml_tensor * k = layers[ikv].k;
+        if (!k) continue;
+        const int64_t n_embd = k->ne[0];
+        layers[ikv].k_sink = ggml_new_tensor_2d(sink_ctx, GGML_TYPE_F16, n_embd, (int64_t)get_size() * n_stream);
+        ggml_format_name(layers[ikv].k_sink, "cache_k_sink_l%d", layers[ikv].il);
+    }
 
-        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
-            ggml_tensor * k = layers[ikv].k;
-            if (!k) continue;
-            const int64_t n_embd = k->ne[0];
-            layers[ikv].k_sink = ggml_new_tensor_2d(sink_ctx, GGML_TYPE_F16, n_embd, (int64_t)get_size() * n_stream);
-            ggml_format_name(layers[ikv].k_sink, "cache_k_sink_l%d", layers[ikv].il);
-        }
+    ggml_backend_buffer_t sink_buf = ggml_backend_alloc_ctx_tensors_from_buft(sink_ctx, ggml_backend_cpu_buffer_type());
+    GGML_ASSERT(sink_buf);
+    ggml_backend_buffer_clear(sink_buf, 0);
+    sink_bufs.emplace_back(ggml_context_ptr(sink_ctx), ggml_backend_buffer_ptr(sink_buf));
 
-        ggml_backend_buffer_t sink_buf = ggml_backend_alloc_ctx_tensors_from_buft(sink_ctx, ggml_backend_cpu_buffer_type());
-        GGML_ASSERT(sink_buf);
-        ggml_backend_buffer_clear(sink_buf, 0);
-        sink_bufs.emplace_back(ggml_context_ptr(sink_ctx), ggml_backend_buffer_ptr(sink_buf));
-
-        // Register sink state for vec_dot dispatch
+    // For non-calibrated types, K is already TQ — register sink dispatch now
+    // For calibrated types, register after calibration (K pointer changes)
+    if (!tq_calibrating_) {
         for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
             ggml_tensor * k = layers[ikv].k;
             ggml_tensor * ks = layers[ikv].k_sink;
@@ -440,9 +438,9 @@ void llama_kv_cache::set_tq_n_sinks(uint32_t n) {
             tq_register_sink_layer(layers[ikv].il,
                 k->data, ks->data, n, k_stride_per_pos, fp16_stride_per_pos, get_size());
         }
-
-        LLAMA_LOG_INFO("%s: allocated fp16 sink tensors for first %u tokens (no-calibration path)\n", __func__, n);
     }
+
+    LLAMA_LOG_INFO("%s: allocated fp16 sink tensors for first %u tokens\n", __func__, n);
 }
 
 void llama_kv_cache::tq_try_finish_calibration() {
@@ -530,38 +528,12 @@ void llama_kv_cache::tq_finish_calibration() {
 #endif
     }
 
-    // 1c. Allocate and populate fp16 sink tensors
+    // 1c. Copy calibration fp16 data into pre-allocated sink tensors
     if (tq_n_sinks_ > 0) {
-        // Create a new ggml context for sink tensors
-        const size_t n_sink_tensors = layers.size();
-        ggml_init_params sink_params = {
-            /*.mem_size   =*/ n_sink_tensors * ggml_tensor_overhead(),
-            /*.mem_buffer =*/ NULL,
-            /*.no_alloc   =*/ true,
-        };
-        ggml_context * sink_ctx = ggml_init(sink_params);
-        GGML_ASSERT(sink_ctx && "failed to create sink context");
-
-        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
-            ggml_tensor * old_k = layers[ikv].k;
-            if (!old_k || old_k->type != GGML_TYPE_F16) continue;
-            const int64_t n_embd = old_k->ne[0];
-            // Allocate kv_size*n_stream so set_rows with stream offsets works
-            layers[ikv].k_sink = ggml_new_tensor_2d(sink_ctx, GGML_TYPE_F16, n_embd, (int64_t)get_size() * n_stream);
-            ggml_format_name(layers[ikv].k_sink, "cache_k_sink_l%d", layers[ikv].il);
-        }
-
-        // Allocate CPU buffer for sink tensors
-        ggml_backend_buffer_t sink_buf = ggml_backend_alloc_ctx_tensors_from_buft(sink_ctx, ggml_backend_cpu_buffer_type());
-        GGML_ASSERT(sink_buf && "failed to allocate sink buffer");
-        ggml_backend_buffer_clear(sink_buf, 0);
-        sink_bufs.emplace_back(ggml_context_ptr(sink_ctx), ggml_backend_buffer_ptr(sink_buf));
-
-        // Copy fp16 data for first n_sinks cells into sink tensors
         for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
             ggml_tensor * old_k = layers[ikv].k;
             ggml_tensor * k_sink = layers[ikv].k_sink;
-            if (!old_k || !k_sink) continue;
+            if (!old_k || !k_sink || old_k->type != GGML_TYPE_F16) continue;
 
             const int64_t n_embd = old_k->ne[0];
             const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
@@ -574,11 +546,6 @@ void llama_kv_cache::tq_finish_calibration() {
                 ggml_backend_tensor_set(k_sink, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
             }
         }
-
-        int n_allocated = 0;
-        for (const auto & l : layers) { if (l.k_sink) n_allocated++; }
-        LLAMA_LOG_INFO("%s: allocated fp16 sink tensors (%u sinks, %u kv_size) for %d/%zu layers\n",
-                       __func__, tq_n_sinks_, get_size(), n_allocated, layers.size());
     }
 
     // 2. Re-quantize fp16 → TQ using pre-allocated TQ tensors (no new Metal allocations)
