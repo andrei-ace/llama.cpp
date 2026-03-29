@@ -163,7 +163,6 @@ public:
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
     // get fp16 sink tensor for first n_sinks K positions (nullptr if no sinks)
-    ggml_tensor * get_k_sinks(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     uint32_t get_tq_n_sinks() const { return tq_n_sinks_; }
     void set_tq_n_sinks(uint32_t n);
 
@@ -366,9 +365,6 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
-
-    // get fp16 sink tensor for first n_sinks K positions (nullptr if no sinks)
-    ggml_tensor * get_k_sinks(ggml_context * ctx, int32_t il) const;
 
     // TurboQuant rotation matrices (nullptr if not using turbo types)
     ggml_tensor * get_turbo_rot() const;

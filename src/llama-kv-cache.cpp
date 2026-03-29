@@ -1494,29 +1494,7 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
             ggml_row_size(k->type, n_embd_k_gqa*kv_size)*sinfo.s0);
 }
 
-ggml_tensor * llama_kv_cache::get_k_sinks(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
-    if (tq_n_sinks_ == 0) return nullptr;
 
-    const int32_t ikv = map_layer_ids.at(il);
-    auto * k_sink = layers[ikv].k_sink;
-    if (!k_sink) return nullptr;
-
-    const uint32_t n_sinks_eff = std::min(tq_n_sinks_, n_kv);
-    if (n_sinks_eff == 0) return nullptr;
-
-    // k_sink is [n_embd_k_gqa, kv_size*n_stream] (2D, fp16)
-    // Return a 4D view matching get_k() layout: [head_dim, n_head_kv, n_sinks_eff, ns]
-    const uint64_t n_embd_k_gqa = k_sink->ne[0];
-    const uint64_t kv_size = get_size();
-    const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
-
-    return ggml_view_4d(ctx, k_sink,
-            hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_sinks_eff, ns,
-            ggml_row_size(k_sink->type, hparams.n_embd_head_k(il)),
-            ggml_row_size(k_sink->type, n_embd_k_gqa),
-            ggml_row_size(k_sink->type, n_embd_k_gqa * kv_size),
-            ggml_row_size(k_sink->type, n_embd_k_gqa * kv_size) * sinfo.s0);
-}
 
 ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
@@ -2743,9 +2721,7 @@ ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) cons
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
 }
 
-ggml_tensor * llama_kv_cache_context::get_k_sinks(ggml_context * ctx, int32_t il) const {
-    return kv->get_k_sinks(ctx, il, n_kv, sinfos[i_cur]);
-}
+
 
 ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
