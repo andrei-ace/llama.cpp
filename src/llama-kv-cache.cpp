@@ -400,35 +400,34 @@ void llama_kv_cache::tq_try_finish_calibration() {
 
     // Calibrate from first batch: readback K data from GPU if needed, then finish immediately.
     // No minimum token threshold — use whatever prompt tokens are available.
-    int min_count = tq_min_accum_count(max_layer_id + 1);
-    if (min_count == 0) {
-        // GPU path: readback K cache data and accumulate on CPU
-        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
-            ggml_tensor * k = layers[ikv].k;
-            if (!k || k->type != GGML_TYPE_F16) continue;
+    // Check if enough tokens are available for calibration.
+    // On GPU, CPU-side accumulation doesn't happen — readback when we have enough cells.
+    static const int TQ_MIN_CALIB_VECTORS = 32;
 
-            const int layer_id = (int)layers[ikv].il;
-            const int64_t n_embd = k->ne[0];
-            const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
-
-            const uint32_t max_cell = v_cells[0].used_max_p1();
-            if (max_cell == 0) continue;
-
-            std::vector<ggml_fp16_t> fp16_buf(n_embd);
-            std::vector<float> f32_buf(n_embd);
-
-            for (uint32_t cell = 0; cell < max_cell; cell++) {
-                if (v_cells[0].is_empty(cell)) continue;
-                ggml_backend_tensor_get(k, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
-                ggml_fp16_to_fp32_row(fp16_buf.data(), f32_buf.data(), n_embd);
-                tq_accumulate_channels(layer_id, 1, f32_buf.data(), n_embd);
-            }
-        }
-        min_count = tq_min_accum_count(max_layer_id + 1);
+    const uint32_t occupied = v_cells[0].used_max_p1();
+    if ((int)occupied < TQ_MIN_CALIB_VECTORS) {
+        return; // wait for more tokens
     }
 
-    if (min_count == 0) {
-        return; // no data yet
+    // Readback K data from GPU and accumulate on CPU (one-time)
+    tq_reset_accumulators();
+    for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        ggml_tensor * k = layers[ikv].k;
+        if (!k || k->type != GGML_TYPE_F16) continue;
+
+        const int layer_id = (int)layers[ikv].il;
+        const int64_t n_embd = k->ne[0];
+        const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
+
+        std::vector<ggml_fp16_t> fp16_buf(n_embd);
+        std::vector<float> f32_buf(n_embd);
+
+        for (uint32_t cell = 0; cell < occupied; cell++) {
+            if (v_cells[0].is_empty(cell)) continue;
+            ggml_backend_tensor_get(k, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
+            ggml_fp16_to_fp32_row(fp16_buf.data(), f32_buf.data(), n_embd);
+            tq_accumulate_channels(layer_id, 1, f32_buf.data(), n_embd);
+        }
     }
 
     tq_finish_calibration();
