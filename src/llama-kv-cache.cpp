@@ -528,27 +528,7 @@ void llama_kv_cache::tq_finish_calibration() {
 #endif
     }
 
-    // 1c. Copy calibration fp16 data into pre-allocated sink tensors
-    if (tq_n_sinks_ > 0) {
-        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
-            ggml_tensor * old_k = layers[ikv].k;
-            ggml_tensor * k_sink = layers[ikv].k_sink;
-            if (!old_k || !k_sink || old_k->type != GGML_TYPE_F16) continue;
-
-            const int64_t n_embd = old_k->ne[0];
-            const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
-            std::vector<ggml_fp16_t> fp16_buf(n_embd);
-
-            const uint32_t n_sinks_actual = std::min(tq_n_sinks_, v_cells[0].used_max_p1());
-            for (uint32_t cell = 0; cell < n_sinks_actual; cell++) {
-                if (v_cells[0].is_empty(cell)) continue;
-                ggml_backend_tensor_get(old_k, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
-                ggml_backend_tensor_set(k_sink, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
-            }
-        }
-    }
-
-    // 2. Re-quantize fp16 → TQ using pre-allocated TQ tensors (no new Metal allocations)
+    // 2. Re-quantize fp16 → TQ and copy fp16 to k_sink for ALL cells
     const uint32_t kv_sz = get_size();
 
     for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
@@ -556,6 +536,7 @@ void llama_kv_cache::tq_finish_calibration() {
         ggml_tensor * new_k = layers[ikv].k_tq;
         if (new_k && layers[ikv].k && layers[ikv].k->type == GGML_TYPE_F16) {
             ggml_tensor * old_k = layers[ikv].k;
+            ggml_tensor * k_sink_t = layers[ikv].k_sink;
             const int64_t n_embd = old_k->ne[0];
             const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
             const size_t tq_row_sz   = ggml_row_size(target_type_k, n_embd);
@@ -572,7 +553,28 @@ void llama_kv_cache::tq_finish_calibration() {
                     if (v_cells[s].is_empty(cell)) continue;
                     ggml_backend_tensor_get(old_k, fp16_buf.data(), (s*kv_sz+cell)*fp16_row_sz, n_embd*sizeof(ggml_fp16_t));
                     ggml_fp16_to_fp32_row(fp16_buf.data(), tmp.data(), n_embd);
-                    traits->from_float(tmp.data(), tq_buf.data(), n_embd);
+
+                    bool is_sink_cell = (tq_n_sinks_ > 0 && cell < tq_n_sinks_);
+                    if (is_sink_cell && (target_type_k == GGML_TYPE_TQK_HAD_MSE4 ||
+                                         target_type_k == GGML_TYPE_TQK_5HI_3LO_QR ||
+                                         target_type_k == GGML_TYPE_TQK_5HI_3LO_FWHT)) {
+                        // Sink cell: store fp16 directly in each TQ block with is_fp16 flag
+                        // Block layout: [is_fp16(1) pad(1) fp16_data(256)] = 258 bytes
+                        const int64_t blk_size = ggml_type_size(target_type_k);
+                        const int64_t head_dim = ggml_blck_size(target_type_k);
+                        const int n_blocks = (int)(n_embd / head_dim);
+                        memset(tq_buf.data(), 0, tq_row_sz);
+                        for (int b = 0; b < n_blocks; b++) {
+                            uint8_t * blk = tq_buf.data() + b * blk_size;
+                            blk[0] = 0xFF;  // is_fp16 flag
+                            blk[1] = 0;     // pad
+                            // Copy fp16 data starting at offset 2
+                            memcpy(blk + 2, &fp16_buf[b * head_dim], head_dim * sizeof(ggml_fp16_t));
+                        }
+                    } else {
+                        // Normal TQ quantization
+                        traits->from_float(tmp.data(), tq_buf.data(), n_embd);
+                    }
                     ggml_backend_tensor_set(new_k, tq_buf.data(), (s*kv_sz+cell)*tq_row_sz, tq_row_sz);
                 }
             }

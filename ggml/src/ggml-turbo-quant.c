@@ -119,10 +119,6 @@ static _Thread_local int tq_cur_layer = 0;
 static _Thread_local int tq_cur_head  = 0;  // block index within row = KV head index
 static _Thread_local int tq_cur_is_k  = 1;  // 1 = K cache, 0 = V cache
 
-// Forward declarations for sink dispatch (defined after globals)
-static bool tq_try_sink_dot(int n, float * GGML_RESTRICT s, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int64_t tq_block_size_bytes);
-static bool tq_try_sink_dequant(const void * x, float * y, int64_t k, int64_t tq_block_size_bytes);
-
 // Per-layer fp16 sink registry (set once after calibration, read by vec_dot)
 static const void * tq_sink_k_base[TQ_MAX_LAYERS];      // start of TQ K tensor data per layer
 static const void * tq_sink_fp16_base[TQ_MAX_LAYERS];    // start of fp16 sink tensor data per layer
@@ -397,66 +393,6 @@ static void qjl_inverse(const uint8_t * signs, float rnorm, float * corr, int m,
     }
     float scale = 1.2533141f / (float)m * rnorm;
     for (int j = 0; j < m; j++) corr[j] *= scale;
-}
-
-// ---------------------------------------------------------------------------
-// Sink dispatch helper: check if vx is a sink position, do fp16 dot
-// ---------------------------------------------------------------------------
-
-static bool tq_try_sink_dot(int n, float * GGML_RESTRICT s,
-                            const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy,
-                            int64_t tq_block_size_bytes) {
-    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return false;
-    const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
-    const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
-    int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
-    int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
-    int64_t kv_size        = tq_sink_kv_size[tq_cur_layer];
-    if (!k_base || !fp16_base || k_stride <= 0) return false;
-
-    int64_t byte_off   = (const char *)vx - k_base;
-    int64_t stream_sz  = k_stride * kv_size;
-    int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
-    int64_t within     = byte_off - stream_idx * stream_sz;
-    int64_t pos        = within / k_stride;
-    int64_t head_off   = within % k_stride;
-    int64_t head_idx   = head_off / tq_block_size_bytes;
-
-    if (pos < 0 || pos >= tq_sink_n_global) return false;
-
-    int64_t fp16_row = stream_idx * kv_size + pos;
-    const ggml_half * k_fp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * n * (int64_t)sizeof(ggml_half));
-    const float * q = (const float *)vy;
-    float dot = 0.0f;
-    for (int j = 0; j < n; j++) dot += GGML_FP16_TO_FP32(k_fp16[j]) * q[j];
-    *s = dot;
-    return true;
-}
-
-// Also for dequant (FA path): check if x is a sink position, write fp16→f32
-static bool tq_try_sink_dequant(const void * x, float * y, int64_t k, int64_t tq_block_size_bytes) {
-    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return false;
-    const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
-    const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
-    int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
-    int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
-    int64_t kv_size        = tq_sink_kv_size[tq_cur_layer];
-    if (!k_base || !fp16_base || k_stride <= 0) return false;
-
-    int64_t byte_off   = (const char *)x - k_base;
-    int64_t stream_sz  = k_stride * kv_size;
-    int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
-    int64_t within     = byte_off - stream_idx * stream_sz;
-    int64_t pos        = within / k_stride;
-    int64_t head_off   = within % k_stride;
-    int64_t head_idx   = head_off / tq_block_size_bytes;
-
-    if (pos < 0 || pos >= tq_sink_n_global) return false;
-
-    int64_t fp16_row = stream_idx * kv_size + pos;
-    const ggml_half * kfp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * k * (int64_t)sizeof(ggml_half));
-    for (int64_t j = 0; j < k; j++) y[j] = GGML_FP16_TO_FP32(kfp16[j]);
-    return true;
 }
 
 // Write fp16 copy to k_sink inside from_float (atomic with TQ write, no graph ordering issue).
@@ -1329,51 +1265,76 @@ void quantize_row_tqk_had_mse4_ref(const float * GGML_RESTRICT x, block_tqk_had_
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
 
+    // Check if this row is a sink (should store fp16 instead of TQ)
+    int is_sink = 0;
+    if (tq_sink_n_global > 0 && tq_cur_layer >= 0 && tq_cur_layer < TQ_MAX_LAYERS) {
+        const char * k_base = (const char *)tq_sink_k_base[tq_cur_layer];
+        int64_t k_stride    = tq_sink_k_stride[tq_cur_layer];
+        int64_t kv_size     = tq_sink_kv_size[tq_cur_layer];
+        if (k_base && k_stride > 0) {
+            int64_t byte_off  = (const char *)y - k_base;
+            int64_t stream_sz = k_stride * kv_size;
+            int64_t within    = byte_off - (stream_sz > 0 ? byte_off / stream_sz : 0) * stream_sz;
+            int64_t pos       = within / k_stride;
+            is_sink = (pos >= 0 && pos < tq_sink_n_global);
+        }
+    }
+
     for (int64_t i = 0; i < nb; i++) {
         const float * xb = x + i * TQK_BLOCK_SIZE;
 
-        // Compute L2 norm
-        float sum_sq = 0.0f;
-        for (int j = 0; j < TQ_DIM; j++) sum_sq += xb[j] * xb[j];
-        float norm = sqrtf(sum_sq);
-        y[i].norm = GGML_FP32_TO_FP16(norm);
+        if (is_sink) {
+            // Store raw fp16 — exact, no quantization
+            y[i].is_fp16 = 0xFF;
+            y[i].pad = 0;
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                y[i].d.fp16[j] = GGML_FP32_TO_FP16(xb[j]);
+            }
+        } else {
+            // Normal TQ quantization
+            y[i].is_fp16 = 0;
+            y[i].pad = 0;
 
-        if (norm == 0.0f) { memset(y[i].qs, 0, sizeof(y[i].qs)); continue; }
-        float inv = 1.0f / norm;
+            float sum_sq = 0.0f;
+            for (int j = 0; j < TQ_DIM; j++) sum_sq += xb[j] * xb[j];
+            float norm = sqrtf(sum_sq);
+            y[i].d.tq.norm = GGML_FP32_TO_FP16(norm);
 
-        // Normalize and apply H_128 via FWHT
-        float rot[TQ_DIM];
-        for (int j = 0; j < TQ_DIM; j++) rot[j] = xb[j] * inv;
-        tq_fwht(rot, TQ_DIM);
+            if (norm == 0.0f) { memset(y[i].d.tq.qs, 0, sizeof(y[i].d.tq.qs)); continue; }
+            float inv = 1.0f / norm;
 
-        // 4-bit MSE quantize (16 centroids, d=128)
-        memset(y[i].qs, 0, sizeof(y[i].qs));
-        for (int j = 0; j < TQ_DIM; j++) {
-            int idx = nearest(rot[j], centroids_16, 16);
-            pk4(y[i].qs, j, idx);
+            float rot[TQ_DIM];
+            for (int j = 0; j < TQ_DIM; j++) rot[j] = xb[j] * inv;
+            tq_fwht(rot, TQ_DIM);
+
+            memset(y[i].d.tq.qs, 0, sizeof(y[i].d.tq.qs));
+            for (int j = 0; j < TQ_DIM; j++) {
+                int idx = nearest(rot[j], centroids_16, 16);
+                pk4(y[i].d.tq.qs, j, idx);
+            }
         }
     }
-    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_had_mse4));
 }
 
 void dequantize_row_tqk_had_mse4(const block_tqk_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
 
-    if (tq_try_sink_dequant(x, y, k, sizeof(block_tqk_had_mse4))) return;
-
     for (int64_t i = 0; i < nb; i++) {
-        float norm = GGML_FP16_TO_FP32(x[i].norm);
-
-        // Reconstruct rotated vector from centroids
-        float rot[TQ_DIM];
-        for (int j = 0; j < TQ_DIM; j++) {
-            rot[j] = centroids_16[up4(x[i].qs, j)];
+        if (x[i].is_fp16) {
+            // fp16 sink: just convert to f32
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                y[i * TQK_BLOCK_SIZE + j] = GGML_FP16_TO_FP32(x[i].d.fp16[j]);
+            }
+        } else {
+            float norm = GGML_FP16_TO_FP32(x[i].d.tq.norm);
+            float rot[TQ_DIM];
+            for (int j = 0; j < TQ_DIM; j++) {
+                rot[j] = centroids_16[up4(x[i].d.tq.qs, j)];
+            }
+            tq_fwht(rot, TQ_DIM);
+            for (int j = 0; j < TQ_DIM; j++) y[i * TQK_BLOCK_SIZE + j] = norm * rot[j];
         }
-
-        // Inverse H_128 (FWHT is self-inverse) and scale
-        tq_fwht(rot, TQ_DIM);
-        for (int j = 0; j < TQ_DIM; j++) y[i * TQK_BLOCK_SIZE + j] = norm * rot[j];
     }
 }
 
@@ -1386,8 +1347,6 @@ void ggml_vec_dot_tqk_had_mse4_f32(
     assert(nrc == 1);
     (void)bs; (void)bx; (void)by; (void)nrc;
 
-    if (tq_try_sink_dot(n, s, vx, vy, sizeof(block_tqk_had_mse4))) return;
-
     const block_tqk_had_mse4 * GGML_RESTRICT x = (const block_tqk_had_mse4 *)vx;
     const float * GGML_RESTRICT y = (const float *)vy;
     const int64_t nb = n / TQK_BLOCK_SIZE;
@@ -1396,7 +1355,18 @@ void ggml_vec_dot_tqk_had_mse4_f32(
 
     for (int64_t i = 0; i < nb; i++) {
         const float * q = y + i * TQK_BLOCK_SIZE;
-        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        if (x[i].is_fp16) {
+            // fp16 sink: standard dot product
+            float dot = 0.0f;
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                dot += GGML_FP16_TO_FP32(x[i].d.fp16[j]) * q[j];
+            }
+            sumf += dot;
+            continue;
+        }
+
+        float norm = GGML_FP16_TO_FP32(x[i].d.tq.norm);
 
         // Rotate Q with H_128
         float q_rot[TQ_DIM];
@@ -1406,7 +1376,7 @@ void ggml_vec_dot_tqk_had_mse4_f32(
         // Dot with stored centroids
         float dot = 0.0f;
         for (int j = 0; j < TQ_DIM; j++) {
-            dot += q_rot[j] * centroids_16[up4(x[i].qs, j)];
+            dot += q_rot[j] * centroids_16[up4(x[i].d.tq.qs, j)];
         }
 
         sumf += norm * dot;
@@ -1424,9 +1394,37 @@ void quantize_row_tqk_5hi_3lo_qr_ref(const float * GGML_RESTRICT x, block_tqk_5h
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
 
+    // Check if this row is a sink (should store fp16 instead of TQ)
+    int is_sink = 0;
+    if (tq_sink_n_global > 0 && tq_cur_layer >= 0 && tq_cur_layer < TQ_MAX_LAYERS) {
+        const char * k_base = (const char *)tq_sink_k_base[tq_cur_layer];
+        int64_t k_stride    = tq_sink_k_stride[tq_cur_layer];
+        int64_t kv_size     = tq_sink_kv_size[tq_cur_layer];
+        if (k_base && k_stride > 0) {
+            int64_t byte_off  = (const char *)y - k_base;
+            int64_t stream_sz = k_stride * kv_size;
+            int64_t within    = byte_off - (stream_sz > 0 ? byte_off / stream_sz : 0) * stream_sz;
+            int64_t pos       = within / k_stride;
+            is_sink = (pos >= 0 && pos < tq_sink_n_global);
+        }
+    }
+
     for (int64_t i = 0; i < nb; i++) {
         if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * xb = x + i * TQK_BLOCK_SIZE;
+
+        if (is_sink) {
+            // Store raw fp16 — exact, no quantization
+            y[i].is_fp16 = 0xFF;
+            y[i].pad = 0;
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                y[i].d.fp16[j] = GGML_FP32_TO_FP16(xb[j]);
+            }
+            continue;
+        }
+
+        y[i].is_fp16 = 0;
+        y[i].pad = 0;
 
         // Split into outlier/regular
         float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
@@ -1443,14 +1441,14 @@ void quantize_row_tqk_5hi_3lo_qr_ref(const float * GGML_RESTRICT x, block_tqk_5h
         for (int j = 0; j < TQ_DIM_LO; j++) sum_lo += lo_rot[j] * lo_rot[j];
         float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
 
-        y[i].norm_hi  = GGML_FP32_TO_FP16(norm_hi);
-        y[i].norm_lo  = GGML_FP32_TO_FP16(norm_lo);
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(0.0f);
-        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+        y[i].d.tq.norm_hi  = GGML_FP32_TO_FP16(norm_hi);
+        y[i].d.tq.norm_lo  = GGML_FP32_TO_FP16(norm_lo);
+        y[i].d.tq.rnorm_hi = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].d.tq.signs_hi, 0, sizeof(y[i].d.tq.signs_hi));
 
         if (norm_hi == 0.0f && norm_lo == 0.0f) {
-            memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
-            memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+            memset(y[i].d.tq.qs_hi, 0, sizeof(y[i].d.tq.qs_hi));
+            memset(y[i].d.tq.qs_lo, 0, sizeof(y[i].d.tq.qs_lo));
             continue;
         }
 
@@ -1458,48 +1456,54 @@ void quantize_row_tqk_5hi_3lo_qr_ref(const float * GGML_RESTRICT x, block_tqk_5h
         float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
 
         // 4-bit MSE for hi (16 centroids, d=32)
-        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        memset(y[i].d.tq.qs_hi, 0, sizeof(y[i].d.tq.qs_hi));
         for (int j = 0; j < TQ_DIM_HI; j++) {
             float xn = hi_rot[j] * inv_hi;
             int idx = nearest(xn, centroids_16_d32, 16);
-            pk4(y[i].qs_hi, j, idx);
+            pk4(y[i].d.tq.qs_hi, j, idx);
         }
 
         // 3-bit MSE for lo (8 centroids, d=96)
-        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        memset(y[i].d.tq.qs_lo, 0, sizeof(y[i].d.tq.qs_lo));
         for (int j = 0; j < TQ_DIM_LO; j++) {
             float xn = lo_rot[j] * inv_lo;
             int idx = nearest(xn, centroids_8_d96, 8);
-            pk3(y[i].qs_lo, j, idx);
+            pk3(y[i].d.tq.qs_lo, j, idx);
         }
 
         // QJL on hi residual (in original subset space)
         float yhi[TQ_DIM_HI];
-        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(y[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(y[i].d.tq.qs_hi, j)];
         float hi_rec[TQ_DIM_HI];
         tq_unrotate_hi(yhi, hi_rec);
         float r_hi[TQ_DIM_HI];
         for (int j = 0; j < TQ_DIM_HI; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQ_DIM_HI, QJL_SEED_32));
+        y[i].d.tq.rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].d.tq.signs_hi, TQ_DIM_HI, QJL_SEED_32));
     }
-    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_5hi_3lo));
 }
 
 void dequantize_row_tqk_5hi_3lo_qr(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    if (tq_try_sink_dequant(x, y, k, sizeof(block_tqk_5hi_3lo))) return;
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (x[i].is_fp16) {
+            // fp16 sink: just convert to f32
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                y[i * TQK_BLOCK_SIZE + j] = GGML_FP16_TO_FP32(x[i].d.fp16[j]);
+            }
+            continue;
+        }
+
         if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
-        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
-        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float norm_hi = GGML_FP16_TO_FP32(x[i].d.tq.norm_hi);
+        float norm_lo = GGML_FP16_TO_FP32(x[i].d.tq.norm_lo);
 
         // MSE recon: centroids → unrotate → scale
         float yhi[TQ_DIM_HI], ylo[TQ_DIM_LO];
-        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(x[i].qs_hi, j)];
-        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_8_d96[up3(x[i].qs_lo, j)];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(x[i].d.tq.qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_8_d96[up3(x[i].d.tq.qs_lo, j)];
 
         float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
         tq_unrotate_hi(yhi, hi_orig);
@@ -1509,7 +1513,7 @@ void dequantize_row_tqk_5hi_3lo_qr(const block_tqk_5hi_3lo * GGML_RESTRICT x, fl
 
         // QJL correction on hi
         float corr_hi[TQ_DIM_HI];
-        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQ_DIM_HI, QJL_SEED_32);
+        qjl_inverse(x[i].d.tq.signs_hi, GGML_FP16_TO_FP32(x[i].d.tq.rnorm_hi), corr_hi, TQ_DIM_HI, QJL_SEED_32);
         for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] += corr_hi[j];
 
         tq_merge_channels(hi_orig, lo_orig, y + i * TQK_BLOCK_SIZE);
@@ -1524,8 +1528,6 @@ void ggml_vec_dot_tqk_5hi_3lo_qr_f32(
     assert(nrc == 1);
     (void)bs; (void)bx; (void)by; (void)nrc;
 
-    if (tq_try_sink_dot(n, s, vx, vy, sizeof(block_tqk_5hi_3lo))) return;
-
     tq_init_rotations();
 
     const block_tqk_5hi_3lo * GGML_RESTRICT x = (const block_tqk_5hi_3lo *)vx;
@@ -1535,10 +1537,21 @@ void ggml_vec_dot_tqk_5hi_3lo_qr_f32(
     float sumf = 0.0f;
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * q = y + i * TQK_BLOCK_SIZE;
-        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
-        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+
+        if (x[i].is_fp16) {
+            // fp16 sink: standard dot product
+            float dot = 0.0f;
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                dot += GGML_FP16_TO_FP32(x[i].d.fp16[j]) * q[j];
+            }
+            sumf += dot;
+            continue;
+        }
+
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        float norm_hi = GGML_FP16_TO_FP32(x[i].d.tq.norm_hi);
+        float norm_lo = GGML_FP16_TO_FP32(x[i].d.tq.norm_lo);
 
         // Split query and QR-rotate
         float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
@@ -1550,16 +1563,16 @@ void ggml_vec_dot_tqk_5hi_3lo_qr_f32(
         // MSE centroid dot per subset
         float mse_dot_hi = 0.0f, mse_dot_lo = 0.0f;
         for (int j = 0; j < TQ_DIM_HI; j++) {
-            mse_dot_hi += q_rot_hi[j] * centroids_16_d32[up4(x[i].qs_hi, j)];
+            mse_dot_hi += q_rot_hi[j] * centroids_16_d32[up4(x[i].d.tq.qs_hi, j)];
         }
         for (int j = 0; j < TQ_DIM_LO; j++) {
-            mse_dot_lo += q_rot_lo[j] * centroids_8_d96[up3(x[i].qs_lo, j)];
+            mse_dot_lo += q_rot_lo[j] * centroids_8_d96[up3(x[i].d.tq.qs_lo, j)];
         }
         float mse_dot = mse_dot_hi * norm_hi + mse_dot_lo * norm_lo;
 
         // QJL correction on hi (raw query, not rotated)
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32,
-                                           x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
+                                           x[i].d.tq.signs_hi, GGML_FP16_TO_FP32(x[i].d.tq.rnorm_hi));
 
         sumf += mse_dot + qjl_hi;
     }
@@ -1578,9 +1591,37 @@ void quantize_row_tqk_5hi_3lo_fwht_ref(const float * GGML_RESTRICT x, block_tqk_
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
 
+    // Check if this row is a sink (should store fp16 instead of TQ)
+    int is_sink = 0;
+    if (tq_sink_n_global > 0 && tq_cur_layer >= 0 && tq_cur_layer < TQ_MAX_LAYERS) {
+        const char * k_base = (const char *)tq_sink_k_base[tq_cur_layer];
+        int64_t k_stride    = tq_sink_k_stride[tq_cur_layer];
+        int64_t kv_size     = tq_sink_kv_size[tq_cur_layer];
+        if (k_base && k_stride > 0) {
+            int64_t byte_off  = (const char *)y - k_base;
+            int64_t stream_sz = k_stride * kv_size;
+            int64_t within    = byte_off - (stream_sz > 0 ? byte_off / stream_sz : 0) * stream_sz;
+            int64_t pos       = within / k_stride;
+            is_sink = (pos >= 0 && pos < tq_sink_n_global);
+        }
+    }
+
     for (int64_t i = 0; i < nb; i++) {
         if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * xb = x + i * TQK_BLOCK_SIZE;
+
+        if (is_sink) {
+            // Store raw fp16 — exact, no quantization
+            y[i].is_fp16 = 0xFF;
+            y[i].pad = 0;
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                y[i].d.fp16[j] = GGML_FP32_TO_FP16(xb[j]);
+            }
+            continue;
+        }
+
+        y[i].is_fp16 = 0;
+        y[i].pad = 0;
 
         // Split into outlier/regular
         float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
@@ -1601,14 +1642,14 @@ void quantize_row_tqk_5hi_3lo_fwht_ref(const float * GGML_RESTRICT x, block_tqk_
         for (int j = 0; j < TQ_DIM_LO; j++) sum_lo += lo_rot[j] * lo_rot[j];
         float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
 
-        y[i].norm_hi  = GGML_FP32_TO_FP16(norm_hi);
-        y[i].norm_lo  = GGML_FP32_TO_FP16(norm_lo);
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(0.0f);
-        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+        y[i].d.tq.norm_hi  = GGML_FP32_TO_FP16(norm_hi);
+        y[i].d.tq.norm_lo  = GGML_FP32_TO_FP16(norm_lo);
+        y[i].d.tq.rnorm_hi = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].d.tq.signs_hi, 0, sizeof(y[i].d.tq.signs_hi));
 
         if (norm_hi == 0.0f && norm_lo == 0.0f) {
-            memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
-            memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+            memset(y[i].d.tq.qs_hi, 0, sizeof(y[i].d.tq.qs_hi));
+            memset(y[i].d.tq.qs_lo, 0, sizeof(y[i].d.tq.qs_lo));
             continue;
         }
 
@@ -1616,50 +1657,56 @@ void quantize_row_tqk_5hi_3lo_fwht_ref(const float * GGML_RESTRICT x, block_tqk_
         float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
 
         // 4-bit MSE for hi (16 centroids, d=32)
-        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        memset(y[i].d.tq.qs_hi, 0, sizeof(y[i].d.tq.qs_hi));
         for (int j = 0; j < TQ_DIM_HI; j++) {
             float xn = hi_rot[j] * inv_hi;
             int idx = nearest(xn, centroids_16_d32, 16);
-            pk4(y[i].qs_hi, j, idx);
+            pk4(y[i].d.tq.qs_hi, j, idx);
         }
 
         // 3-bit MSE for lo (8 centroids, d=32 — each 32-dim block independent)
-        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        memset(y[i].d.tq.qs_lo, 0, sizeof(y[i].d.tq.qs_lo));
         for (int j = 0; j < TQ_DIM_LO; j++) {
             float xn = lo_rot[j] * inv_lo;
             int idx = nearest(xn, centroids_8_d32, 8);
-            pk3(y[i].qs_lo, j, idx);
+            pk3(y[i].d.tq.qs_lo, j, idx);
         }
 
         // QJL on hi residual (in original subset space)
         // Reconstruct: unrotate centroids via inverse FWHT
         float yhi[TQ_DIM_HI];
-        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(y[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(y[i].d.tq.qs_hi, j)];
         float hi_rec[TQ_DIM_HI];
         memcpy(hi_rec, yhi, sizeof(hi_rec));
         tq_fwht(hi_rec, TQ_DIM_HI); // inverse = forward for normalized FWHT
         float r_hi[TQ_DIM_HI];
         for (int j = 0; j < TQ_DIM_HI; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
-        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQ_DIM_HI, QJL_SEED_32));
+        y[i].d.tq.rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].d.tq.signs_hi, TQ_DIM_HI, QJL_SEED_32));
     }
-    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_5hi_3lo));
 }
 
 void dequantize_row_tqk_5hi_3lo_fwht(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    if (tq_try_sink_dequant(x, y, k, sizeof(block_tqk_5hi_3lo))) return;
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
+        if (x[i].is_fp16) {
+            // fp16 sink: just convert to f32
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                y[i * TQK_BLOCK_SIZE + j] = GGML_FP16_TO_FP32(x[i].d.fp16[j]);
+            }
+            continue;
+        }
+
         if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
-        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
-        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float norm_hi = GGML_FP16_TO_FP32(x[i].d.tq.norm_hi);
+        float norm_lo = GGML_FP16_TO_FP32(x[i].d.tq.norm_lo);
 
         // MSE recon: centroids → inverse FWHT → scale
         float yhi[TQ_DIM_HI], ylo[TQ_DIM_LO];
-        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(x[i].qs_hi, j)];
-        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_8_d32[up3(x[i].qs_lo, j)];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_16_d32[up4(x[i].d.tq.qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_8_d32[up3(x[i].d.tq.qs_lo, j)];
 
         // Inverse FWHT
         float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
@@ -1675,7 +1722,7 @@ void dequantize_row_tqk_5hi_3lo_fwht(const block_tqk_5hi_3lo * GGML_RESTRICT x, 
 
         // QJL correction on hi
         float corr_hi[TQ_DIM_HI];
-        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQ_DIM_HI, QJL_SEED_32);
+        qjl_inverse(x[i].d.tq.signs_hi, GGML_FP16_TO_FP32(x[i].d.tq.rnorm_hi), corr_hi, TQ_DIM_HI, QJL_SEED_32);
         for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] += corr_hi[j];
 
         tq_merge_channels(hi_orig, lo_orig, y + i * TQK_BLOCK_SIZE);
@@ -1691,8 +1738,6 @@ void ggml_vec_dot_tqk_5hi_3lo_fwht_f32(
     assert(nrc == 1);
     (void)bs; (void)bx; (void)by; (void)nrc;
 
-    if (tq_try_sink_dot(n, s, vx, vy, sizeof(block_tqk_5hi_3lo))) return;
-
     tq_init_rotations();
 
     const block_tqk_5hi_3lo * GGML_RESTRICT x = (const block_tqk_5hi_3lo *)vx;
@@ -1702,10 +1747,21 @@ void ggml_vec_dot_tqk_5hi_3lo_fwht_f32(
     float sumf = 0.0f;
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
         const float * q = y + i * TQK_BLOCK_SIZE;
-        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
-        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+
+        if (x[i].is_fp16) {
+            // fp16 sink: standard dot product
+            float dot = 0.0f;
+            for (int j = 0; j < TQK_BLOCK_SIZE; j++) {
+                dot += GGML_FP16_TO_FP32(x[i].d.fp16[j]) * q[j];
+            }
+            sumf += dot;
+            continue;
+        }
+
+        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        float norm_hi = GGML_FP16_TO_FP32(x[i].d.tq.norm_hi);
+        float norm_lo = GGML_FP16_TO_FP32(x[i].d.tq.norm_lo);
 
         // Split query and FWHT-rotate
         float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
@@ -1722,16 +1778,16 @@ void ggml_vec_dot_tqk_5hi_3lo_fwht_f32(
         // MSE centroid dot per subset
         float mse_dot_hi = 0.0f, mse_dot_lo = 0.0f;
         for (int j = 0; j < TQ_DIM_HI; j++) {
-            mse_dot_hi += q_rot_hi[j] * centroids_16_d32[up4(x[i].qs_hi, j)];
+            mse_dot_hi += q_rot_hi[j] * centroids_16_d32[up4(x[i].d.tq.qs_hi, j)];
         }
         for (int j = 0; j < TQ_DIM_LO; j++) {
-            mse_dot_lo += q_rot_lo[j] * centroids_8_d32[up3(x[i].qs_lo, j)];
+            mse_dot_lo += q_rot_lo[j] * centroids_8_d32[up3(x[i].d.tq.qs_lo, j)];
         }
         float mse_dot = mse_dot_hi * norm_hi + mse_dot_lo * norm_lo;
 
         // QJL correction on hi (raw query, not rotated)
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32,
-                                           x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
+                                           x[i].d.tq.signs_hi, GGML_FP16_TO_FP32(x[i].d.tq.rnorm_hi));
 
         sumf += mse_dot + qjl_hi;
     }
