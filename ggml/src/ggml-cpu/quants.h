@@ -76,7 +76,7 @@ void dequantize_row_tqk_5hi_3lo_fwht(const block_tqk_5hi_3lo  * GGML_RESTRICT x,
 void dequantize_row_tqk_had_mse4    (const block_tqk_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 
 // TurboQuant per-layer-per-head outlier calibration API
-void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride);
+void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride, int64_t kv_size);
 void tq_clear_sink_state(void);
 void tq_set_current_layer(int layer, int is_k);
 void tq_set_current_head(int head);

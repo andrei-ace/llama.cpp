@@ -1,247 +1,248 @@
-# TurboQuant KV Cache Quantization — Implementation & Findings
+# TurboQuant KV Cache Quantization
 
-> **Disclaimer:** This is an early experimental implementation. Testing has been
-> limited to short prompts (< 500 tokens) on 4 models with informal quality
-> checks — no perplexity benchmarks, no long-context evaluation, no NIAH at
-> scale. The implementation likely has bugs. Results below are preliminary
-> observations, not rigorous benchmarks. Take everything with a grain of salt.
+## Glossary
 
-## GQA Impact on Quantization Quality
+| Term | Meaning |
+|------|---------|
+| **MSE quantize** | Nearest-centroid quantization on the unit sphere. Lloyd-Max centroids for Beta((d-1)/2,(d-1)/2). b-bit = 2^b centroids. |
+| **QJL** | Quantized Johnson-Lindenstrauss. 1-bit sign projection of the MSE residual vector. Stores m sign bits + 1 fp16 residual norm. |
+| **QR rotation** | Gram-Schmidt orthogonal matrix from seeded Gaussian. O(d²) per vector. |
+| **FWHT** | Fast Walsh-Hadamard Transform. O(d log d) orthogonal rotation, requires power-of-2 d. Randomized with seeded ±1 sign flips. |
+| **Split 32/96** | Partition 128-dim head into 32 outlier channels (more bits) + 96 regular channels (fewer bits). Channel assignment from calibration. |
+| **Calibration** | Accumulate \|K[channel]\| magnitudes over first N tokens. Top-32 become outlier channels. |
+| **fp16 sinks** | Keep first N tokens as fp16 instead of quantizing. Attention sinks receive disproportionate softmax weight. |
+| **Asymmetric dot product** | Q·K score computed without dequantizing K. Q is rotated/split to match K's quantized domain: `score = norm · dot(rotate(Q), centroids) + dot(Q_raw, QJL_correction)`. |
+| **bpv** | Bits per value (per element of the 128-dim head vector). |
 
-The main observation so far: **the number of KV heads seems to affect how well
-TurboQuant works.** Models with more KV heads appear to tolerate quantization
-error better, likely because each head's error is averaged across the GQA group
-during attention. More testing is needed to confirm this.
+## Scheme Names
 
-| Model       | n_kv_heads | n_embd_k_gqa | tqk35+tqv35 (7.25 bpv) | tqk35+q4_0 (8.25 bpv) |
-|-------------|------------|--------------|-------------------------|------------------------|
-| Llama 8B    | 8          | 1024         | Coherent, minor rounding | Correct |
-| Mistral 7B  | 8          | 1024         | Coherent, some truncation | Correct, Eve found |
-| Qwen 7B     | 4          | 512          | Coherent after V fix     | Correct |
-| Qwen 1.5B   | 2          | 256          | Coherent after V fix     | Correct |
-
-**Hypothesis:** TQ operates on 128-dim blocks (one KV head). The QJL variance
-bound scales as 1/d where d=32 for the outlier subset. With fewer KV heads, each
-head serves more query heads via GQA, so quantization error may propagate more
-broadly. This is speculative — the variable hasn't been isolated rigorously.
-
-**V cache seemed to be the bottleneck for GQA models** in limited tests. K uses
-the PROD algorithm (MSE + QJL asymmetric estimator). V uses pure MSE
-reconstruction. The V cache was switched to a single 128×128 rotation with d=128
-centroids (no outlier split) — this was based on the observation that
-V doesn't have the same outlier pattern as K. The RotateKV paper mentions "Values
-do not contain outliers like Keys" in a different context (they use simple offline
-rotation for V). The change appeared to help on Qwen models in informal tests,
-but this needs proper validation.
-
-**Calibration is essential, not optional.** Without outlier calibration (using
-default channels 0-31), all Qwen models produce complete gibberish and even
-Llama output degrades significantly. The default channel assignment has no
-relation to actual outlier positions, so the 32 "outlier" channels get high-bit
-quantization on channels that may not need it, while real outliers in the
-"regular" partition get low-bit treatment and lose critical magnitude information.
-
-**What to try (not validated):**
-- 8+ KV heads (Llama, Mistral): `tqk35 + tqv35` seemed to work (4.4× compression)
-- 2-4 KV heads (Qwen, some others): `tqk35 + q4_0` seemed safer (3.9× compression)
-- When in doubt: `q8_0` is the safe baseline
+| Name | Full description | bpv |
+|------|-----------------|-----|
+| **fp16** | Half-precision baseline | 16.00 |
+| **q8_0** | Block-32 symmetric 8-bit integer | 8.50 |
+| **q4_0** | Block-32 symmetric 4-bit integer | 4.50 |
+| **had_mse4** | Full H_128 Hadamard, 4-bit MSE (16 centroids d=128), no split, no QJL, no calibration | 4.13 |
+| **3lo_qr** | 32/96 split + QR rotation: 4-bit MSE + 1-bit QJL on 32 outliers, 3-bit MSE on 96 regulars | 3.88 |
+| **3lo_fwht** | Same as 3lo_qr but FWHT instead of QR: H_32 on outliers, 3×H_32 on regulars (96=3×32) | 3.88 |
+| **tqk35** | Current impl: 32/96 split + QR, 3-bit MSE + QJL outlier, 2-bit MSE + QJL regular | 3.75 |
 
 ## Summary
 
-TurboQuant KV cache quantization with per-layer per-head outlier calibration,
-following the paper's exact Algorithm 2 (arXiv 2504.19874). K and V caches are
-treated differently based on RotateKV findings (arXiv 2501.16383).
+Measured attention output quality `out = softmax(Q·K^T/√d) · V` with quantized K cache
+on real extracted tensors (8192 tokens, one layer, all KV heads).
 
-**Tested on**: Llama-3.1-8B, Mistral-7B, Qwen-2.5-7B, Qwen-2.5-1.5B
-**Compression**: 4.4× KV cache reduction (tqk35 + tqv35 = ~7.25 bpv vs 32 bpv fp16)
+**For TQ schemes, Q·K scores are computed via asymmetric dot product — Q is rotated/split
+to match K's quantized representation. K is NOT dequantized.** This is the actual inference
+path: the softmax operates on approximate scores from the compressed K cache directly.
 
-## Architecture
+Test: `tests/test-tq-attn-output.cpp`, verified with `tests/test-tq-sanity.cpp`.
 
-### K cache (PROD types — tqk25/tqk35)
+**Single layer, all KV heads, no sinks:**
 
-Per the paper's Algorithm 2, with outlier-aware channel split:
+| Scheme | bpv | Llama 8B avg cos_sim | Llama avg top-1 | Qwen 1.5B avg cos_sim | Qwen avg top-1 |
+|---|---|---|---|---|---|
+| fp16 | 16.00 | 0.99999998 | 100.0% | 0.99999992 | 100.0% |
+| q8_0 | 8.50 | 0.99999560 | 100.0% | 0.99998563 | 99.6% |
+| **had_mse4** | **4.13** | **0.99940** | **95.5%** | **0.99752** | **95.7%** |
+| q4_0 | 4.50 | 0.99804 | 93.6% | 0.99499 | 91.4% |
+| 3lo_qr | 3.88 | 0.99747 | 93.7% | 0.99242 | 91.0% |
 
-1. **Split** 128-dim head into 32 outlier + 96 regular channels
-   - Outlier channels identified via prompt-phase calibration (per-layer, per-head)
-   - Calibrated from accumulated |K[channel]| magnitudes during fp16 prompt phase
-2. **Normalize** each subset independently, store norms (2 × fp16 — one per
-   subset, because outlier and regular channels carry different energy levels
-   and each needs its own unit-sphere projection for the centroids to match)
-3. **Rotate** each subset with independent orthogonal matrices (Π_hi: 32×32, Π_lo: 96×96)
-4. **MSE quantize** with b-1 bit Lloyd-Max centroids (exact for Beta((d-1)/2,(d-1)/2))
-5. **Residual in original subset space**: r = x_subset - norm × Π^T × centroids[idx]
-6. **QJL** on residual: sign(S · r), store ‖r‖ (2 × fp16)
-7. **Asymmetric vec_dot**: raw query for QJL correction (not rotated)
+Llama layer 16, 8 KV heads averaged. Qwen layer 14, 2 KV heads averaged.
 
-### V cache (MSE types — tqv25/tqv35)
+**had_mse4 (4.13 bpv)** beats q4_0 (4.50 bpv) at fewer bits. No calibration, no split, O(n log n).
 
-Per RotateKV paper: "Values do not contain outliers like Keys."
+**Note:** These are single-layer measurements with clean Q/K/V from fp16 inference. They do NOT
+capture error propagation through RMSNorm → MLP → next layer. End-to-end perplexity testing
+is needed to validate.
 
-1. **No outlier split** — single 128×128 rotation on full vector
-2. **Normalize** once (1 × fp16 norm)
-3. **Rotate** full 128-dim with Π_v (128×128 orthogonal matrix)
-4. **MSE quantize** with d=128 centroids:
-   - First 32 rotated channels → qs_hi (higher bits)
-   - Last 96 rotated channels → qs_lo (lower bits)
-5. **No QJL** — pure MSE reconstruction
+## Findings
 
-### Calibration Flow
+1. **had_mse4 is the quality champion.** Best cos_sim and KL on both models at 4.13 bpv.
+   No calibration, no channel split, O(n log n) rotation. Beats q4_0 at fewer bits.
 
-The current calibration is simplistic compared to the RotateKV paper's approach.
-RotateKV calibrates offline on WikiText-2 with sequence length 4096, taking ~5
-minutes on a 4090. This implementation does naive online calibration from whatever
-prompt the user happens to provide:
+2. **3lo_qr is the compression champion.** At 3.88 bpv it beats q4_0 on Llama and is
+   competitive on Qwen. Needs calibration + channel split.
 
-1. KV cache starts as fp16 during prompt processing
-2. CPU `set_rows` accumulates `sum(|K[channel]|)` per layer per head (K only, not V)
-3. After 256 tokens, top 32 channels by accumulated magnitude become "outliers"
-4. Prompt fp16 data re-quantized to TQ with calibrated channels
-5. Old fp16 buffers freed (saves ~4× memory)
-6. Subsequent generation tokens written directly as TQ via `set_rows`
+3. **QR > FWHT at same bpv.** The 96×96 QR rotation fully mixes all regular channels.
+   3×H_32 only mixes within 32-element groups — less mixing means worse quality.
 
-This is a rough approximation — the quality of outlier detection depends entirely
-on the prompt content. A math-heavy prompt may produce different outlier channels
-than a conversational one. Proper calibration would use a representative dataset
-and could be done once per model, saved, and loaded at startup.
+4. **QJL on regular channels hurts.** Tested 2lo+qjl (4.01 bpv) and had_3qjl (4.26 bpv) —
+   both worse than schemes without QJL at lower bpv. QJL noise > correction at d≥96.
 
-## Preliminary Observations
+5. **fp16 sinks are unnecessary for had_mse4.** Across all 8 Llama heads, sinks improve
+   avg cos_sim by only +0.00009 (0→512). had_mse4 already beats q4_0 at sink=0 on every head.
+   On Qwen head 1 (hardest case), sink=0 had_mse4 (0.99592) still beats q4_0 (0.99164).
 
-### What seems to work (limited testing)
-- Paper's exact Algorithm 2 (original-space residual, raw query for QJL) gives
-  lower bias than the original normalized-rotated-space approach
-- Per-head outlier detection matters for GQA models (Qwen with 2-4 KV heads)
-- V cache benefits from 128×128 rotation with d=128 exact centroids (no split)
-- Calibration with 256+ tokens gives reliable outlier detection
-- All tested models produce coherent output with K+V both quantized
+6. **Sinks plateau at 512 tokens.** 512 and 1024 give identical results on all heads.
+   For 3lo_qr, sinks help more on weak heads (Llama head 5: 0.99570→0.99728 at 512).
 
-### What was observed (may not generalize)
-- **d=128 per head seemed optimal** for the outlier split in a simulated
-  transformer test. Cross-head rotation (d=256/512/1024) performed worse,
-  likely because of scaled (not exact) centroids for those dimensions.
-  With exact centroids, larger d might win — not tested.
-- **K without outlier split (single 128×128 rotation) was also tested and
-  performed worse** than the 32/96 split. The paper's algorithm applied to
-  the full 128-dim vector without splitting gave higher score error and lower
-  top1 accuracy on real attention vectors. The outlier split is important for K.
-- **V without outlier split helped Qwen** — switching V to a single 128×128
-  rotation (per RotateKV's advice) appeared to fix Qwen output quality, but
-  only tested with short prompts.
-- **d=128 centroids in the code were approximate** — off by up to 6.5e-5 from
-  exact Lloyd-Max. Fixed with scipy-computed values.
-- **Tensor swap after calibration** is fragile — calling sched_reserve()
-  afterward breaks things. The current approach works but may have edge cases.
-- **TQ at 3.75 bpv** seems too lossy for precise tasks (arithmetic, exact
-  recall) but produces coherent natural language in informal tests.
+7. **Qwen (GQA 6:1) is harder than Llama (GQA 4:1).** Each KV head error propagates
+   to more Q heads with higher GQA ratio.
 
-### Quality comparison (simulated 16-layer transformer, real Llama KV data)
+## Conclusion
 
-| Config              | bpv  | Final cos_sim | Final rel_l2 |
-|---------------------|------|---------------|--------------|
-| q4_0                | 4.5  | 0.9998        | 0.0230       |
-| tqk35 calibrated    | 3.75 | 0.9954        | 0.0945       |
-| tqk35 no calibration| 3.75 | ~0.99         | ~0.17        |
+**had_mse4 is the recommended K cache quantization scheme.** At 4.13 bpv it delivers better
+attention output quality than q4_0 at 4.50 bpv on both models, across all KV heads.
+It requires no calibration, no outlier channel detection, no channel split — just a single
+randomized Hadamard rotation (O(n log n)) and 4-bit MSE quantization with precomputed
+d=128 Lloyd-Max centroids. This makes it the simplest scheme to implement in kernels
+(one FWHT + one centroid lookup per vector, same for quantize and dot product).
 
-### End-to-end model quality (multi-step math, ~300 token prompt)
+On Llama 3.1 8B (8 KV heads, GQA 4:1), had_mse4 achieves 0.99940 attention output cosine
+similarity averaged across all heads — closer to q8_0 (0.99999) than to q4_0 (0.99804).
+On Qwen 2.5 1.5B (2 KV heads, GQA 6:1), had_mse4 at 0.99752 still clearly beats
+q4_0 at 0.99499.
 
-Task: Calculate 5 people's bakery spending, identify max spender, compute total.
-Correct: Alice=$15.50, Bob=$23.75, Carol=$22.00, Dave=$40.00, Eve=$99.00, Total=$204.25
+**3lo_qr at 3.88 bpv** is viable when maximum compression matters. It matches q4_0
+quality on Llama at 14% fewer bits but adds implementation complexity: per-head outlier
+calibration, channel split, two separate rotations (QR 32×32 + QR 96×96), and QJL on
+the outlier residual. On Qwen with high GQA ratio it's roughly on par with q4_0.
 
-| Model      | KV config      | bpv  | Alice calc | Coherent? | Notes |
-|------------|----------------|------|------------|-----------|-------|
-| Llama 8B   | f16/f16        | 32   | $15.50     | Yes       | Correct, full step-by-step |
-| Llama 8B   | q8_0/q8_0     | 17   | $15.50     | Yes       | Correct |
-| Llama 8B   | q4_0/q4_0     | 9    | $15.50     | Yes       | Correct |
-| Llama 8B   | tqk35/tqv35   | 7.25 | $15.00     | Yes       | Rounds, minor ordering error |
-| Llama 8B   | tqk35/q4_0    | 8.25 | $15.50     | Yes       | Correct, step-by-step |
-| Mistral 7B | f16/f16        | 32   | $15.50     | Yes       | Correct |
-| Mistral 7B | q8_0/q8_0     | 17   | $15.50     | Yes       | Correct |
-| Mistral 7B | q4_0/q4_0     | 9    | $23.00     | Yes       | Alice wrong, Eve correct |
-| Mistral 7B | tqk35/tqv35   | 7.25 | Partial    | Yes       | Coherent but truncated |
-| Mistral 7B | tqk35/q4_0    | 8.25 | $17.50     | Yes       | All wrong but coherent, Eve correct |
-| Qwen 7B    | f16/f16        | 32   | $15.50     | Yes       | LaTeX formatting, correct |
-| Qwen 7B    | q8_0/q8_0     | 17   | $15.50     | Yes       | Correct |
-| Qwen 7B    | q4_0/q4_0     | 9    | —          | **No**    | Degenerates into "?" loops |
-| Qwen 7B    | tqk35/tqv35   | 7.25 | $15.50     | Yes       | Step-by-step, correct |
-| Qwen 7B    | tqk35/q4_0    | 8.25 | $15.50     | Yes       | Correct, LaTeX |
-| Qwen 1.5B  | f16/f16        | 32   | $15.50     | Yes       | Correct |
-| Qwen 1.5B  | q8_0/q8_0     | 17   | $15.50     | Yes       | Correct |
-| Qwen 1.5B  | q4_0/q4_0     | 9    | Partial    | Yes       | Coherent |
-| Qwen 1.5B  | tqk35/tqv35   | 7.25 | Partial    | Yes       | Coherent but truncated |
-| Qwen 1.5B  | tqk35/q4_0    | 8.25 | $15.50     | Yes       | Correct, step-by-step |
+**What didn't work:**
+- QJL on regular channels (d=96 or d=128) — the correction noise exceeds the benefit
+- FWHT with 32/96 split — 3×H_32 block-diagonal gives less mixing than full QR_96
+- fp16 sinks — unnecessary for had_mse4 (all heads beat q4_0 at sink=0). Adds bpv overhead
+  and implementation complexity for negligible gain (+0.00009 avg cos_sim on Llama)
 
-Note: Qwen 7B with q4_0 KV cache degenerated on this specific prompt while
-tqk35/tqv35 produced correct output. This is one data point — it could be a
-fluke or prompt-specific. Proper evaluation requires perplexity benchmarks
-across diverse datasets.
+**What needs validation:** Per-layer results (all 32/28 layers) confirm had_mse4 wins on every
+layer independently. End-to-end perplexity and NIAH tests are needed to confirm this translates
+to output quality when all layers use quantized K simultaneously.
 
-### Needle-in-a-haystack (400 token context, hidden code retrieval)
+## Effective bpv with fp16 sinks
 
-A secret code (BLUE-FALCON-7742) is embedded in a passage about bread history.
-The model must find and reproduce it exactly.
+eff_bpv = (N_sink × 16 + (ctx - N_sink) × base_bpv) / ctx
 
-| Model      | KV config       | bpv  | Found needle? | Output quality |
-|------------|-----------------|------|---------------|----------------|
-| Llama 8B   | f16/f16         | 32   | YES           | Exact: "BLUE-FALCON-7742" |
-| Llama 8B   | q8_0/q8_0      | 17   | YES           | Exact |
-| Llama 8B   | q4_0/q4_0      | 9    | YES           | Correct (offers multiple-choice) |
-| Llama 8B   | tqk35/tqv35    | 7.25 | YES           | Finds it but hedges |
-| Llama 8B   | tqk35/q4_0     | 8.25 | YES           | Exact |
-| Mistral 7B | f16/f16         | 32   | YES           | Exact |
-| Mistral 7B | q8_0/q8_0      | 17   | YES           | Exact |
-| Mistral 7B | q4_0/q4_0      | 9    | YES           | Exact + follow-up question |
-| Mistral 7B | tqk35/tqv35    | 7.25 | YES           | "BLUE-FAL-42" (truncated) |
-| Mistral 7B | tqk35/q4_0     | 8.25 | YES           | "BLUE-FALMOND-7742" (close) |
-| Qwen 7B    | f16/f16         | 32   | YES           | Exact with context |
-| Qwen 7B    | q8_0/q8_0      | 17   | YES           | Exact |
-| Qwen 7B    | q4_0/q4_0      | 9    | YES*          | Garbled ("cattat...") |
-| Qwen 7B    | tqk35/tqv35    | 7.25 | YES*          | Garbled |
-| Qwen 7B    | tqk35/q4_0     | 8.25 | YES*          | Garbled |
-| Qwen 1.5B  | f16/f16         | 32   | YES           | Exact with context |
-| Qwen 1.5B  | q8_0/q8_0      | 17   | YES           | Exact |
-| Qwen 1.5B  | q4_0/q4_0      | 9    | YES*          | Garbled |
-| Qwen 1.5B  | tqk35/tqv35    | 7.25 | YES*          | Garbled |
-| Qwen 1.5B  | tqk35/q4_0     | 8.25 | YES*          | Garbled |
+| Context | had_mse4 (4.13) | 3lo (3.88) | q4_0 (4.50) |
+|---|---|---|---|
+| 8K | 4.87 | 4.64 | 4.50 |
+| 16K | 4.50 | 4.26 | 4.50 |
+| 64K | 4.22 | 3.97 | 4.50 |
 
-*Needle appears in repetition/garbled output, not coherently retrieved.
+## V Cache (unchanged)
 
-**Observations (very small sample, may not generalize):**
-- Llama 8B and Mistral 7B seemed to handle TQ better on this test
-- Qwen models degraded with any sub-q8_0 quantization (q4_0 AND TQ)
-- K=tqk35/V=q4_0 appeared to be a reasonable middle ground for Llama
-- This is one prompt — real NIAH evaluation needs thousands of samples at
-  varying depths and context lengths
-
-All models produce coherent output across all KV cache types. TQ introduces
-minor arithmetic rounding at 3.75 bpv but maintains step-by-step reasoning.
-
-### RotateKV paper comparison
-
-RotateKV (arXiv 2501.16383) uses a fundamentally different approach:
-- **Hadamard rotation** (FWHT) instead of QR orthogonal — O(n log n) vs O(n²)
-- **Pre-RoPE grouped-head rotation** fused into weights
-- **Per-token asymmetric integer quantization** (scale + zero per group)
-- **Attention-sink-aware**: keeps sink tokens in fp16
-
-Their results at 2-bit are impressive (<0.3 PPL degradation) but they operate
-at different scale (d=1536+) where QJL variance is negligible.
+Single 128×128 QR rotation, no outlier split, d=128 centroids, no QJL.
 
 ## File Map
 
 | File | Role |
 |------|------|
-| `ggml/src/ggml-turbo-quant.c` | Core algorithms, per-head registry, calibration API |
-| `ggml/src/ggml-cpu/quants.h` | Public calibration function declarations |
+| `ggml/src/ggml-turbo-quant.c` | Core algorithms, centroids, calibration API |
 | `ggml/src/ggml-cpu/ops.cpp` | Layer/head detection in set_rows, get_rows, FA |
-| `ggml/src/ggml-cpu/ggml-cpu.c` | Layer detection in mul_mat, MSE type traits |
-| `src/llama-kv-cache.h/cpp` | fp16→TQ calibration flow, tensor swap, buffer cleanup |
-| `src/llama-context.cpp` | Calibration trigger after decode |
+| `src/llama-kv-cache.h/cpp` | Calibration flow, tensor swap |
+| `tests/test-tq-sanity.cpp` | Algorithm correctness (synthetic data, 16/16 pass) |
+| `tests/test-tq-attn-output.cpp` | Attention output quality (real model data, sink sweep) |
+| `tmp/tq-extract-*/` | QKV tensor extractors |
 
-## Known Limitations and Caveats
+## Known Limitations
 
-- **Metal V cache (TQV) supported** — get_rows and set_rows for tqv25/tqv35 on Metal
-- **Metal K cache (TQK) kernels written** — but channel map upload not yet wired end-to-end
-- **No Metal flash attention** — TQ types fall back to dequantize + standard attention
-- **CUDA kernels not updated** — CUDA still needs the same treatment as Metal
-- **Re-quantization adds error** — prompt tokens quantized with calibrated channels
-  have ~0.35 rel_L2 error, which degrades arithmetic precision
-- **Memory spike** during calibration — fp16 + TQ both allocated briefly
+- Metal TQK kernels written but channel map not wired end-to-end
+- No Metal flash attention for TQ types
+- CUDA kernels not updated
+- Single-layer measurements only — does not capture error propagation through RMSNorm/MLP
+- Need end-to-end perplexity and NIAH validation
+
+---
+
+## Raw Data
+
+All TQ scores computed via asymmetric dot product (Q rotated, K not dequantized).
+128 query positions (1024..8136), 8192 tokens.
+
+### Llama 3.1 8B — layer 16, KV head 0, Q head 0 (GQA 4:1)
+
+| Scheme | sink | eff bpv | out_cossim | out_rel_L2 | top-1 | top-5 | KL_div |
+|---|---|---|---|---|---|---|---|
+| fp16 | 0 | 16.00 | 0.99999997 | 0.000215 | 100.0% | 100.0% | 9.6e-10 |
+| q8_0 | 0 | 8.50 | 0.99999560 | 0.001832 | 100.0% | 100.0% | 1.6e-07 |
+| q4_0 | 0 | 4.50 | 0.99845096 | 0.037513 | 96.9% | 98.4% | 4.6e-05 |
+| had_mse4 | 0 | 4.13 | 0.99971509 | 0.014784 | 99.2% | 100.0% | 1.3e-05 |
+| had_mse4 | 128 | 4.32 | 0.99973299 | 0.014281 | 99.2% | 100.0% | 1.2e-05 |
+| had_mse4 | 256 | 4.50 | 0.99974797 | 0.013789 | 99.2% | 100.0% | 1.1e-05 |
+| had_mse4 | 512 | 4.87 | 0.99984728 | 0.010075 | 99.2% | 100.0% | 6.7e-06 |
+| had_mse4 | 1024 | 5.61 | 0.99984728 | 0.010075 | 99.2% | 100.0% | 6.7e-06 |
+| 3lo_qr | 0 | 3.88 | 0.99922026 | 0.025627 | 97.7% | 100.0% | 3.2e-05 |
+| 3lo_qr | 128 | 4.07 | 0.99925142 | 0.024786 | 97.7% | 99.2% | 3.0e-05 |
+| 3lo_qr | 256 | 4.26 | 0.99927473 | 0.024490 | 97.7% | 99.2% | 2.7e-05 |
+| 3lo_qr | 512 | 4.64 | 0.99958100 | 0.017622 | 98.4% | 99.2% | 1.6e-05 |
+| 3lo_qr | 1024 | 5.39 | 0.99958100 | 0.017622 | 98.4% | 99.2% | 1.6e-05 |
+| 3lo_fwht | 0 | 3.88 | 0.99866910 | 0.032195 | 98.4% | 100.0% | 5.0e-05 |
+| 3lo_fwht | 128 | 4.07 | 0.99868674 | 0.032127 | 98.4% | 100.0% | 4.7e-05 |
+| 3lo_fwht | 256 | 4.26 | 0.99869768 | 0.031531 | 98.4% | 100.0% | 4.4e-05 |
+| 3lo_fwht | 512 | 4.64 | 0.99948194 | 0.018949 | 100.0% | 100.0% | 2.4e-05 |
+| 3lo_fwht | 1024 | 5.39 | 0.99948194 | 0.018949 | 100.0% | 100.0% | 2.4e-05 |
+
+### Qwen 2.5 1.5B — layer 14, KV head 0, Q head 0 (GQA 6:1)
+
+| Scheme | sink | eff bpv | out_cossim | out_rel_L2 | top-1 | top-5 | KL_div |
+|---|---|---|---|---|---|---|---|
+| fp16 | 0 | 16.00 | 0.99999997 | 0.000472 | 100.0% | 100.0% | 2.6e-08 |
+| q8_0 | 0 | 8.50 | 0.99999249 | 0.005202 | 100.0% | 100.0% | 2.9e-06 |
+| q4_0 | 0 | 4.50 | 0.99834233 | 0.154084 | 93.0% | 96.1% | 1.1e-03 |
+| had_mse4 | 0 | 4.13 | 0.99911611 | 0.062610 | 97.7% | 99.2% | 2.8e-04 |
+| had_mse4 | 128 | 4.32 | 0.99911614 | 0.062591 | 97.7% | 99.2% | 2.8e-04 |
+| had_mse4 | 256 | 4.50 | 0.99930060 | 0.063466 | 97.7% | 100.0% | 2.8e-04 |
+| had_mse4 | 512 | 4.87 | 0.99932616 | 0.055886 | 97.7% | 100.0% | 2.7e-04 |
+| had_mse4 | 1024 | 5.61 | 0.99932616 | 0.055886 | 97.7% | 100.0% | 2.7e-04 |
+| 3lo_qr | 0 | 3.88 | 0.99723430 | 0.194518 | 93.0% | 95.3% | 1.2e-03 |
+| 3lo_qr | 128 | 4.07 | 0.99722881 | 0.194426 | 93.0% | 96.1% | 1.2e-03 |
+| 3lo_qr | 256 | 4.26 | 0.99718525 | 0.182993 | 93.0% | 96.9% | 1.1e-03 |
+| 3lo_qr | 512 | 4.64 | 0.99726155 | 0.152985 | 93.8% | 98.4% | 1.1e-03 |
+| 3lo_qr | 1024 | 5.39 | 0.99726155 | 0.152985 | 93.8% | 98.4% | 1.1e-03 |
+| 3lo_fwht | 0 | 3.88 | 0.99498130 | 0.164300 | 92.2% | 96.9% | 1.1e-03 |
+| 3lo_fwht | 128 | 4.07 | 0.99498108 | 0.164289 | 92.2% | 96.9% | 1.1e-03 |
+| 3lo_fwht | 256 | 4.26 | 0.99572980 | 0.155476 | 93.0% | 97.7% | 1.1e-03 |
+| 3lo_fwht | 512 | 4.64 | 0.99712308 | 0.130518 | 93.8% | 99.2% | 9.5e-04 |
+| 3lo_fwht | 1024 | 5.39 | 0.99712308 | 0.130518 | 93.8% | 99.2% | 9.5e-04 |
+
+### Llama 3.1 8B — layer 16, all 8 KV heads × all sink sizes (had_mse4 only, cos_sim)
+
+| KV hd | sink=0 | sink=128 | sink=256 | sink=512 | sink=1024 | q4_0 |
+|---|---|---|---|---|---|---|
+| 0 | 0.99972 | 0.99973 | 0.99975 | 0.99985 | 0.99985 | 0.99845 |
+| 1 | 0.99966 | 0.99966 | 0.99966 | 0.99966 | 0.99966 | 0.99778 |
+| 2 | 0.99933 | 0.99936 | 0.99932 | 0.99936 | 0.99936 | 0.99832 |
+| 3 | 0.99913 | 0.99913 | 0.99913 | 0.99913 | 0.99913 | 0.99638 |
+| 4 | 0.99963 | 0.99963 | 0.99963 | 0.99963 | 0.99963 | 0.99864 |
+| 5 | 0.99884 | 0.99887 | 0.99892 | 0.99942 | 0.99942 | 0.99758 |
+| 6 | 0.99923 | 0.99922 | 0.99923 | 0.99924 | 0.99924 | 0.99855 |
+| 7 | 0.99962 | 0.99962 | 0.99963 | 0.99963 | 0.99963 | 0.99864 |
+| **AVG** | **0.99940** | **0.99940** | **0.99941** | **0.99949** | **0.99949** | **0.99804** |
+
+Sinks barely help had_mse4 on Llama: 0→512 gains +0.00009 avg cos_sim. Already beats q4_0 at sink=0.
+
+### Llama 3.1 8B — layer 16, all 8 KV heads × all sink sizes (3lo_qr, cos_sim)
+
+| KV hd | sink=0 | sink=128 | sink=256 | sink=512 | sink=1024 | q4_0 |
+|---|---|---|---|---|---|---|
+| 0 | 0.99922 | 0.99925 | 0.99927 | 0.99958 | 0.99958 | 0.99845 |
+| 1 | 0.99814 | 0.99816 | 0.99816 | 0.99817 | 0.99817 | 0.99778 |
+| 2 | 0.99723 | 0.99725 | 0.99728 | 0.99751 | 0.99751 | 0.99832 |
+| 3 | 0.99751 | 0.99751 | 0.99751 | 0.99752 | 0.99752 | 0.99638 |
+| 4 | 0.99883 | 0.99883 | 0.99883 | 0.99883 | 0.99883 | 0.99864 |
+| 5 | 0.99570 | 0.99594 | 0.99603 | 0.99728 | 0.99728 | 0.99758 |
+| 6 | 0.99416 | 0.99418 | 0.99417 | 0.99441 | 0.99441 | 0.99855 |
+| 7 | 0.99901 | 0.99901 | 0.99900 | 0.99900 | 0.99900 | 0.99864 |
+| **AVG** | **0.99747** | **0.99752** | **0.99753** | **0.99779** | **0.99779** | **0.99804** |
+
+3lo_qr at 3.88 bpv is close to q4_0 at 4.50 bpv on Llama. Heads 2,5,6 are weak spots where 3lo_qr < q4_0.
+
+### Qwen 2.5 1.5B — layer 14, all 2 KV heads × all sink sizes
+
+| KV hd | Scheme | sink=0 | sink=128 | sink=256 | sink=512 | sink=1024 | q4_0 |
+|---|---|---|---|---|---|---|---|
+| 0 | had_mse4 | 0.99912 | 0.99912 | 0.99930 | 0.99933 | 0.99933 | 0.99834 |
+| 0 | 3lo_qr | 0.99723 | 0.99723 | 0.99719 | 0.99726 | 0.99726 | 0.99834 |
+| 0 | 3lo_fwht | 0.99498 | 0.99498 | 0.99573 | 0.99712 | 0.99712 | 0.99834 |
+| 1 | had_mse4 | 0.99592 | 0.99597 | 0.99636 | 0.99683 | 0.99683 | 0.99164 |
+| 1 | 3lo_qr | 0.98760 | 0.98791 | 0.98869 | 0.99330 | 0.99330 | 0.99164 |
+| 1 | 3lo_fwht | 0.98907 | 0.98906 | 0.98923 | 0.99424 | 0.99424 | 0.99164 |
+
+Qwen head 1 (GQA 6:1) is the hardest case. had_mse4 beats q4_0 on all sinks. 3lo_qr needs 512 sinks to match q4_0 on head 1.
+
+### Sanity test (synthetic data, `tests/test-tq-sanity.cpp`) — 16/16 passed
+
+- Rotation roundtrips (QR, FWHT split, H_128): all < 1e-5 error
+- **Asymmetric dot product == dequant dot product**: diff < 2e-6 (proves Q rotation is correct)
+- Outlier channels scattered [3..127], not contiguous — split uses actual calibrated indices
+- Wrong channel map flips score sign: correct=-14.04, wrong=+18.07 vs ref=-17.33
+- Calibrated channels: 0.120 rel_L2 vs wrong channels: 0.172

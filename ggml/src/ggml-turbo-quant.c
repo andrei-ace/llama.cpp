@@ -124,6 +124,7 @@ static const void * tq_sink_k_base[TQ_MAX_LAYERS];      // start of TQ K tensor 
 static const void * tq_sink_fp16_base[TQ_MAX_LAYERS];    // start of fp16 sink tensor data per layer
 static int64_t      tq_sink_k_stride[TQ_MAX_LAYERS];     // bytes per KV position in TQ tensor (all heads)
 static int64_t      tq_sink_fp16_stride[TQ_MAX_LAYERS];  // bytes per KV position in fp16 tensor (all heads)
+static int64_t      tq_sink_kv_size[TQ_MAX_LAYERS];     // kv_size per stream (for multi-stream position calc)
 static int          tq_sink_n_global = 0;                 // number of sink positions (same for all layers)
 
 // Legacy single-layer state (kept for fallback first-vector detection)
@@ -966,21 +967,24 @@ void ggml_vec_dot_tqk_35_f32(
 // Public API: per-layer outlier calibration
 // ---------------------------------------------------------------------------
 
-void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride) {
+void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base,
+                            int n_sinks, int64_t k_stride, int64_t fp16_stride, int64_t kv_size) {
     if (layer < 0 || layer >= TQ_MAX_LAYERS) return;
     tq_sink_k_base[layer]      = k_base;
     tq_sink_fp16_base[layer]   = fp16_base;
     tq_sink_k_stride[layer]    = k_stride;
     tq_sink_fp16_stride[layer] = fp16_stride;
+    tq_sink_kv_size[layer]     = kv_size;
     tq_sink_n_global           = n_sinks;
 }
 
 void tq_clear_sink_state(void) {
     for (int i = 0; i < TQ_MAX_LAYERS; i++) {
-        tq_sink_k_base[i]     = NULL;
-        tq_sink_fp16_base[i]  = NULL;
-        tq_sink_k_stride[i]   = 0;
+        tq_sink_k_base[i]      = NULL;
+        tq_sink_fp16_base[i]   = NULL;
+        tq_sink_k_stride[i]    = 0;
         tq_sink_fp16_stride[i] = 0;
+        tq_sink_kv_size[i]     = 0;
     }
     tq_sink_n_global = 0;
 }
@@ -1212,6 +1216,33 @@ void dequantize_row_tqk_had_mse4(const block_tqk_had_mse4 * GGML_RESTRICT x, flo
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
 
+    // Sink dispatch for dequantize (used by FA path)
+    if (tq_sink_n_global > 0 && tq_cur_layer >= 0 && tq_cur_layer < TQ_MAX_LAYERS) {
+        const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
+        const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
+        int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
+        int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
+        int64_t kv_size        = tq_sink_kv_size[tq_cur_layer];
+        if (k_base && fp16_base && k_stride > 0) {
+            int64_t byte_off   = (const char *)x - k_base;
+            int64_t stream_sz  = k_stride * kv_size;
+            int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
+            int64_t within     = byte_off - stream_idx * stream_sz;
+            int64_t pos        = within / k_stride;
+            int64_t head_off   = within % k_stride;
+            int64_t head_idx   = head_off / (int64_t)sizeof(block_tqk_had_mse4);
+            if (pos >= 0 && pos < tq_sink_n_global) {
+                // Return fp16→f32 converted data from sink buffer
+                int64_t fp16_row = stream_idx * kv_size + pos;
+                const ggml_half * kfp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * k * (int64_t)sizeof(ggml_half));
+                for (int64_t j = 0; j < k; j++) {
+                    y[j] = GGML_FP16_TO_FP32(kfp16[j]);
+                }
+                return;
+            }
+        }
+    }
+
     for (int64_t i = 0; i < nb; i++) {
         float norm = GGML_FP16_TO_FP32(x[i].norm);
 
@@ -1245,13 +1276,18 @@ void ggml_vec_dot_tqk_had_mse4_f32(
         int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
         int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
         if (k_base && fp16_base && k_stride > 0) {
-            int64_t byte_off = (const char *)vx - k_base;
-            int64_t pos = byte_off / k_stride;            // KV position index
-            int64_t head_off = byte_off % k_stride;       // offset within KV position (head)
-            int64_t head_idx = head_off / (int64_t)sizeof(block_tqk_had_mse4); // which head
+            int64_t kv_size    = tq_sink_kv_size[tq_cur_layer];
+            int64_t byte_off   = (const char *)vx - k_base;
+            int64_t stream_sz  = k_stride * kv_size;
+            int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
+            int64_t within     = byte_off - stream_idx * stream_sz;
+            int64_t pos        = within / k_stride;
+            int64_t head_off   = within % k_stride;
+            int64_t head_idx   = head_off / (int64_t)sizeof(block_tqk_had_mse4);
             if (pos >= 0 && pos < tq_sink_n_global) {
-                // fp16 dot: read fp16 K from sink buffer at same (pos, head)
-                const ggml_half * k_fp16 = (const ggml_half *)(fp16_base + pos * fp16_stride + head_idx * n * (int64_t)sizeof(ggml_half));
+                // fp16 row = (stream_idx * kv_size + pos), then offset by head
+                int64_t fp16_row = stream_idx * kv_size + pos;
+                const ggml_half * k_fp16 = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head_idx * n * (int64_t)sizeof(ggml_half));
                 const float * q = (const float *)vy;
                 float dot = 0.0f;
                 for (int j = 0; j < n; j++) {

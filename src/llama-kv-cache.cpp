@@ -16,7 +16,7 @@ extern "C" {
     void tq_reset_calibration(void);
     void tq_reset_accumulators(void);
     void tq_get_channel_map(int layer, int head, int is_k, int * outlier, int * regular);
-    void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride);
+    void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride, int64_t kv_size);
     void tq_clear_sink_state(void);
 }
 
@@ -435,10 +435,10 @@ void llama_kv_cache::set_tq_n_sinks(uint32_t n) {
             ggml_tensor * k = layers[ikv].k;
             ggml_tensor * ks = layers[ikv].k_sink;
             if (!k || !ks) continue;
-            int64_t k_stride_per_pos   = ggml_row_size(k->type, k->ne[0]) * k->ne[1];
+            int64_t k_stride_per_pos    = ggml_row_size(k->type, k->ne[0]);
             int64_t fp16_stride_per_pos = ggml_row_size(GGML_TYPE_F16, ks->ne[0]);
             tq_register_sink_layer(layers[ikv].il,
-                k->data, ks->data, n, k_stride_per_pos, fp16_stride_per_pos);
+                k->data, ks->data, n, k_stride_per_pos, fp16_stride_per_pos, get_size());
         }
 
         LLAMA_LOG_INFO("%s: allocated fp16 sink tensors for first %u tokens (no-calibration path)\n", __func__, n);
@@ -655,10 +655,10 @@ void llama_kv_cache::tq_finish_calibration() {
             ggml_tensor * k = layers[ikv].k;
             ggml_tensor * ks = layers[ikv].k_sink;
             if (!k || !ks) continue;
-            int64_t k_stride_per_pos   = ggml_row_size(k->type, k->ne[0]) * k->ne[1];
+            int64_t k_stride_per_pos    = ggml_row_size(k->type, k->ne[0]);
             int64_t fp16_stride_per_pos = ggml_row_size(GGML_TYPE_F16, ks->ne[0]);
             tq_register_sink_layer(layers[ikv].il,
-                k->data, ks->data, tq_n_sinks_, k_stride_per_pos, fp16_stride_per_pos);
+                k->data, ks->data, tq_n_sinks_, k_stride_per_pos, fp16_stride_per_pos, get_size());
         }
     }
 
