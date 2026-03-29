@@ -833,27 +833,45 @@ static float qjl_project_query_element(const float * q_rot, int i, int m, uint64
     return proj;
 }
 
-// QJL correction term: rnorm * sqrt(π/2) / m * <S @ q_rot, sign(S @ r_k)>
-// = rnorm * sqrt(π/2) / m * sum_i (S_i @ q_rot) * sign_i
+// Pre-computed QJL matrices (generated once at init, reused for all vec_dot calls)
+static float tq_qjl_mat_32[TQ_DIM_HI * TQ_DIM_HI];  // 32×32 = 4KB
+static int   tq_qjl_mat_initialized = 0;
+
+static void tq_init_qjl_matrices(void) {
+    if (tq_qjl_mat_initialized) return;
+    tq_get_qjl_matrix(tq_qjl_mat_32, TQ_DIM_HI, QJL_SEED_32);
+    tq_qjl_mat_initialized = 1;
+}
+
+// QJL correction term using pre-computed matrix:
+// rnorm * sqrt(π/2) / m * <S @ q, sign(S @ r_k)>
 static float qjl_asymmetric_dot(const float * q_rot, int m, uint64_t seed,
                                  const uint8_t * signs, float rnorm) {
     if (rnorm == 0.0f) return 0.0f;
+    (void)seed;
 
-    // Generate S @ q_rot on-the-fly (same PRNG as qjl_forward)
-    // and dot with stored signs
-    tq_seed(seed);
+    tq_init_qjl_matrices();
+    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : NULL;
+
     float sum = 0.0f;
-    for (int i = 0; i < m; i++) {
-        // Compute (S_row_i @ q_rot)
-        float proj = 0.0f;
-        for (int j = 0; j < m; j++) {
-            proj += tq_gaussian() * q_rot[j];
+    if (S) {
+        // Fast path: pre-computed matrix
+        for (int i = 0; i < m; i++) {
+            float proj = 0.0f;
+            for (int j = 0; j < m; j++) proj += S[i * m + j] * q_rot[j];
+            float sign = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+            sum += proj * sign;
         }
-        // Multiply by stored sign bit
-        float sign = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
-        sum += proj * sign;
+    } else {
+        // Fallback: regenerate on-the-fly for non-standard dimensions
+        tq_seed(seed);
+        for (int i = 0; i < m; i++) {
+            float proj = 0.0f;
+            for (int j = 0; j < m; j++) proj += tq_gaussian() * q_rot[j];
+            float sign = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+            sum += proj * sign;
+        }
     }
-    // Scale: sqrt(π/2) / m * rnorm
     return 1.2533141f / (float)m * rnorm * sum;
 }
 
