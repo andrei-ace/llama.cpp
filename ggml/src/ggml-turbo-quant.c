@@ -459,6 +459,33 @@ static bool tq_try_sink_dequant(const void * x, float * y, int64_t k, int64_t tq
     return true;
 }
 
+// Write fp16 copy to k_sink inside from_float (atomic with TQ write, no graph ordering issue).
+// Called from each TQ quantize function after writing TQ data.
+static void tq_sink_write_fp16(const float * x, const void * tq_dst, int64_t k, int64_t tq_block_bytes) {
+    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return;
+    const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
+    char       * fp16_base = (char *)tq_sink_fp16_base[tq_cur_layer];
+    int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
+    int64_t fp16_stride    = tq_sink_fp16_stride[tq_cur_layer];
+    if (!k_base || !fp16_base || k_stride <= 0) return;
+
+    // Compute cell index from TQ destination pointer
+    int64_t byte_off = (const char *)tq_dst - k_base;
+    if (byte_off < 0) return;
+    int64_t kv_size    = tq_sink_kv_size[tq_cur_layer];
+    int64_t stream_sz  = k_stride * kv_size;
+    int64_t stream_idx = stream_sz > 0 ? byte_off / stream_sz : 0;
+    int64_t within     = byte_off - stream_idx * stream_sz;
+    int64_t cell       = within / k_stride;
+
+    // Write f32 → fp16 to sink buffer at same cell position
+    int64_t fp16_row = stream_idx * kv_size + cell;
+    ggml_half * dst = (ggml_half *)(fp16_base + fp16_row * fp16_stride);
+    for (int64_t j = 0; j < k; j++) {
+        dst[j] = GGML_FP32_TO_FP16(x[j]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1326,6 +1353,7 @@ void quantize_row_tqk_had_mse4_ref(const float * GGML_RESTRICT x, block_tqk_had_
             pk4(y[i].qs, j, idx);
         }
     }
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_had_mse4));
 }
 
 void dequantize_row_tqk_had_mse4(const block_tqk_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
@@ -1454,6 +1482,7 @@ void quantize_row_tqk_5hi_3lo_qr_ref(const float * GGML_RESTRICT x, block_tqk_5h
         for (int j = 0; j < TQ_DIM_HI; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
         y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQ_DIM_HI, QJL_SEED_32));
     }
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_5hi_3lo));
 }
 
 void dequantize_row_tqk_5hi_3lo_qr(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
@@ -1613,6 +1642,7 @@ void quantize_row_tqk_5hi_3lo_fwht_ref(const float * GGML_RESTRICT x, block_tqk_
         for (int j = 0; j < TQ_DIM_HI; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
         y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQ_DIM_HI, QJL_SEED_32));
     }
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_5hi_3lo));
 }
 
 void dequantize_row_tqk_5hi_3lo_fwht(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {

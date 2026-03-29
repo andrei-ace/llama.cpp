@@ -2056,10 +2056,6 @@ ggml_tensor * llm_graph_context::build_attn(
 
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
         ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
-
-        // Also write fp16 copy for sink positions
-        ggml_tensor * sink_cpy = mctx_cur->cpy_k_sink(ctx0, k_cur, k_idxs, il);
-        if (sink_cpy) { ggml_build_forward_expand(gf, sink_cpy); }
     }
 
     const auto & kq_mask = inp->get_kq_mask();
@@ -2144,8 +2140,6 @@ ggml_tensor * llm_graph_context::build_attn(
 
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
 
-        ggml_tensor * sink_cpy = mctx_cur->cpy_k_sink(ctx0, k_cur, k_idxs, il);
-        if (sink_cpy) { ggml_build_forward_expand(gf, sink_cpy); }
     }
 
     const auto & kq_mask = inp->get_kq_mask();
@@ -2208,8 +2202,6 @@ ggml_tensor * llm_graph_context::build_attn(
 
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
 
-        ggml_tensor * sink_cpy = mctx_cur->cpy_k_sink(ctx0, k_cur, k_idxs, il);
-        if (sink_cpy) { ggml_build_forward_expand(gf, sink_cpy); }
     }
 
     if (v_cur) {
