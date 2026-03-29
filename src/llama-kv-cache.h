@@ -162,8 +162,14 @@ public:
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
+    // get fp16 sink tensor for first n_sinks K positions (nullptr if no sinks)
+    ggml_tensor * get_k_sinks(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+    uint32_t get_tq_n_sinks() const { return tq_n_sinks_; }
+    void set_tq_n_sinks(uint32_t n);
+
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
+    ggml_tensor * cpy_k_sink(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
 
     //
@@ -226,6 +232,9 @@ private:
         // Pre-allocated TQ tensors for GPU calibration (avoids Metal allocation deadlock)
         ggml_tensor * k_tq = nullptr;
         ggml_tensor * v_tq = nullptr;
+
+        // fp16 sink tensor — first N tokens kept as fp16 for attention quality
+        ggml_tensor * k_sink = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -270,6 +279,10 @@ private:
     ggml_type target_type_k = GGML_TYPE_F16;  // user-requested TQ type (cache starts as fp16)
     ggml_type target_type_v = GGML_TYPE_F16;
     bool tq_calibrating_ = false;             // true during prompt (cache is fp16, accumulating)
+    uint32_t tq_n_sinks_ = 0;                 // number of initial tokens to keep as fp16
+
+    // Sink buffer storage (separate from ctxs_bufs to avoid memory_breakdown assertions)
+    std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> sink_bufs;
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
@@ -354,6 +367,9 @@ public:
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
 
+    // get fp16 sink tensor for first n_sinks K positions (nullptr if no sinks)
+    ggml_tensor * get_k_sinks(ggml_context * ctx, int32_t il) const;
+
     // TurboQuant rotation matrices (nullptr if not using turbo types)
     ggml_tensor * get_turbo_rot() const;
     ggml_tensor * get_turbo_rot_inv() const;
@@ -365,6 +381,7 @@ public:
     //   - v_cur  [n_embd_head_v, n_head_v, n_tokens]
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
+    ggml_tensor * cpy_k_sink(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache

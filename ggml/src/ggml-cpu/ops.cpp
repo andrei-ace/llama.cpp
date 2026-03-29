@@ -570,6 +570,40 @@ void ggml_compute_forward_dup(
                     ggml_compute_forward_dup_from_q(params, dst);
                     break;
                 }
+                if (ggml_is_quantized(src0->type) && dst->type == GGML_TYPE_F16) {
+                    // quantized → fp16: dequantize to f32 then convert
+                    ggml_compute_forward_dup_from_q(params, dst);
+                    // dst was filled as f32 by dup_from_q — reinterpret and convert in-place
+                    // Actually, dup_from_q writes to dst which is fp16 — that won't work.
+                    // Instead, use a two-pass approach per row.
+                    const int64_t ne00 = src0->ne[0];
+                    const int64_t ne01 = src0->ne[1];
+                    const int64_t ne02 = src0->ne[2];
+                    const int64_t ne03 = src0->ne[3];
+                    const int64_t nr = ggml_nrows(src0);
+                    const int ith = params->ith;
+                    const int nth = params->nth;
+                    const int64_t ir0 = (int64_t)ith * nr / nth;
+                    const int64_t ir1 = (int64_t)(ith + 1) * nr / nth;
+
+                    ggml_to_float_t const to_float = ggml_get_type_traits(src0->type)->to_float;
+                    const size_t src_row_size = ggml_row_size(src0->type, ne00);
+                    float tmp[4096];
+                    GGML_ASSERT(ne00 <= 4096);
+
+                    for (int64_t ir = ir0; ir < ir1; ir++) {
+                        const int64_t i3 = ir / (ne02 * ne01);
+                        const int64_t i2 = (ir - i3 * ne02 * ne01) / ne01;
+                        const int64_t i1 = ir - i3 * ne02 * ne01 - i2 * ne01;
+                        const char * src_row = (const char *)src0->data + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
+                        ggml_fp16_t * dst_row = (ggml_fp16_t *)((char *)dst->data + i1*dst->nb[1] + i2*dst->nb[2] + i3*dst->nb[3]);
+                        to_float(src_row, tmp, ne00);
+                        for (int64_t j = 0; j < ne00; j++) {
+                            dst_row[j] = GGML_FP32_TO_FP16(tmp[j]);
+                        }
+                    }
+                    break;
+                }
                 GGML_ABORT("fatal error");
             }
     }
@@ -5618,6 +5652,9 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_TURBO4_0_PROD:
         case GGML_TYPE_TURBO3_0_MSE:
         case GGML_TYPE_TURBO4_0_MSE:
+        case GGML_TYPE_TQK_5HI_3LO_QR:
+        case GGML_TYPE_TQK_5HI_3LO_FWHT:
+        case GGML_TYPE_TQK_HAD_MSE4:
         case GGML_TYPE_I8:
         case GGML_TYPE_I16:
         case GGML_TYPE_I32:

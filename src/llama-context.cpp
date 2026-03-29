@@ -50,6 +50,7 @@ llama_context::llama_context(
     cparams.embeddings       = params.embeddings;
     cparams.offload_kqv      = params.offload_kqv;
     cparams.no_perf          = params.no_perf;
+    cparams.tq_n_sinks      = params.tq_n_sinks;
     cparams.pooling_type     = params.pooling_type;
     cparams.warmup           = false;
 
@@ -1829,6 +1830,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
         auto * kv = dynamic_cast<llama_kv_cache *>(memory.get());
         if (kv && kv->is_tq_calibrating()) {
             kv->tq_try_finish_calibration();
+            // If calibration just completed (K type changed), invalidate cached graph
+            if (!kv->is_tq_calibrating()) {
+                gf_res_prev->reset();
+            }
         }
     }
 
@@ -2915,6 +2920,7 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
+        /*.tq_n_sinks                  =*/ 0,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,

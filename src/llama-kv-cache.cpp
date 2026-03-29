@@ -16,6 +16,8 @@ extern "C" {
     void tq_reset_calibration(void);
     void tq_reset_accumulators(void);
     void tq_get_channel_map(int layer, int head, int is_k, int * outlier, int * regular);
+    void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride);
+    void tq_clear_sink_state(void);
 }
 
 #ifdef GGML_USE_METAL
@@ -125,8 +127,13 @@ llama_kv_cache::llama_kv_cache(
     const bool is_mla = hparams.is_mla();
 
     // TurboQuant: start with fp16 for calibration, lock outliers after prompt
+    // Types needing calibration (channel splitting): start as fp16, re-quantize after prompt
+    // had_mse4 also goes through fp16 calibration to support sink capture
+    // Types needing calibration (channel splitting): start as fp16, re-quantize after prompt
+    // had_mse4 needs no calibration — allocated directly. Sinks handled in set_tq_n_sinks().
     const bool uses_turbo_k = (type_k == GGML_TYPE_TURBO3_0_PROD || type_k == GGML_TYPE_TURBO4_0_PROD ||
-                               type_k == GGML_TYPE_TURBO3_0_MSE  || type_k == GGML_TYPE_TURBO4_0_MSE);
+                               type_k == GGML_TYPE_TURBO3_0_MSE  || type_k == GGML_TYPE_TURBO4_0_MSE ||
+                               type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT);
     const bool uses_turbo_v = (type_v == GGML_TYPE_TURBO3_0_PROD || type_v == GGML_TYPE_TURBO4_0_PROD ||
                                type_v == GGML_TYPE_TURBO3_0_MSE  || type_v == GGML_TYPE_TURBO4_0_MSE);
     ggml_type alloc_type_k = type_k;
@@ -281,7 +288,9 @@ llama_kv_cache::llama_kv_cache(
     const bool uses_turbo = (type_k == GGML_TYPE_TURBO3_0_PROD || type_k == GGML_TYPE_TURBO4_0_PROD ||
                              type_v == GGML_TYPE_TURBO3_0_PROD || type_v == GGML_TYPE_TURBO4_0_PROD ||
                              type_k == GGML_TYPE_TURBO3_0_MSE || type_k == GGML_TYPE_TURBO4_0_MSE ||
-                             type_v == GGML_TYPE_TURBO3_0_MSE || type_v == GGML_TYPE_TURBO4_0_MSE);
+                             type_v == GGML_TYPE_TURBO3_0_MSE || type_v == GGML_TYPE_TURBO4_0_MSE ||
+                             type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT ||
+                             type_k == GGML_TYPE_TQK_HAD_MSE4);
     if (uses_turbo) {
         const uint32_t head_dim = hparams.n_embd_head_k(0);
         GGML_ASSERT(head_dim == 128 && "TurboQuant currently only supports head_dim=128");
@@ -389,6 +398,53 @@ llama_kv_cache::llama_kv_cache(
     }
 }
 
+void llama_kv_cache::set_tq_n_sinks(uint32_t n) {
+    tq_n_sinks_ = n;
+    if (n == 0 || layers.empty()) return;
+
+    // For types that skip calibration (e.g. had_mse4), allocate k_sink now.
+    // For calibrated types, k_sink is allocated in tq_finish_calibration().
+    if (tq_calibrating_) return; // will be handled later
+
+    // Check if K is already quantized (not fp16) — means no calibration phase
+    if (layers[0].k && layers[0].k->type != GGML_TYPE_F16 && !layers[0].k_sink) {
+        const size_t n_sink_tensors = layers.size();
+        ggml_init_params sink_params = {
+            /*.mem_size   =*/ n_sink_tensors * ggml_tensor_overhead(),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context * sink_ctx = ggml_init(sink_params);
+        GGML_ASSERT(sink_ctx);
+
+        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+            ggml_tensor * k = layers[ikv].k;
+            if (!k) continue;
+            const int64_t n_embd = k->ne[0];
+            layers[ikv].k_sink = ggml_new_tensor_2d(sink_ctx, GGML_TYPE_F16, n_embd, (int64_t)get_size() * n_stream);
+            ggml_format_name(layers[ikv].k_sink, "cache_k_sink_l%d", layers[ikv].il);
+        }
+
+        ggml_backend_buffer_t sink_buf = ggml_backend_alloc_ctx_tensors_from_buft(sink_ctx, ggml_backend_cpu_buffer_type());
+        GGML_ASSERT(sink_buf);
+        ggml_backend_buffer_clear(sink_buf, 0);
+        sink_bufs.emplace_back(ggml_context_ptr(sink_ctx), ggml_backend_buffer_ptr(sink_buf));
+
+        // Register sink state for vec_dot dispatch
+        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+            ggml_tensor * k = layers[ikv].k;
+            ggml_tensor * ks = layers[ikv].k_sink;
+            if (!k || !ks) continue;
+            int64_t k_stride_per_pos   = ggml_row_size(k->type, k->ne[0]) * k->ne[1];
+            int64_t fp16_stride_per_pos = ggml_row_size(GGML_TYPE_F16, ks->ne[0]);
+            tq_register_sink_layer(layers[ikv].il,
+                k->data, ks->data, n, k_stride_per_pos, fp16_stride_per_pos);
+        }
+
+        LLAMA_LOG_INFO("%s: allocated fp16 sink tensors for first %u tokens (no-calibration path)\n", __func__, n);
+    }
+}
+
 void llama_kv_cache::tq_try_finish_calibration() {
     if (!tq_calibrating_) return;
 
@@ -474,6 +530,57 @@ void llama_kv_cache::tq_finish_calibration() {
 #endif
     }
 
+    // 1c. Allocate and populate fp16 sink tensors
+    if (tq_n_sinks_ > 0) {
+        // Create a new ggml context for sink tensors
+        const size_t n_sink_tensors = layers.size();
+        ggml_init_params sink_params = {
+            /*.mem_size   =*/ n_sink_tensors * ggml_tensor_overhead(),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context * sink_ctx = ggml_init(sink_params);
+        GGML_ASSERT(sink_ctx && "failed to create sink context");
+
+        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+            ggml_tensor * old_k = layers[ikv].k;
+            if (!old_k || old_k->type != GGML_TYPE_F16) continue;
+            const int64_t n_embd = old_k->ne[0];
+            // Allocate kv_size*n_stream so set_rows with stream offsets works
+            layers[ikv].k_sink = ggml_new_tensor_2d(sink_ctx, GGML_TYPE_F16, n_embd, (int64_t)get_size() * n_stream);
+            ggml_format_name(layers[ikv].k_sink, "cache_k_sink_l%d", layers[ikv].il);
+        }
+
+        // Allocate CPU buffer for sink tensors
+        ggml_backend_buffer_t sink_buf = ggml_backend_alloc_ctx_tensors_from_buft(sink_ctx, ggml_backend_cpu_buffer_type());
+        GGML_ASSERT(sink_buf && "failed to allocate sink buffer");
+        ggml_backend_buffer_clear(sink_buf, 0);
+        sink_bufs.emplace_back(ggml_context_ptr(sink_ctx), ggml_backend_buffer_ptr(sink_buf));
+
+        // Copy fp16 data for first n_sinks cells into sink tensors
+        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+            ggml_tensor * old_k = layers[ikv].k;
+            ggml_tensor * k_sink = layers[ikv].k_sink;
+            if (!old_k || !k_sink) continue;
+
+            const int64_t n_embd = old_k->ne[0];
+            const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
+            std::vector<ggml_fp16_t> fp16_buf(n_embd);
+
+            const uint32_t n_sinks_actual = std::min(tq_n_sinks_, v_cells[0].used_max_p1());
+            for (uint32_t cell = 0; cell < n_sinks_actual; cell++) {
+                if (v_cells[0].is_empty(cell)) continue;
+                ggml_backend_tensor_get(old_k, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
+                ggml_backend_tensor_set(k_sink, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
+            }
+        }
+
+        int n_allocated = 0;
+        for (const auto & l : layers) { if (l.k_sink) n_allocated++; }
+        LLAMA_LOG_INFO("%s: allocated fp16 sink tensors (%u sinks, %u kv_size) for %d/%zu layers\n",
+                       __func__, tq_n_sinks_, get_size(), n_allocated, layers.size());
+    }
+
     // 2. Re-quantize fp16 → TQ using pre-allocated TQ tensors (no new Metal allocations)
     const uint32_t kv_sz = get_size();
 
@@ -541,6 +648,20 @@ void llama_kv_cache::tq_finish_calibration() {
     // They won't be used anymore since layer pointers now point to TQ tensors.
 
     tq_calibrating_ = false;
+
+    // Register sink state for vec_dot dispatch (after pointer swap, TQ data is at final addresses)
+    if (tq_n_sinks_ > 0) {
+        for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+            ggml_tensor * k = layers[ikv].k;
+            ggml_tensor * ks = layers[ikv].k_sink;
+            if (!k || !ks) continue;
+            int64_t k_stride_per_pos   = ggml_row_size(k->type, k->ne[0]) * k->ne[1];
+            int64_t fp16_stride_per_pos = ggml_row_size(GGML_TYPE_F16, ks->ne[0]);
+            tq_register_sink_layer(layers[ikv].il,
+                k->data, ks->data, tq_n_sinks_, k_stride_per_pos, fp16_stride_per_pos);
+        }
+    }
+
     LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers (K: %s, V: %s)\n",
                    __func__, (int)layers.size(),
                    ggml_type_name(target_type_k), ggml_type_name(target_type_v));
@@ -1373,6 +1494,30 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
             ggml_row_size(k->type, n_embd_k_gqa*kv_size)*sinfo.s0);
 }
 
+ggml_tensor * llama_kv_cache::get_k_sinks(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+    if (tq_n_sinks_ == 0) return nullptr;
+
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * k_sink = layers[ikv].k_sink;
+    if (!k_sink) return nullptr;
+
+    const uint32_t n_sinks_eff = std::min(tq_n_sinks_, n_kv);
+    if (n_sinks_eff == 0) return nullptr;
+
+    // k_sink is [n_embd_k_gqa, kv_size*n_stream] (2D, fp16)
+    // Return a 4D view matching get_k() layout: [head_dim, n_head_kv, n_sinks_eff, ns]
+    const uint64_t n_embd_k_gqa = k_sink->ne[0];
+    const uint64_t kv_size = get_size();
+    const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
+
+    return ggml_view_4d(ctx, k_sink,
+            hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_sinks_eff, ns,
+            ggml_row_size(k_sink->type, hparams.n_embd_head_k(il)),
+            ggml_row_size(k_sink->type, n_embd_k_gqa),
+            ggml_row_size(k_sink->type, n_embd_k_gqa * kv_size),
+            ggml_row_size(k_sink->type, n_embd_k_gqa * kv_size) * sinfo.s0);
+}
+
 ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
 
@@ -1438,6 +1583,28 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
 
     // store the current K values into the cache
     return ggml_set_rows(ctx, k, k_cur, k_idxs);
+}
+
+ggml_tensor * llama_kv_cache::cpy_k_sink(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
+    GGML_UNUSED(sinfo);
+    if (tq_n_sinks_ == 0) return nullptr;
+
+    const int32_t ikv = map_layer_ids.at(il);
+    ggml_tensor * k_sink = layers[ikv].k_sink;
+    if (!k_sink) return nullptr;
+
+    const int64_t n_embd_head = k_cur->ne[0];
+    const int64_t n_head      = k_cur->ne[1];
+    const int64_t n_tokens    = k_cur->ne[2];
+    const int64_t n_embd_gqa  = n_embd_head * n_head;
+
+    GGML_ASSERT(ggml_row_size(k_cur->type, n_embd_head) == k_cur->nb[1]);
+    k_cur = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
+
+    // k_sink is [n_embd_k_gqa, kv_size] fp16 — same layout as the original fp16 cache
+    // Note: ne[0] of k_sink might differ from n_embd_gqa if this layer has fewer heads.
+    // k_sink was allocated with old_k->ne[0] which IS n_embd_k_gqa for this layer.
+    return ggml_set_rows(ctx, k_sink, k_cur, k_idxs);
 }
 
 ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const {
@@ -2576,6 +2743,10 @@ ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) cons
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
 }
 
+ggml_tensor * llama_kv_cache_context::get_k_sinks(ggml_context * ctx, int32_t il) const {
+    return kv->get_k_sinks(ctx, il, n_kv, sinfos[i_cur]);
+}
+
 ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
 }
@@ -2590,6 +2761,10 @@ ggml_tensor * llama_kv_cache_context::get_turbo_rot_inv() const {
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
     return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::cpy_k_sink(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
+    return kv->cpy_k_sink(ctx, k_cur, k_idxs, il, sinfos[i_cur]);
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const {

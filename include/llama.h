@@ -355,6 +355,8 @@ extern "C" {
         enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
 
+        uint32_t tq_n_sinks; // TurboQuant: first N tokens kept as fp16 in K cache (0 = disabled)
+
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
         // currently works only with CPU execution

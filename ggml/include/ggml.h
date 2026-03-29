@@ -432,7 +432,10 @@ extern "C" {
         GGML_TYPE_TURBO4_0_PROD = 42, // TurboQuant_prod 4-bit K cache (PolarQuant + QJL)
         GGML_TYPE_TURBO3_0_MSE = 43, // TurboQuant_mse 3-bit V cache (pure MSE, no QJL)
         GGML_TYPE_TURBO4_0_MSE = 44, // TurboQuant_mse 4-bit V cache (pure MSE, no QJL)
-        GGML_TYPE_COUNT     = 45,
+        GGML_TYPE_TQK_5HI_3LO_QR   = 45, // TQK 3.88 bpv: 32/96 split, QR rotation, 4b+QJL hi / 3b lo
+        GGML_TYPE_TQK_5HI_3LO_FWHT = 46, // TQK 3.88 bpv: 32/96 split, FWHT rotation, 4b+QJL hi / 3b lo
+        GGML_TYPE_TQK_HAD_MSE4      = 47, // TQK 4.13 bpv: H_128 Hadamard, 4-bit MSE, no split
+        GGML_TYPE_COUNT     = 48,
     };
 
     // precision

@@ -1788,7 +1788,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
          ggml_tensor * v_mla,
                float   kq_scale,
-                 int   il) const {
+                 int   il,
+         ggml_tensor * k_sink) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -1847,12 +1848,16 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         // TurboQuant: V un-rotation is handled in build_attn() after this function returns
     } else {
-        ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        ggml_tensor * kq;
+
+        kq = ggml_mul_mat(ctx0, k, q);
         cb(kq, "kq", il);
 
         // note: this op tends to require high floating point range
         //       while for some models F16 is enough, for others it is not, so we default to F32 here
-        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        if (kq->op == GGML_OP_MUL_MAT) {
+            ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        }
 
         if (arch == LLM_ARCH_GROK) {
             // need to do the following:
@@ -2052,6 +2057,10 @@ ggml_tensor * llm_graph_context::build_attn(
 
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
         ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
+
+        // Also write fp16 copy for sink positions
+        ggml_tensor * sink_cpy = mctx_cur->cpy_k_sink(ctx0, k_cur, k_idxs, il);
+        if (sink_cpy) { ggml_build_forward_expand(gf, sink_cpy); }
     }
 
     const auto & kq_mask = inp->get_kq_mask();
@@ -2135,6 +2144,9 @@ ggml_tensor * llm_graph_context::build_attn(
         const auto & k_idxs = inp->get_k_idxs();
 
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+
+        ggml_tensor * sink_cpy = mctx_cur->cpy_k_sink(ctx0, k_cur, k_idxs, il);
+        if (sink_cpy) { ggml_build_forward_expand(gf, sink_cpy); }
     }
 
     const auto & kq_mask = inp->get_kq_mask();
@@ -2142,8 +2154,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+    ggml_tensor * k_sink = mctx_cur->get_k_sinks(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il, k_sink);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -2196,6 +2209,9 @@ ggml_tensor * llm_graph_context::build_attn(
         const auto & k_idxs = is_swa ? inp->get_k_idxs_swa() : inp->get_k_idxs();
 
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+
+        ggml_tensor * sink_cpy = mctx_cur->cpy_k_sink(ctx0, k_cur, k_idxs, il);
+        if (sink_cpy) { ggml_build_forward_expand(gf, sink_cpy); }
     }
 
     if (v_cur) {
@@ -2209,8 +2225,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+    ggml_tensor * k_sink = mctx_cur->get_k_sinks(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il, k_sink);
     cb(cur, "kqv_out", il);
 
     if (wo) {

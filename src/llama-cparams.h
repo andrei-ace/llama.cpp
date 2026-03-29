@@ -40,6 +40,8 @@ struct llama_cparams {
     bool kv_unified;
     bool pipeline_parallel;
 
+    uint32_t tq_n_sinks; // TurboQuant: number of initial K tokens kept as fp16 (attention sinks)
+
     enum llama_pooling_type pooling_type;
 
     ggml_backend_sched_eval_callback cb_eval;

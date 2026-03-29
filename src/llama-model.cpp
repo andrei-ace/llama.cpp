@@ -8263,7 +8263,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
-                        res = new llama_kv_cache(
+                        auto * kvc = new llama_kv_cache(
                                 *this,
                                 params.type_k,
                                 params.type_v,
@@ -8277,6 +8277,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 hparams.swa_type,
                                 nullptr,
                                 nullptr);
+                        kvc->set_tq_n_sinks(cparams.tq_n_sinks);
+                        res = kvc;
                     }
                 }
             }

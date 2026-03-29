@@ -344,6 +344,27 @@ typedef struct {
 static_assert(sizeof(block_tqv_35) == 2*sizeof(ggml_half) + TQV_N_OUTLIER*4/8 + TQV_N_REGULAR*3/8, "wrong tqv_35 block size");
 // Total: 56 bytes for 128 elements = 3.5 bpv
 
+// TQK had_mse4: full H_128 Hadamard + 4-bit MSE, no split, no calibration (4.13 bpv)
+typedef struct {
+    ggml_half norm;                                    // 2 bytes: L2 norm
+    uint8_t   qs[TQK_BLOCK_SIZE * 4 / 8];         // 64 bytes: 4-bit MSE indices (128 channels)
+} block_tqk_had_mse4;
+static_assert(sizeof(block_tqk_had_mse4) == sizeof(ggml_half) + TQK_BLOCK_SIZE*4/8, "wrong tqk_had_mse4 block size");
+// Total: 66 bytes for 128 elements = 4.125 bpv
+
+// TQK 5hi_3lo: 32/96 split, 4-bit MSE + 1-bit QJL on outliers, 3-bit MSE on regulars (3.88 bpv)
+// Used by both QR and FWHT variants (different rotation, same storage)
+typedef struct {
+    ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
+    ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
+    ggml_half rnorm_hi;                                // 2 bytes: outlier QJL residual norm
+    uint8_t   qs_hi[TQK_N_OUTLIER * 4 / 8];       // 16 bytes: 4-bit MSE indices (32 outlier channels)
+    uint8_t   qs_lo[TQK_N_REGULAR * 3 / 8];       // 36 bytes: 3-bit MSE indices (96 regular channels)
+    uint8_t   signs_hi[TQK_N_OUTLIER / 8];        // 4 bytes: 1-bit QJL signs (32-dim)
+} block_tqk_5hi_3lo;
+static_assert(sizeof(block_tqk_5hi_3lo) == 3*sizeof(ggml_half) + TQK_N_OUTLIER*4/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8, "wrong tqk_5hi_3lo block size");
+// Total: 62 bytes for 128 elements = 3.875 bpv
+
 //
 // Super-block quantization structures
 //
