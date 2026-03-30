@@ -86,6 +86,56 @@
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
+// ---------------------------------------------------------------------------
+// TurboQuant channel map storage (for 5hi_3lo_had calibrated type)
+// ---------------------------------------------------------------------------
+static int32_t * g_tq_channel_map_d = nullptr;  // device pointer
+static int       g_tq_chmap_n_layers = 0;
+static int       g_tq_chmap_n_heads = 0;
+
+// Default identity channel map: channels 0-31 = outlier, 32-127 = regular
+static void tq_ensure_default_channel_map(int n_layers, int n_heads) {
+    if (g_tq_channel_map_d != nullptr) return;
+    if (n_layers < 1) n_layers = 1;
+    if (n_heads < 1) n_heads = 1;
+
+    size_t sz = (size_t)n_layers * n_heads * 128 * sizeof(int32_t);
+    std::vector<int32_t> chmap(n_layers * n_heads * 128);
+    for (int l = 0; l < n_layers; l++) {
+        for (int h = 0; h < n_heads; h++) {
+            int32_t * row = chmap.data() + (l * n_heads + h) * 128;
+            for (int i = 0; i < 128; i++) row[i] = i; // identity permutation
+        }
+    }
+    CUDA_CHECK(cudaMalloc(&g_tq_channel_map_d, sz));
+    CUDA_CHECK(cudaMemcpy(g_tq_channel_map_d, chmap.data(), sz, cudaMemcpyHostToDevice));
+    g_tq_chmap_n_layers = n_layers;
+    g_tq_chmap_n_heads = n_heads;
+}
+
+extern "C" void ggml_cuda_set_tq_channel_map(const int32_t * data, int n_layers, int n_kv_heads) {
+    if (g_tq_channel_map_d) {
+        CUDA_CHECK(cudaFree(g_tq_channel_map_d));
+        g_tq_channel_map_d = nullptr;
+    }
+    size_t sz = (size_t)n_layers * n_kv_heads * 128 * sizeof(int32_t);
+    CUDA_CHECK(cudaMalloc(&g_tq_channel_map_d, sz));
+    CUDA_CHECK(cudaMemcpy(g_tq_channel_map_d, data, sz, cudaMemcpyHostToDevice));
+    g_tq_chmap_n_layers = n_layers;
+    g_tq_chmap_n_heads = n_kv_heads;
+}
+
+int32_t * ggml_cuda_get_tq_channel_map_device(void) {
+    if (!g_tq_channel_map_d) {
+        tq_ensure_default_channel_map(1, 1);
+    }
+    return g_tq_channel_map_d;
+}
+
+int ggml_cuda_get_tq_chmap_n_heads(void) {
+    return g_tq_chmap_n_heads;
+}
+
 [[noreturn]]
 void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
     int id = -1; // in case cudaGetDevice fails
@@ -4824,6 +4874,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q8_0:
+                    case GGML_TYPE_TQK_HAD_MSE4:
+                    case GGML_TYPE_TQK_HAD_PROD5:
+                    case GGML_TYPE_TQK_HAD_PROD4:
+                    case GGML_TYPE_TQK_5HI_3LO_HAD:
+                    case GGML_TYPE_TQV_HAD_MSE4:
                         return true;
                     default:
                         return false;
@@ -4837,7 +4892,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             {
                 return (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                        op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
-                       op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL) &&
+                       op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL ||
+                       op->type == GGML_TYPE_TQK_HAD_MSE4 || op->type == GGML_TYPE_TQK_HAD_PROD5 ||
+                       op->type == GGML_TYPE_TQK_HAD_PROD4 || op->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                       op->type == GGML_TYPE_TQV_HAD_MSE4) &&
                        op->src[0]->type == GGML_TYPE_F32 &&
                        (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32);
             } break;
