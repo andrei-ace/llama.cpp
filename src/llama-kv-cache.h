@@ -280,6 +280,7 @@ private:
     ggml_type target_type_v = GGML_TYPE_F16;
     bool tq_calibrating_ = false;             // true during prompt (cache is fp16, accumulating)
     uint32_t tq_n_sinks_ = 0;                 // number of initial tokens to keep as fp16
+    int tq_calib_buf_idx_ = -1;              // index in ctxs_bufs of the TQ buffer (for freeing fp16 after cal)
 
     // Sink buffer storage (separate from ctxs_bufs to avoid memory_breakdown assertions)
     std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> sink_bufs;

@@ -159,6 +159,18 @@ llama_kv_cache::llama_kv_cache(
         }
     }
 
+    // Separate context for TQ pre-allocated tensors so fp16 buffer can be freed after calibration
+    ggml_context * tq_ctx = nullptr;
+    if (tq_calibrating_) {
+        ggml_init_params tq_params = {
+            /*.mem_size   =*/ size_t(2u * (1 + n_stream) * n_layer_kv * ggml_tensor_overhead()),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        tq_ctx = ggml_init(tq_params);
+        GGML_ASSERT(tq_ctx);
+    }
+
     for (uint32_t il = 0; il < hparams.n_layer; il++) {
         if (!hparams.has_kv(il)) {
             LLAMA_LOG_DEBUG("%s: layer %3d: does not have KV cache\n", __func__, il);
@@ -204,12 +216,12 @@ llama_kv_cache::llama_kv_cache(
         // Pre-allocate TQ tensors for GPU calibration path
         ggml_tensor * k_tq = nullptr;
         ggml_tensor * v_tq = nullptr;
-        if (tq_calibrating_ && has_k && target_type_k != alloc_type_k) {
-            k_tq = ggml_new_tensor_3d(ctx, target_type_k, n_embd_k_gqa, kv_size, n_stream);
+        if (tq_calibrating_ && tq_ctx && has_k && target_type_k != alloc_type_k) {
+            k_tq = ggml_new_tensor_3d(tq_ctx, target_type_k, n_embd_k_gqa, kv_size, n_stream);
             ggml_format_name(k_tq, "cache_k_tq_l%d", il);
         }
-        if (tq_calibrating_ && has_v && target_type_v != alloc_type_v) {
-            v_tq = ggml_new_tensor_3d(ctx, target_type_v, n_embd_v_gqa, kv_size, n_stream);
+        if (tq_calibrating_ && tq_ctx && has_v && target_type_v != alloc_type_v) {
+            v_tq = ggml_new_tensor_3d(tq_ctx, target_type_v, n_embd_v_gqa, kv_size, n_stream);
             ggml_format_name(v_tq, "cache_v_tq_l%d", il);
         }
 
@@ -269,6 +281,24 @@ llama_kv_cache::llama_kv_cache(
 
         ggml_backend_buffer_clear(buf, 0);
         ctxs_bufs.emplace_back(std::move(ctx), buf);
+    }
+
+    // Allocate TQ buffer separately (so fp16 calibration buffer can be freed later)
+    if (tq_ctx) {
+        // Use the same buft as the main KV cache
+        ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
+        if (offload && model.dev_layer(0)) {
+            buft = ggml_backend_dev_buffer_type(model.dev_layer(0));
+        }
+        ggml_backend_buffer_t tq_buf = ggml_backend_alloc_ctx_tensors_from_buft(tq_ctx, buft);
+        if (!tq_buf) {
+            throw std::runtime_error("failed to allocate buffer for TQ pre-allocated tensors");
+        }
+        ggml_backend_buffer_clear(tq_buf, 0);
+        LLAMA_LOG_INFO("%s: %10s TQ buffer size  = %8.2f MiB\n", __func__, ggml_backend_buffer_name(tq_buf), ggml_backend_buffer_get_size(tq_buf)/1024.0/1024.0);
+        // Store in sink_bufs (not iterated by memory_breakdown, avoids no_alloc assertion)
+        tq_calib_buf_idx_ = 0; // signals that TQ buffer exists in sink_bufs[0]
+        sink_bufs.emplace_back(ggml_context_ptr(tq_ctx), tq_buf);
     }
 
     {
@@ -601,8 +631,26 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    // Note: FP16 buffers remain allocated (shared buffer with TQ tensors from pre-allocation).
-    // They won't be used anymore since layer pointers now point to TQ tensors.
+    // Free fp16 calibration buffers — TQ tensors are in sink_bufs, fp16 in ctxs_bufs
+    if (tq_calib_buf_idx_ >= 0) {
+        size_t freed = 0;
+        for (auto & [ctx, buf] : ctxs_bufs) {
+            if (buf) freed += ggml_backend_buffer_get_size(buf.get());
+        }
+        // Move TQ buffer from sink_bufs to ctxs_bufs, drop fp16
+        ctxs_bufs.clear();
+        if (!sink_bufs.empty()) {
+            ctxs_bufs.push_back(std::move(sink_bufs[0]));
+            sink_bufs.erase(sink_bufs.begin());
+        }
+        tq_calib_buf_idx_ = -1;
+        LLAMA_LOG_INFO("%s: freed fp16 calibration buffers (%.2f MiB)\n", __func__, freed / 1024.0 / 1024.0);
+    }
+
+    for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        layers[ikv].k_tq = nullptr;
+        layers[ikv].v_tq = nullptr;
+    }
 
     tq_calibrating_ = false;
 
