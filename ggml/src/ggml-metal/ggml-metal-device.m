@@ -1194,6 +1194,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
+            // TurboQuant K types only work via Flash Attention (asymmetric dot product)
+            if (op->src[0]->type == GGML_TYPE_TQK_HAD_MSE4 ||
+                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD5 ||
+                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD4) {
+                return false;
+            }
             return has_simdgroup_reduction && op->src[0]->type != GGML_TYPE_NVFP4;
         case GGML_OP_SET:
         case GGML_OP_CPY:
