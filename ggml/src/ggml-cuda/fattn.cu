@@ -294,6 +294,9 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD4,   GGML_TYPE_Q4_0)
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_5HI_3LO_HAD, GGML_TYPE_Q4_0)
 
+    // Non-TQ K with TQV V
+    FATTN_VEC_CASE(128, GGML_TYPE_F16, GGML_TYPE_TQV_HAD_MSE4)
+
     GGML_ABORT("fatal error");
 }
 
@@ -367,10 +370,11 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
-    // TQ K types always allow mixed K+V (TQ K + f16/tqv/q4_0 V)
+    // TQ K or V types always allow mixed K+V
     const bool k_is_tq = K->type == GGML_TYPE_TQK_HAD_MSE4 || K->type == GGML_TYPE_TQK_HAD_PROD5 ||
                           K->type == GGML_TYPE_TQK_HAD_PROD4 || K->type == GGML_TYPE_TQK_5HI_3LO_HAD;
-    if (K->type != V->type && !k_is_tq) {
+    const bool v_is_tq = V->type == GGML_TYPE_TQV_HAD_MSE4;
+    if (K->type != V->type && !k_is_tq && !v_is_tq) {
         return BEST_FATTN_KERNEL_NONE;
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
@@ -402,6 +406,14 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             return BEST_FATTN_KERNEL_NONE;
         default:
             return BEST_FATTN_KERNEL_NONE;
+    }
+
+    // TQV V type requires VEC kernel (MMA/tile/WMMA don't support TQV)
+    if (V->type == GGML_TYPE_TQV_HAD_MSE4) {
+        if (K->ne[0] == 128 && V->ne[0] == 128 && K->ne[1] % FATTN_KQ_STRIDE == 0) {
+            return BEST_FATTN_KERNEL_VEC;
+        }
+        return BEST_FATTN_KERNEL_NONE;
     }
 
     if (mask && mask->ne[2] != 1) {
