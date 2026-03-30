@@ -1171,8 +1171,13 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 return false;
             }
             {
+                // Allow mixed K/V types for TQ K + fp16 V
                 if (op->src[1]->type != op->src[2]->type) {
-                    return false;
+                    bool is_tq_k = (op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4);
+                    bool is_fp16_v = (op->src[2]->type == GGML_TYPE_F16);
+                    if (!(is_tq_k && is_fp16_v)) {
+                        return false;
+                    }
                 }
             }
             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels

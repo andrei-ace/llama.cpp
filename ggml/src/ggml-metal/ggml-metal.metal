@@ -1046,6 +1046,28 @@ template<> inline float4 elu_approx<float4>(float4 x) {
     return res;
 }
 
+// had_mse4: FA dequantize — outputs norm * centroids in ROTATED space
+// K stays in Hadamard-rotated space. Q must be pre-rotated with FWHT before FA.
+template <typename type4x4>
+void dequantize_had_mse4(device const block_tqk_had_mse4 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        reg_f[i/4][i%4] = norm * tq_c16_d128[tq_up4(xb->qs, j)];
+    }
+    reg = (type4x4) reg_f;
+}
+
+template <typename type4>
+void dequantize_had_mse4_t4(device const block_tqk_had_mse4 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        reg[i] = norm * tq_c16_d128[tq_up4(xb->qs, j)];
+    }
+}
+
 constant short FC_unary_op [[function_constant(FC_UNARY + 0)]];
 constant bool  FC_unary_cnt[[function_constant(FC_UNARY + 1)]];
 
@@ -6434,6 +6456,8 @@ template [[host_name("kernel_flash_attn_ext_q4_0_dk80_dv80"  )]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_q4_0_dk96_dv96"  )]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 96,  96>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk112_dv112")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 112, 112>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 128, 128>;
+// had_mse4 K (rotated space, Q must be pre-rotated) + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4, 8, dequantize_had_mse4, half4x4, 1, dequantize_f16, 128, 128>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv192")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 192>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 128>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 256, 256>;
@@ -7035,6 +7059,8 @@ template [[host_name("kernel_flash_attn_ext_vec_f16_dk128_dv128")]]  kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_bf16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     bfloat4,    1, dequantize_bf16_t4, bfloat4,     1, dequantize_bf16_t4, 128, 128, 1>;
 #endif
 template [[host_name("kernel_flash_attn_ext_vec_q4_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_0, 8, dequantize_q4_0_t4, block_q4_0,  8, dequantize_q4_0_t4, 128, 128, 1>;
+// had_mse4 K (rotated space) + f16 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4, 32, dequantize_had_mse4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_1, 8, dequantize_q4_1_t4, block_q4_1,  8, dequantize_q4_1_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_0, 8, dequantize_q5_0_t4, block_q5_0,  8, dequantize_q5_0_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 128, 128, 1>;
@@ -9157,6 +9183,25 @@ kernel void kernel_set_rows_f(
     for (int ind = tiitg%tptg.x; ind < args.nk0; ind += tptg.x) {
         dst_row[ind] = (T) src_row[ind];
     }
+}
+
+// Pre-rotate Q with H_128 FWHT for had_mse4 asymmetric attention
+[[host_name("kernel_tq_fwht_q")]]
+kernel void kernel_tq_fwht_q(
+        device float * data [[buffer(0)]],
+        constant int & n_elements [[buffer(1)]],
+        uint tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    // Each threadgroup handles one 128-dim vector
+    // n_elements = total floats in Q tensor
+    const int idx = tgpig * 128;
+    if (idx + 127 >= n_elements) return;
+    if (tiitg != 0) return; // single thread per vector (TODO: SIMD parallelize)
+
+    thread float x[128];
+    for (int i = 0; i < 128; i++) x[i] = data[idx + i];
+    tq_fwht<128>(x);
+    for (int i = 0; i < 128; i++) data[idx + i] = x[i];
 }
 
 // ---------------------------------------------------------------------------
