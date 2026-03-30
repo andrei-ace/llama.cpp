@@ -1139,12 +1139,10 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
         src_type == GGML_TYPE_TQK_HAD_PROD5 ||
         src_type == GGML_TYPE_TQK_HAD_PROD4 ||
         src_type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
-        // 5hi_3lo needs channel map — falls back to CPU for get_rows/set_rows
-        if (src_type == GGML_TYPE_TQK_5HI_3LO_FWHT) return 0;
-
-        const char * name = src_type == GGML_TYPE_TQK_HAD_MSE4  ? "kernel_get_rows_had_mse4" :
-                            src_type == GGML_TYPE_TQK_HAD_PROD5 ? "kernel_get_rows_had_prod5" :
-                                                                   "kernel_get_rows_had_prod4";
+        const char * name = src_type == GGML_TYPE_TQK_HAD_MSE4     ? "kernel_get_rows_had_mse4" :
+                            src_type == GGML_TYPE_TQK_HAD_PROD5    ? "kernel_get_rows_had_prod5" :
+                            src_type == GGML_TYPE_TQK_HAD_PROD4    ? "kernel_get_rows_had_prod4" :
+                                                                      "kernel_get_rows_5hi_3lo_fwht";
         auto pipeline = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
 
         ggml_metal_kargs_get_rows args = {
@@ -1227,12 +1225,10 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         dst_type == GGML_TYPE_TQK_HAD_PROD5 ||
         dst_type == GGML_TYPE_TQK_HAD_PROD4 ||
         dst_type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
-        // 5hi_3lo needs channel map — falls back to CPU for get_rows/set_rows
-        if (dst_type == GGML_TYPE_TQK_5HI_3LO_FWHT) return 0;
-
-        const char * name = dst_type == GGML_TYPE_TQK_HAD_MSE4  ? "kernel_set_rows_had_mse4_i32" :
-                            dst_type == GGML_TYPE_TQK_HAD_PROD5 ? "kernel_set_rows_had_prod5_i32" :
-                                                                   "kernel_set_rows_had_prod4_i32";
+        const char * name = dst_type == GGML_TYPE_TQK_HAD_MSE4     ? "kernel_set_rows_had_mse4_i32" :
+                            dst_type == GGML_TYPE_TQK_HAD_PROD5    ? "kernel_set_rows_had_prod5_i32" :
+                            dst_type == GGML_TYPE_TQK_HAD_PROD4    ? "kernel_set_rows_had_prod4_i32" :
+                                                                      "kernel_set_rows_5hi_3lo_fwht_i32";
         auto pipeline = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
 
         const int n_blocks = ne00 / 128;

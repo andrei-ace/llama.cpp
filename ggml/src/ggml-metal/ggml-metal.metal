@@ -9724,6 +9724,139 @@ kernel void kernel_set_rows_had_prod4(
     blk->rnorm = half(sqrt(rnorm_sq));
 }
 
+// 5hi_3lo_fwht: get_rows (full dequant — uses default channel order 0-31=hi, 32-127=lo)
+[[host_name("kernel_get_rows_5hi_3lo_fwht")]]
+kernel void kernel_get_rows_5hi_3lo_fwht(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+
+    device const block_tqk_5hi_3lo * blk = (device const block_tqk_5hi_3lo *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm_hi = float(blk->norm_hi);
+    float norm_lo = float(blk->norm_lo);
+    float rnorm_hi = float(blk->rnorm_hi);
+
+    // Hi: centroids → inverse FWHT → scale
+    thread float hi[32];
+    for (int j = 0; j < 32; j++) hi[j] = tq_c16_d32[tq_up4(blk->qs_hi, j)];
+    tq_fwht<32>(hi);
+    // QJL correction on hi
+    thread float corr[32];
+    for (int j = 0; j < 32; j++) corr[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    tq_fwht<32>(corr);
+    float qjl_s = 1.2533141f / 32.0f * rnorm_hi;
+    for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
+
+    // Lo: centroids → 3×inverse FWHT → scale
+    thread float lo[96];
+    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d32[tq_up3(blk->qs_lo, j)];
+    tq_fwht<32>(lo);
+    tq_fwht<32>(lo + 32);
+    tq_fwht<32>(lo + 64);
+    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
+
+    // Merge with default channel order (0-31=hi, 32-127=lo)
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 32; j++)  out[j]      = hi[j];
+    for (int j = 0; j < 96; j++)  out[32 + j]  = lo[j];
+}
+
+// 5hi_3lo_fwht: set_rows (quantize — uses default channel order 0-31=hi, 32-127=lo)
+[[host_name("kernel_set_rows_5hi_3lo_fwht_i32")]]
+kernel void kernel_set_rows_5hi_3lo_fwht(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    // Split with default channel order
+    thread float hi_raw[32], lo_raw[96];
+    for (int j = 0; j < 32; j++)  hi_raw[j] = src[j];
+    for (int j = 0; j < 96; j++)  lo_raw[j] = src[32 + j];
+
+    // FWHT rotate
+    thread float hi_rot[32], lo_rot[96];
+    for (int j = 0; j < 32; j++) hi_rot[j] = hi_raw[j];
+    tq_fwht<32>(hi_rot);
+    for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j];
+    tq_fwht<32>(lo_rot);
+    tq_fwht<32>(lo_rot + 32);
+    tq_fwht<32>(lo_rot + 64);
+
+    // Norms
+    float sum_hi = 0.0f, sum_lo = 0.0f;
+    for (int j = 0; j < 32; j++) sum_hi += hi_rot[j] * hi_rot[j];
+    for (int j = 0; j < 96; j++) sum_lo += lo_rot[j] * lo_rot[j];
+    float norm_hi = sqrt(sum_hi), norm_lo = sqrt(sum_lo);
+
+    device block_tqk_5hi_3lo * blk = (device block_tqk_5hi_3lo *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm_hi  = half(norm_hi);
+    blk->norm_lo  = half(norm_lo);
+    blk->rnorm_hi = half(0.0f);
+
+    if (norm_hi == 0.0f && norm_lo == 0.0f) {
+        for (int j = 0; j < 16; j++) blk->qs_hi[j] = 0;
+        for (int j = 0; j < 36; j++) blk->qs_lo[j] = 0;
+        for (int j = 0; j < 4; j++)  blk->signs_hi[j] = 0;
+        return;
+    }
+
+    float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
+    float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
+
+    // 4-bit MSE for hi
+    for (int j = 0; j < 16; j++) blk->qs_hi[j] = 0;
+    for (int j = 0; j < 32; j++) {
+        tq_pk4((device uint8_t *)blk->qs_hi, j, tq_nearest(hi_rot[j] * inv_hi, tq_c16_d32, 16));
+    }
+
+    // 3-bit MSE for lo
+    for (int j = 0; j < 36; j++) blk->qs_lo[j] = 0;
+    for (int j = 0; j < 96; j++) {
+        tq_pk3((device uint8_t *)blk->qs_lo, j, tq_nearest(lo_rot[j] * inv_lo, tq_c8_d32, 8));
+    }
+
+    // QJL on hi residual
+    thread float yhi[32];
+    for (int j = 0; j < 32; j++) yhi[j] = tq_c16_d32[tq_up4(blk->qs_hi, j)];
+    thread float hi_rec[32];
+    for (int j = 0; j < 32; j++) hi_rec[j] = yhi[j];
+    tq_fwht<32>(hi_rec);
+    thread float r_hi[32];
+    for (int j = 0; j < 32; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 32; j++) rnorm_sq += r_hi[j] * r_hi[j];
+    tq_fwht<32>(r_hi); // FWHT projection for signs
+    for (int j = 0; j < 4; j++) blk->signs_hi[j] = 0;
+    for (int j = 0; j < 32; j++) {
+        if (r_hi[j] >= 0.0f) blk->signs_hi[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm_hi = half(sqrt(rnorm_sq));
+}
+
 // ---------------------------------------------------------------------------
 
 kernel void kernel_diag_f32(

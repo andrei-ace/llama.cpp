@@ -281,6 +281,19 @@ public:
     const llama_cparams cparams;
 };
 
+// TQ 5hi_3lo: per-KV-head channel permutation for FA Q permutation
+class llm_graph_input_tq_chmap : public llm_graph_input_i {
+public:
+    llm_graph_input_tq_chmap(int il, int n_kv_head) : il(il), n_kv_head(n_kv_head) {}
+    ~llm_graph_input_tq_chmap() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+    bool can_reuse(const llm_graph_params &) override { return true; }
+
+    ggml_tensor * chmap = nullptr;
+    int il, n_kv_head;
+};
+
 class llm_graph_input_attn_kv : public llm_graph_input_i {
 public:
     llm_graph_input_attn_kv(

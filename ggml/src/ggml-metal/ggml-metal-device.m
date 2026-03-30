@@ -1280,8 +1280,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_TQK_HAD_MSE4:
                     case GGML_TYPE_TQK_HAD_PROD5:
                     case GGML_TYPE_TQK_HAD_PROD4:
+                    case GGML_TYPE_TQK_5HI_3LO_FWHT:
                         return true;
-                    // 5hi_3lo_fwht set_rows needs channel map — falls back to CPU
                     default:
                         return false;
                 };
