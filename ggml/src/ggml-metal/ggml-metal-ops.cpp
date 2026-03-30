@@ -1169,6 +1169,38 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
         return 1;
     }
 
+    // TQK had_mse4 — simple H_128 + 4-bit MSE, no rotation buffers needed
+    if (src_type == GGML_TYPE_TQK_HAD_MSE4) {
+        auto pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_get_rows_had_mse4", "kernel_get_rows_had_mse4", nullptr);
+
+        ggml_metal_kargs_get_rows args = {
+            /*.ne00t =*/ ne00 / 128,
+            /*.ne00  =*/ ne00,
+            /*.nb01  =*/ nb01,
+            /*.nb02  =*/ nb02,
+            /*.nb03  =*/ nb03,
+            /*.ne10  =*/ ne10,
+            /*.nb10  =*/ nb10,
+            /*.nb11  =*/ nb11,
+            /*.nb12  =*/ nb12,
+            /*.nb1   =*/ nb1,
+            /*.nb2   =*/ nb2,
+            /*.nb3   =*/ nb3,
+        };
+
+        const int n_blocks = ne00 / 128;
+
+        ggml_metal_encoder_set_pipeline(enc, pipeline);
+        ggml_metal_encoder_set_bytes  (enc, &args, sizeof(args), 0);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op),         3);
+
+        ggml_metal_encoder_dispatch_threadgroups(enc, ne10, ne11 < ne12 ? ne12 : ne11, ne12 < ne13 ? ne13 : 1, n_blocks, 1, 1);
+
+        return 1;
+    }
+
     // TurboQuant K cache types — custom kernels with rotation matrices + QJL + channel map
     if (src_type == GGML_TYPE_TURBO3_0_PROD || src_type == GGML_TYPE_TURBO4_0_PROD) {
         const char * kname = (src_type == GGML_TYPE_TURBO3_0_PROD) ? "kernel_get_rows_tqk25" : "kernel_get_rows_tqk35";
@@ -1300,6 +1332,38 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
 
         // One threadgroup per block per row: (nblk * ne01, ne02, ne03), 128 threads each
         ggml_metal_encoder_dispatch_threadgroups(enc, nblk*ne01, ne02, ne03, 128, 1, 1);
+
+        return 1;
+    }
+
+    // TQK had_mse4 — simple H_128 + 4-bit MSE quantize
+    if (dst_type == GGML_TYPE_TQK_HAD_MSE4) {
+        auto pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_set_rows_had_mse4_i32", "kernel_set_rows_had_mse4_i32", nullptr);
+
+        const int n_blocks = ne00 / 128;
+        ggml_metal_kargs_set_rows args = {
+            /*.nk0   =*/ n_blocks,
+            /*.ne01  =*/ ne01,
+            /*.nb01  =*/ nb01,
+            /*.nb02  =*/ nb02,
+            /*.nb03  =*/ nb03,
+            /*.ne11  =*/ ne11,
+            /*.ne12  =*/ ne12,
+            /*.nb10  =*/ nb10,
+            /*.nb11  =*/ nb11,
+            /*.nb12  =*/ nb12,
+            /*.nb1   =*/ nb1,
+            /*.nb2   =*/ nb2,
+            /*.nb3   =*/ nb3,
+        };
+
+        ggml_metal_encoder_set_pipeline(enc, pipeline);
+        ggml_metal_encoder_set_bytes  (enc, &args, sizeof(args), 0);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op),         3);
+
+        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, n_blocks, 1, 1);
 
         return 1;
     }

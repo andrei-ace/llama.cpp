@@ -1273,6 +1273,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_TURBO4_0_PROD:
                     case GGML_TYPE_TURBO3_0_MSE:
                     case GGML_TYPE_TURBO4_0_MSE:
+                    case GGML_TYPE_TQK_HAD_MSE4:
                         return true;
                     default:
                         return false;

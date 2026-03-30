@@ -9797,6 +9797,95 @@ kernel void kernel_set_rows_tqk<block_tqk_35, 3, 2, 8, 4>(
     device const int *, uint3, ushort);
 
 // ---------------------------------------------------------------------------
+// had_mse4: get_rows (dequantize) and set_rows (quantize) — H_128 + 4-bit MSE
+// ---------------------------------------------------------------------------
+
+[[host_name("kernel_get_rows_had_mse4")]]
+kernel void kernel_get_rows_had_mse4(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    const int n_blocks = args.ne00 / 128;
+    if (iblk >= n_blocks) return;
+
+    device const block_tqk_had_mse4 * blk = (device const block_tqk_had_mse4 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) {
+        rot[j] = tq_c16_d128[tq_up4(blk->qs, j)];
+    }
+    tq_fwht<128>(rot);
+
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 128; j++) {
+        out[j] = norm * rot[j];
+    }
+}
+
+[[host_name("kernel_set_rows_had_mse4_i32")]]
+kernel void kernel_set_rows_had_mse4(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    const int n_blocks = args.nk0;
+    if (iblk >= n_blocks) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    float sum_sq = 0.0f;
+    thread float vals[128];
+    for (int j = 0; j < 128; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_mse4 * blk = (device block_tqk_had_mse4 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) rot[j] = vals[j] * inv;
+    tq_fwht<128>(rot);
+
+    for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        tq_pk4((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c16_d128, 16));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TurboQuant pre-processing kernels for standard FA path
 // ---------------------------------------------------------------------------
 
