@@ -1175,7 +1175,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 if (op->src[1]->type != op->src[2]->type) {
                     bool is_tq_k = (op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5 ||
-                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4);
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_FWHT);
                     bool is_fp16_v = (op->src[2]->type == GGML_TYPE_F16);
                     if (!(is_tq_k && is_fp16_v)) {
                         return false;
@@ -1197,7 +1198,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             // TurboQuant K types only work via Flash Attention (asymmetric dot product)
             if (op->src[0]->type == GGML_TYPE_TQK_HAD_MSE4 ||
                 op->src[0]->type == GGML_TYPE_TQK_HAD_PROD5 ||
-                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD4) {
+                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD4 ||
+                op->src[0]->type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
                 return false;
             }
             return has_simdgroup_reduction && op->src[0]->type != GGML_TYPE_NVFP4;
@@ -1279,6 +1281,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_TQK_HAD_PROD5:
                     case GGML_TYPE_TQK_HAD_PROD4:
                         return true;
+                    // 5hi_3lo_fwht set_rows needs channel map — falls back to CPU
                     default:
                         return false;
                 };

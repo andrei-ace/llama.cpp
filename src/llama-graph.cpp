@@ -10,6 +10,10 @@
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
 
+extern "C" {
+    void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm128);
+}
+
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -1824,6 +1828,23 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
+
+        // TQ split types: pass per-head channel permutation for Q permutation in FA
+        if (k->type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
+            const int n_kv_head = k->ne[2]; // number of KV heads
+            ggml_tensor * chmap = ggml_new_tensor_1d(ctx0, GGML_TYPE_I8, n_kv_head * 128);
+            ggml_set_input(chmap);
+            ggml_set_name(chmap, "tq_chmap");
+            // Fill with channel permutation data
+            {
+                uint8_t * data = (uint8_t *)chmap->data;
+                for (int h = 0; h < n_kv_head; h++) {
+                    tq_get_channel_perm(il, h, 1, data + h * 128);
+                }
+            }
+            ggml_flash_attn_ext_add_chmap(cur, chmap);
+        }
+
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
         if (v_mla) {

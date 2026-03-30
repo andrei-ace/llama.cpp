@@ -5443,6 +5443,18 @@ void ggml_flash_attn_ext_add_sinks(
     a->src[4] = sinks;
 }
 
+void ggml_flash_attn_ext_add_chmap(
+        struct ggml_tensor * a,
+        struct ggml_tensor * chmap) {
+    if (!chmap) {
+        a->src[5] = NULL;
+        return;
+    }
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[5] == NULL);
+    a->src[5] = chmap;
+}
+
 // ggml_flash_attn_back
 
 struct ggml_tensor * ggml_flash_attn_back(

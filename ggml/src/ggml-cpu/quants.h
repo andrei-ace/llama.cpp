@@ -88,6 +88,7 @@ void tq_set_current_layer(int layer, int is_k);
 void tq_set_current_head(int head);
 void tq_accumulate_channels(int layer, int is_k, const float * x, int64_t k);
 void tq_lock_outliers_from_accum(int n_layers);
+void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm128);
 int  tq_is_calibrating(void);
 int  tq_min_accum_count(int n_layers); // returns min accumulated vector count across layers
 void tq_reset_calibration(void);

@@ -1348,6 +1348,14 @@ void tq_get_channel_map(int layer, int head, int is_k, int * outlier, int * regu
     memcpy(regular, src_reg, TQ_DIM_LO * sizeof(int));
 }
 
+// Build compact channel permutation [outlier_ch(32), regular_ch(96)] as uint8_t for Metal FA
+void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm128) {
+    int outlier[32], regular[96];
+    tq_get_channel_map(layer, head, is_k, outlier, regular);
+    for (int i = 0; i < 32;  i++) perm128[i]      = (uint8_t)outlier[i];
+    for (int i = 0; i < 96;  i++) perm128[32 + i]  = (uint8_t)regular[i];
+}
+
 void tq_get_qjl_matrix(float * out, int dim, uint64_t seed) {
     // Generate the same i.i.d. Gaussian matrix used by QJL forward/inverse
     uint64_t st = seed;

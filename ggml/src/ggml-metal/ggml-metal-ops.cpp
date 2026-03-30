@@ -1134,10 +1134,14 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
 
     const ggml_type src_type = op->src[0]->type;
 
-    // TurboQuant get_rows — H_128 + MSE (+ QJL for prod types)
+    // TurboQuant get_rows — MSE (+ QJL for prod types) + rotation
     if (src_type == GGML_TYPE_TQK_HAD_MSE4 ||
         src_type == GGML_TYPE_TQK_HAD_PROD5 ||
-        src_type == GGML_TYPE_TQK_HAD_PROD4) {
+        src_type == GGML_TYPE_TQK_HAD_PROD4 ||
+        src_type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
+        // 5hi_3lo needs channel map — falls back to CPU for get_rows/set_rows
+        if (src_type == GGML_TYPE_TQK_5HI_3LO_FWHT) return 0;
+
         const char * name = src_type == GGML_TYPE_TQK_HAD_MSE4  ? "kernel_get_rows_had_mse4" :
                             src_type == GGML_TYPE_TQK_HAD_PROD5 ? "kernel_get_rows_had_prod5" :
                                                                    "kernel_get_rows_had_prod4";
@@ -1218,10 +1222,14 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
 
     const ggml_type dst_type = op->type;
 
-    // TurboQuant set_rows — H_128 + MSE quantize (+ QJL for prod types)
+    // TurboQuant set_rows — MSE quantize (+ QJL for prod types) + rotation
     if (dst_type == GGML_TYPE_TQK_HAD_MSE4 ||
         dst_type == GGML_TYPE_TQK_HAD_PROD5 ||
-        dst_type == GGML_TYPE_TQK_HAD_PROD4) {
+        dst_type == GGML_TYPE_TQK_HAD_PROD4 ||
+        dst_type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
+        // 5hi_3lo needs channel map — falls back to CPU for get_rows/set_rows
+        if (dst_type == GGML_TYPE_TQK_5HI_3LO_FWHT) return 0;
+
         const char * name = dst_type == GGML_TYPE_TQK_HAD_MSE4  ? "kernel_set_rows_had_mse4_i32" :
                             dst_type == GGML_TYPE_TQK_HAD_PROD5 ? "kernel_set_rows_had_prod5_i32" :
                                                                    "kernel_set_rows_had_prod4_i32";
@@ -2753,11 +2761,14 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
 
     GGML_ASSERT(ne01 < 65536);
 
+    const bool has_chmap = op->src[5] != nullptr; // TQ split channel map
+
     ggml_metal_buffer_id bid_src0 = ggml_metal_get_buffer_id(op->src[0]);
     ggml_metal_buffer_id bid_src1 = ggml_metal_get_buffer_id(op->src[1]);
     ggml_metal_buffer_id bid_src2 = ggml_metal_get_buffer_id(op->src[2]);
     ggml_metal_buffer_id bid_src3 = has_mask ? ggml_metal_get_buffer_id(op->src[3]) : bid_src0;
     ggml_metal_buffer_id bid_src4 = has_sinks ? ggml_metal_get_buffer_id(op->src[4]) : bid_src0;
+    ggml_metal_buffer_id bid_src5 = has_chmap ? ggml_metal_get_buffer_id(op->src[5]) : bid_src0;
 
     ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(op);
 
@@ -2932,6 +2943,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
         ggml_metal_encoder_set_buffer  (enc, bid_blk,  7);
         ggml_metal_encoder_set_buffer  (enc, bid_dst,  8);
+        ggml_metal_encoder_set_buffer  (enc, bid_src5, 9);  // tq_chmap (split channel map)
 
         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
@@ -3081,6 +3093,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             // using 1 workgroup -> write the result directly into dst
             ggml_metal_encoder_set_buffer(enc, bid_pad, 6);
             ggml_metal_encoder_set_buffer(enc, bid_dst, 7);
+            ggml_metal_encoder_set_buffer(enc, bid_src5, 8);  // tq_chmap
 
             ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
@@ -3095,6 +3108,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             // write the results from each workgroup into a temp buffer
             ggml_metal_encoder_set_buffer(enc, bid_pad, 6);
             ggml_metal_encoder_set_buffer(enc, bid_tmp, 7);
+            ggml_metal_encoder_set_buffer(enc, bid_src5, 8);  // tq_chmap
 
             ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
             ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nqptg - 1)/nqptg, (ne02 + nhptg - 1)/nhptg, ne03*nwg, 32, nsg, 1);

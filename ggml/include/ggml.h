@@ -2356,6 +2356,11 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 
+    // add per-KV-head channel permutation for TQ split types (5hi_3lo)
+    GGML_API void ggml_flash_attn_ext_add_chmap(
+            struct ggml_tensor * a,
+            struct ggml_tensor * chmap);
+
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(
            struct ggml_context * ctx,
