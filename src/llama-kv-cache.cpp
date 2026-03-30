@@ -285,7 +285,7 @@ llama_kv_cache::llama_kv_cache(
         }
         ggml_backend_buffer_clear(calib_k_buf, 0);
         LLAMA_LOG_INFO("%s: %10s calib K buffer  = %8.2f MiB\n", __func__, ggml_backend_buffer_name(calib_k_buf), ggml_backend_buffer_get_size(calib_k_buf)/1024.0/1024.0);
-        sink_bufs.emplace_back(ggml_context_ptr(tq_calib_k_ctx), calib_k_buf);
+        tq_calib_k_buf_ = {ggml_context_ptr(tq_calib_k_ctx), ggml_backend_buffer_ptr(calib_k_buf)};
     }
 
     // allocate tensors and initialize the buffers to avoid NaNs in the padding
@@ -322,9 +322,7 @@ llama_kv_cache::llama_kv_cache(
         }
         ggml_backend_buffer_clear(tq_buf, 0);
         LLAMA_LOG_INFO("%s: %10s TQ buffer size  = %8.2f MiB\n", __func__, ggml_backend_buffer_name(tq_buf), ggml_backend_buffer_get_size(tq_buf)/1024.0/1024.0);
-        // Store in sink_bufs (not iterated by memory_breakdown, avoids no_alloc assertion)
-        tq_calib_buf_idx_ = 0; // signals that TQ buffer exists in sink_bufs[0]
-        sink_bufs.emplace_back(ggml_context_ptr(tq_ctx), tq_buf);
+        tq_buf_ = {ggml_context_ptr(tq_ctx), ggml_backend_buffer_ptr(tq_buf)};
     }
 
 
@@ -683,21 +681,19 @@ void llama_kv_cache::tq_finish_calibration() {
         layers[ikv].v_tq = nullptr;
     }
 
-    // sink_bufs layout: [0]=calib K(fp16), [1]=TQ buffer
-    // Move TQ buffer (index 1) to ctxs_bufs to keep alive
-    if (sink_bufs.size() >= 2) {
-        ctxs_bufs.push_back(std::move(sink_bufs[1]));
-        sink_bufs.erase(sink_bufs.begin() + 1);
+    // Move TQ buffer to ctxs_bufs to keep alive
+    if (tq_buf_.second) {
+        ctxs_bufs.push_back(std::move(tq_buf_));
     }
     // Keep the view context alive (owns the stream view tensors)
     ctxs_bufs.emplace_back(ggml_context_ptr(tq_view_ctx), nullptr);
-    // Free calibration K(fp16) buffer — separate from V, always safe to free
-    if (!sink_bufs.empty()) {
+    // Free calibration K(fp16) buffer — completely separate from V and sink buffers
+    if (tq_calib_k_buf_.second) {
         LLAMA_LOG_INFO("%s: freeing calibration K(fp16) buffer (%.2f MiB)\n",
-                       __func__, ggml_backend_buffer_get_size(sink_bufs[0].second.get())/1024.0/1024.0);
-        sink_bufs.clear();
+                       __func__, ggml_backend_buffer_get_size(tq_calib_k_buf_.second.get())/1024.0/1024.0);
+        tq_calib_k_buf_.first.reset();
+        tq_calib_k_buf_.second.reset();
     }
-    tq_calib_buf_idx_ = -1;
 
     tq_calibrating_ = false;
 
