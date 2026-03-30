@@ -1,0 +1,12 @@
+model,k_type,v_type,k_bpv,v_bpv,kv_bpv,ppl,pp512,tg128
+mistral-7b,f16,f16,16.00,16.00,16.00,7.13,460,51.3
+mistral-7b,q8_0,q8_0,8.00,8.00,8.00,7.13,455,50.4
+mistral-7b,q4_0,q4_0,4.50,4.50,4.50,7.11,456,49.6
+mistral-7b,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,7.14,433,37.2
+mistral-7b,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,7.19,435,39.6
+mistral-7b,tqk_had_mse4,tqv_had_mse4,4.13,4.13,4.13,7.13,447,43.3
+mistral-7b,tqk_had_mse4,q4_0,4.13,4.50,4.31,7.11,451,46.0
+mistral-7b,tqk_had_prod4,tqv_had_mse4,4.25,4.13,4.19,7.28,440,37.8
+mistral-7b,tqk_had_prod4,q4_0,4.25,4.50,4.38,7.26,444,39.9
+mistral-7b,tqk_had_prod5,tqv_had_mse4,5.25,4.13,4.69,7.13,437,38.5
+mistral-7b,tqk_had_prod5,q4_0,5.25,4.50,4.88,7.11,443,40.8

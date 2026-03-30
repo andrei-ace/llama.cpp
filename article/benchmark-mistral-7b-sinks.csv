@@ -1,0 +1,11 @@
+model,k_type,v_type,sink,calib_tokens,ppl
+mistral-7b,tqk_5hi_3lo_had,tqv_had_mse4,32,32,7.14
+mistral-7b,tqk_5hi_3lo_had,tqv_had_mse4,64,64,7.15
+mistral-7b,tqk_5hi_3lo_had,tqv_had_mse4,128,128,7.16
+mistral-7b,tqk_5hi_3lo_had,tqv_had_mse4,256,256,7.17
+mistral-7b,tqk_5hi_3lo_had,tqv_had_mse4,512,512,7.14
+mistral-7b,tqk_5hi_3lo_had,q4_0,32,32,7.20
+mistral-7b,tqk_5hi_3lo_had,q4_0,64,64,7.17
+mistral-7b,tqk_5hi_3lo_had,q4_0,128,128,7.17
+mistral-7b,tqk_5hi_3lo_had,q4_0,256,256,7.19
+mistral-7b,tqk_5hi_3lo_had,q4_0,512,512,7.21

@@ -1,0 +1,12 @@
+model,k_type,v_type,k_bpv,v_bpv,kv_bpv,ppl,pp512,tg128
+llama3.1-8b,f16,f16,16.00,16.00,16.00,7.98,460,48.3
+llama3.1-8b,q8_0,q8_0,8.00,8.00,8.00,7.98,455,47.7
+llama3.1-8b,q4_0,q4_0,4.50,4.50,4.50,8.12,456,46.5
+llama3.1-8b,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,8.15,432,35.3
+llama3.1-8b,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,8.19,435,37.5
+llama3.1-8b,tqk_had_mse4,tqv_had_mse4,4.13,4.13,4.13,8.15,447,41.2
+llama3.1-8b,tqk_had_mse4,q4_0,4.13,4.50,4.31,8.07,451,43.7
+llama3.1-8b,tqk_had_prod4,tqv_had_mse4,4.25,4.13,4.19,8.41,439,36.2
+llama3.1-8b,tqk_had_prod4,q4_0,4.25,4.50,4.38,8.35,444,38.2
+llama3.1-8b,tqk_had_prod5,tqv_had_mse4,5.25,4.13,4.69,8.09,439,36.8
+llama3.1-8b,tqk_had_prod5,q4_0,5.25,4.50,4.88,8.08,442,38.9

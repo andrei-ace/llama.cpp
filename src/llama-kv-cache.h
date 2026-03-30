@@ -209,9 +209,10 @@ public:
     ggml_tensor * get_turbo_rot_inverse() const { return turbo_rotation_inv; }
 
     // TurboQuant outlier calibration
-    bool is_tq_calibrating() const { return tq_calibrating_; }
-    void tq_try_finish_calibration(); // checks min accumulation threshold
+    bool is_tq_calibrating() const override { return tq_calibrating_; }
+    void tq_try_finish_calibration() override; // checks min accumulation threshold
     void tq_finish_calibration();     // unconditionally locks and re-quantizes
+    void tq_free_calib_buffer();      // free fp16 calibration buffer (call after graph reset)
     void tq_expire_sinks();           // re-quantize fp16 sink blocks → TQ, clear sink state
 
 private:

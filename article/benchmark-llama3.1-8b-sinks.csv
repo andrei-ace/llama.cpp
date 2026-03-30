@@ -1,0 +1,11 @@
+model,k_type,v_type,sink,calib_tokens,ppl
+llama3.1-8b,tqk_5hi_3lo_had,tqv_had_mse4,32,32,8.15
+llama3.1-8b,tqk_5hi_3lo_had,tqv_had_mse4,64,64,8.16
+llama3.1-8b,tqk_5hi_3lo_had,tqv_had_mse4,128,128,8.10
+llama3.1-8b,tqk_5hi_3lo_had,tqv_had_mse4,256,256,8.09
+llama3.1-8b,tqk_5hi_3lo_had,tqv_had_mse4,512,512,8.15
+llama3.1-8b,tqk_5hi_3lo_had,q4_0,32,32,8.11
+llama3.1-8b,tqk_5hi_3lo_had,q4_0,64,64,8.08
+llama3.1-8b,tqk_5hi_3lo_had,q4_0,128,128,8.05
+llama3.1-8b,tqk_5hi_3lo_had,q4_0,256,256,8.11
+llama3.1-8b,tqk_5hi_3lo_had,q4_0,512,512,8.12

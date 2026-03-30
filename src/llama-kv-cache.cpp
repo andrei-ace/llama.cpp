@@ -550,7 +550,6 @@ void llama_kv_cache::tq_try_finish_calibration() {
         ggml_tensor * k = layers[ikv].k;
         if (!k || k->type != GGML_TYPE_F16) continue;
 
-        const int layer_id = (int)layers[ikv].il;
         const int64_t n_embd = k->ne[0];
         const size_t fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
 
@@ -562,7 +561,7 @@ void llama_kv_cache::tq_try_finish_calibration() {
             if (v_cells[0].is_empty(cell)) continue;
             ggml_backend_tensor_get(k, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
             ggml_fp16_to_fp32_row(fp16_buf.data(), f32_buf.data(), n_embd);
-            tq_accumulate_channels(layer_id, 1, f32_buf.data(), n_embd);
+            tq_accumulate_channels(ikv, 1, f32_buf.data(), n_embd);
         }
     }
 
@@ -572,24 +571,20 @@ void llama_kv_cache::tq_try_finish_calibration() {
 void llama_kv_cache::tq_finish_calibration() {
     if (!tq_calibrating_) return;
 
-    int max_layer_id = 0;
-    for (const auto & l : layers) {
-        if ((int)l.il > max_layer_id) max_layer_id = (int)l.il;
-    }
+    const int n_kv_layers = (int)layers.size();
 
     // 1. Lock outlier channels from accumulated statistics
-    tq_lock_outliers_from_accum(max_layer_id + 1);
+    tq_lock_outliers_from_accum(n_kv_layers);
 
     // 1b. Upload calibrated channel maps to Metal device
     {
         const int head_dim = (int)hparams.n_embd_head_k(0);
         int n_kv_heads = (!layers.empty() && layers[0].k) ? (int)(layers[0].k->ne[0] / head_dim) : 0;
         if (n_kv_heads < 1) n_kv_heads = 1;
-        int n_layers_actual = max_layer_id + 1;
         const int n_outlier = (head_dim == 256) ? 64 : 32;
 
-        std::vector<int32_t> chmap(n_layers_actual * n_kv_heads * head_dim);
-        for (int l = 0; l < n_layers_actual; l++) {
+        std::vector<int32_t> chmap(n_kv_layers * n_kv_heads * head_dim);
+        for (int l = 0; l < n_kv_layers; l++) {
             for (int h = 0; h < n_kv_heads; h++) {
                 int * row = chmap.data() + (l * n_kv_heads + h) * head_dim;
                 tq_get_channel_map(l, h, 1, row, row + n_outlier);
@@ -603,9 +598,9 @@ void llama_kv_cache::tq_finish_calibration() {
             if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
                 ggml_metal_device_t mdev = (ggml_metal_device_t)dev->context;
                 if (mdev) {
-                    ggml_metal_device_set_tq_channel_map(mdev, chmap.data(), n_layers_actual, n_kv_heads);
+                    ggml_metal_device_set_tq_channel_map(mdev, chmap.data(), n_kv_layers, n_kv_heads);
                     LLAMA_LOG_INFO("%s: uploaded channel maps to Metal (%d layers, %d heads)\n",
-                                   __func__, n_layers_actual, n_kv_heads);
+                                   __func__, n_kv_layers, n_kv_heads);
                 }
             }
         }
@@ -616,9 +611,9 @@ void llama_kv_cache::tq_finish_calibration() {
             ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(layers[0].k->buffer);
             ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
             if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
-                ggml_cuda_set_tq_channel_map(chmap.data(), n_layers_actual, n_kv_heads);
+                ggml_cuda_set_tq_channel_map(chmap.data(), n_kv_layers, n_kv_heads);
                 LLAMA_LOG_INFO("%s: uploaded channel maps to CUDA (%d layers, %d heads)\n",
-                               __func__, n_layers_actual, n_kv_heads);
+                               __func__, n_kv_layers, n_kv_heads);
             }
         }
 #endif
@@ -730,14 +725,8 @@ void llama_kv_cache::tq_finish_calibration() {
     }
     // Keep the view context alive (owns the stream view tensors)
     ctxs_bufs.emplace_back(ggml_context_ptr(tq_view_ctx), nullptr);
-    // Free calibration K(fp16) buffer — completely separate from V and sink buffers
-    if (tq_calib_k_buf_.second) {
-        LLAMA_LOG_INFO("%s: freeing calibration K(fp16) buffer (%.2f MiB)\n",
-                       __func__, ggml_backend_buffer_get_size(tq_calib_k_buf_.second.get())/1024.0/1024.0);
-        tq_calib_k_buf_.first.reset();
-        tq_calib_k_buf_.second.reset();
-    }
-
+    // Mark calibration as done — buffer free is deferred to tq_free_calib_buffer()
+    // (called after the compute graph is invalidated to avoid Metal Invalid Resource errors)
     tq_calibrating_ = false;
 
     // Register sink state for vec_dot dispatch (after pointer swap, TQ data is at final addresses)
@@ -756,6 +745,15 @@ void llama_kv_cache::tq_finish_calibration() {
     LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers (K: %s, V: %s)\n",
                    __func__, (int)layers.size(),
                    ggml_type_name(target_type_k), ggml_type_name(target_type_v));
+}
+
+void llama_kv_cache::tq_free_calib_buffer() {
+    if (tq_calib_k_buf_.second) {
+        LLAMA_LOG_INFO("%s: freeing calibration K(fp16) buffer (%.2f MiB)\n",
+                       __func__, ggml_backend_buffer_get_size(tq_calib_k_buf_.second.get())/1024.0/1024.0);
+        tq_calib_k_buf_.first.reset();
+        tq_calib_k_buf_.second.reset();
+    }
 }
 
 void llama_kv_cache::tq_expire_sinks() {

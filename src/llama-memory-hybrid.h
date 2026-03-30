@@ -75,6 +75,10 @@ public:
     void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const override;
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0)       override;
 
+    bool is_tq_calibrating()        const override { return mem_attn->is_tq_calibrating(); }
+    void tq_try_finish_calibration()      override { mem_attn->tq_try_finish_calibration(); }
+    void tq_free_calib_buffer()           override { mem_attn->tq_free_calib_buffer(); }
+
     //
     // llama_memory_hybrid specific API
     //

@@ -121,6 +121,11 @@ struct llama_memory_i {
 
     virtual void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const = 0;
     virtual void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) = 0;
+
+    // TurboQuant calibration (default no-ops for non-KV memory types)
+    virtual bool is_tq_calibrating() const { return false; }
+    virtual void tq_try_finish_calibration() {}
+    virtual void tq_free_calib_buffer() {}
 };
 
 using llama_memory_ptr = std::unique_ptr<llama_memory_i>;
