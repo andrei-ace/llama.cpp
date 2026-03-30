@@ -1066,8 +1066,11 @@ template<> inline float4 elu_approx<float4>(float4 x) {
     return res;
 }
 
-// had_mse4: FA dequantize — outputs norm * centroids in ROTATED space
-// K stays in Hadamard-rotated space. Q must be pre-rotated with FWHT before FA.
+// TQ FA dequantize: MSE centroids + optional QJL correction in rotated space.
+// Q must be pre-rotated with FWHT before FA. With Hadamard QJL, the per-element
+// correction is trivial: K_eff[j] = norm*centroid[idx] + (√(π/2)/d)*rnorm*sign[j]
+
+// 4-bit MSE only (had_mse4)
 template <typename type4x4>
 void dequantize_had_mse4(device const block_tqk_had_mse4 * xb, short il, thread type4x4 & reg) {
     float norm = float(xb->norm);
@@ -1078,13 +1081,60 @@ void dequantize_had_mse4(device const block_tqk_had_mse4 * xb, short il, thread 
     }
     reg = (type4x4) reg_f;
 }
-
 template <typename type4>
 void dequantize_had_mse4_t4(device const block_tqk_had_mse4 * xb, short il, thread type4 & reg) {
     float norm = float(xb->norm);
     for (int i = 0; i < 4; i++) {
         int j = il * 4 + i;
         reg[i] = norm * tq_c16_d128[tq_up4(xb->qs, j)];
+    }
+}
+
+// 4-bit MSE + 1-bit QJL (had_prod5) — same MSE as had_mse4 plus QJL sign correction
+template <typename type4x4>
+void dequantize_had_prod5(device const block_tqk_had_prod5 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg_f[i/4][i%4] = norm * tq_c16_d128[tq_up4(xb->qs, j)] + qjl * sign;
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_prod5_t4(device const block_tqk_had_prod5 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg[i] = norm * tq_c16_d128[tq_up4(xb->qs, j)] + qjl * sign;
+    }
+}
+
+// 3-bit MSE + 1-bit QJL (had_prod4)
+template <typename type4x4>
+void dequantize_had_prod4(device const block_tqk_had_prod4 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg_f[i/4][i%4] = norm * tq_c8_d128[tq_up3(xb->qs, j)] + qjl * sign;
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_prod4_t4(device const block_tqk_had_prod4 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg[i] = norm * tq_c8_d128[tq_up3(xb->qs, j)] + qjl * sign;
     }
 }
 
@@ -6489,8 +6539,10 @@ template [[host_name("kernel_flash_attn_ext_q4_0_dk80_dv80"  )]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_q4_0_dk96_dv96"  )]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 96,  96>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk112_dv112")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 112, 112>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 128, 128>;
-// had_mse4 K (rotated space, Q pre-rotated with fused FWHT) + f16 V
-template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4, 8, dequantize_had_mse4, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+// TurboQuant K (rotated space, Q pre-rotated with fused FWHT) + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_f16_dk128_dv128")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4,  8, dequantize_had_mse4,  half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod5, 8, dequantize_had_prod5, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4, 8, dequantize_had_prod4, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv192")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 192>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 128>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 256, 256>;
@@ -7101,8 +7153,10 @@ template [[host_name("kernel_flash_attn_ext_vec_f16_dk128_dv128")]]  kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_bf16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     bfloat4,    1, dequantize_bf16_t4, bfloat4,     1, dequantize_bf16_t4, 128, 128, 1>;
 #endif
 template [[host_name("kernel_flash_attn_ext_vec_q4_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_0, 8, dequantize_q4_0_t4, block_q4_0,  8, dequantize_q4_0_t4, 128, 128, 1>;
-// had_mse4 K (rotated space) + f16 V
-template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4, 32, dequantize_had_mse4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+// TurboQuant K (rotated space, Q pre-rotated with fused FWHT) + f16 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4,  32, dequantize_had_mse4_t4,  half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5, 32, dequantize_had_prod5_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4, 32, dequantize_had_prod4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_1, 8, dequantize_q4_1_t4, block_q4_1,  8, dequantize_q4_1_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_0, 8, dequantize_q5_0_t4, block_q5_0,  8, dequantize_q5_0_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 128, 128, 1>;
@@ -9333,6 +9387,237 @@ kernel void kernel_set_rows_had_mse4(
     for (int j = 0; j < 128; j++) {
         tq_pk4((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c16_d128, 16));
     }
+}
+
+// had_prod5: get_rows (full dequant with inverse FWHT + QJL correction)
+[[host_name("kernel_get_rows_had_prod5")]]
+kernel void kernel_get_rows_had_prod5(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+
+    device const block_tqk_had_prod5 * blk = (device const block_tqk_had_prod5 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+    float rnorm = float(blk->rnorm);
+
+    // MSE reconstruction: centroids → inverse FWHT → scale by norm
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) {
+        rot[j] = tq_c16_d128[tq_up4(blk->qs, j)];
+    }
+    tq_fwht<128>(rot);
+
+    // QJL correction: FWHT of sign vector (Hadamard QJL)
+    thread float corr[128];
+    for (int j = 0; j < 128; j++) {
+        corr[j] = ((blk->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    }
+    tq_fwht<128>(corr);
+    float qjl_scale = 1.2533141f / 128.0f * rnorm;
+
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 128; j++) {
+        out[j] = norm * rot[j] + qjl_scale * corr[j];
+    }
+}
+
+// had_prod5: set_rows (quantize with FWHT + MSE + QJL)
+[[host_name("kernel_set_rows_had_prod5_i32")]]
+kernel void kernel_set_rows_had_prod5(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    float sum_sq = 0.0f;
+    thread float vals[128];
+    for (int j = 0; j < 128; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_prod5 * blk = (device block_tqk_had_prod5 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+    blk->rnorm = half(0.0f);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+        for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    // FWHT + 4-bit MSE quantize (same as had_mse4)
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) rot[j] = vals[j] * inv;
+    tq_fwht<128>(rot);
+
+    for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        tq_pk4((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c16_d128, 16));
+    }
+
+    // Compute residual in original space: r = x - norm * FWHT(centroids)
+    thread float recon[128];
+    for (int j = 0; j < 128; j++) recon[j] = tq_c16_d128[tq_up4(blk->qs, j)];
+    tq_fwht<128>(recon);
+
+    thread float resid[128];
+    for (int j = 0; j < 128; j++) resid[j] = vals[j] - norm * recon[j];
+
+    // QJL forward: signs = sign(FWHT(resid)), rnorm = ||resid||
+    tq_fwht<128>(resid);
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 128; j++) rnorm_sq += (vals[j] - norm * recon[j]) * (vals[j] - norm * recon[j]);
+
+    for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        if (resid[j] >= 0.0f) blk->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm = half(sqrt(rnorm_sq));
+}
+
+// had_prod4: get_rows (full dequant with inverse FWHT + QJL correction)
+[[host_name("kernel_get_rows_had_prod4")]]
+kernel void kernel_get_rows_had_prod4(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+
+    device const block_tqk_had_prod4 * blk = (device const block_tqk_had_prod4 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+    float rnorm = float(blk->rnorm);
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) {
+        rot[j] = tq_c8_d128[tq_up3(blk->qs, j)];
+    }
+    tq_fwht<128>(rot);
+
+    thread float corr[128];
+    for (int j = 0; j < 128; j++) {
+        corr[j] = ((blk->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    }
+    tq_fwht<128>(corr);
+    float qjl_scale = 1.2533141f / 128.0f * rnorm;
+
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 128; j++) {
+        out[j] = norm * rot[j] + qjl_scale * corr[j];
+    }
+}
+
+// had_prod4: set_rows (quantize with FWHT + 3-bit MSE + QJL)
+[[host_name("kernel_set_rows_had_prod4_i32")]]
+kernel void kernel_set_rows_had_prod4(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    float sum_sq = 0.0f;
+    thread float vals[128];
+    for (int j = 0; j < 128; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_prod4 * blk = (device block_tqk_had_prod4 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+    blk->rnorm = half(0.0f);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 48; j++) blk->qs[j] = 0;
+        for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) rot[j] = vals[j] * inv;
+    tq_fwht<128>(rot);
+
+    for (int j = 0; j < 48; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        tq_pk3((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c8_d128, 8));
+    }
+
+    // Compute residual
+    thread float recon[128];
+    for (int j = 0; j < 128; j++) recon[j] = tq_c8_d128[tq_up3(blk->qs, j)];
+    tq_fwht<128>(recon);
+
+    thread float resid[128];
+    for (int j = 0; j < 128; j++) resid[j] = vals[j] - norm * recon[j];
+
+    // QJL forward
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 128; j++) rnorm_sq += resid[j] * resid[j];
+    tq_fwht<128>(resid);
+
+    for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        if (resid[j] >= 0.0f) blk->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm = half(sqrt(rnorm_sq));
 }
 
 // ---------------------------------------------------------------------------

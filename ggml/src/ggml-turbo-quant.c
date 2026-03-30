@@ -326,9 +326,14 @@ static float tq_gaussian(void) {
 #define QJL_SEED_96   0x514A4C60ULL
 #define QJL_SEED_128  0x514A4C80ULL
 
-// Pre-computed QJL matrix (generated once, reused everywhere)
-static float tq_qjl_mat_32[TQ_DIM_HI * TQ_DIM_HI];    // 32×32 = 4KB
-static float * tq_qjl_mat_128 = NULL;                   // 128×128 = 64KB (heap allocated)
+// Forward declaration — defined later, needed by QJL Hadamard path
+static void tq_fwht(float * x, int n);
+
+// QJL for 128-dim: uses Hadamard matrix (FWHT) as projection — O(n log n),
+// no matrix storage, and enables trivial per-element correction in Metal FA.
+// For other dims (32, 96): Gaussian PRNG (kept for 5hi_3lo compatibility).
+
+static float tq_qjl_mat_32[TQ_DIM_HI * TQ_DIM_HI];    // 32×32 = 4KB (for 5hi_3lo hi part)
 static int   tq_qjl_mat_initialized = 0;
 
 static void tq_gen_qjl_matrix(float * out, int dim, uint64_t seed) {
@@ -347,27 +352,33 @@ static void tq_gen_qjl_matrix(float * out, int dim, uint64_t seed) {
 static void tq_init_qjl_matrices(void) {
     if (tq_qjl_mat_initialized) return;
     tq_gen_qjl_matrix(tq_qjl_mat_32, TQ_DIM_HI, QJL_SEED_32);
-    tq_qjl_mat_128 = (float *)malloc(TQ_DIM * TQ_DIM * sizeof(float));
-    tq_gen_qjl_matrix(tq_qjl_mat_128, TQ_DIM, QJL_SEED_128);
     tq_qjl_mat_initialized = 1;
 }
 
 static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed) {
-    (void)seed;
-    tq_init_qjl_matrices();
-    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : (m == TQ_DIM) ? tq_qjl_mat_128 : NULL;
-
     float rnorm_sq = 0.0f;
     for (int j = 0; j < m; j++) rnorm_sq += r[j] * r[j];
 
     memset(signs, 0, (m + 7) / 8);
-    if (S) {
+
+    if (m == TQ_DIM) {
+        // 128-dim: Hadamard (FWHT) projection — O(n log n), no matrix needed
+        float proj[TQ_DIM];
+        for (int j = 0; j < m; j++) proj[j] = r[j];
+        tq_fwht(proj, m);
+        for (int i = 0; i < m; i++) {
+            if (proj[i] >= 0.0f) signs[i / 8] |= (uint8_t)(1 << (i % 8));
+        }
+    } else if (m == TQ_DIM_HI) {
+        // 32-dim: pre-computed Gaussian matrix
+        tq_init_qjl_matrices();
         for (int i = 0; i < m; i++) {
             float proj = 0.0f;
-            for (int j = 0; j < m; j++) proj += S[i * m + j] * r[j];
+            for (int j = 0; j < m; j++) proj += tq_qjl_mat_32[i * m + j] * r[j];
             if (proj >= 0.0f) signs[i / 8] |= (uint8_t)(1 << (i % 8));
         }
     } else {
+        // Fallback: regenerate Gaussian on-the-fly
         tq_seed(seed);
         for (int i = 0; i < m; i++) {
             float proj = 0.0f;
@@ -379,18 +390,22 @@ static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed)
 }
 
 static void qjl_inverse(const uint8_t * signs, float rnorm, float * corr, int m, uint64_t seed) {
-    (void)seed;
-    tq_init_qjl_matrices();
-    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : (m == TQ_DIM) ? tq_qjl_mat_128 : NULL;
-
-    memset(corr, 0, m * sizeof(float));
-    if (S) {
+    if (m == TQ_DIM) {
+        // 128-dim: corr = scale * FWHT(sign_vector)
+        for (int i = 0; i < m; i++) {
+            corr[i] = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+        }
+        tq_fwht(corr, m);
+    } else if (m == TQ_DIM_HI) {
+        tq_init_qjl_matrices();
+        memset(corr, 0, m * sizeof(float));
         for (int i = 0; i < m; i++) {
             float z = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
-            for (int j = 0; j < m; j++) corr[j] += S[i * m + j] * z;
+            for (int j = 0; j < m; j++) corr[j] += tq_qjl_mat_32[i * m + j] * z;
         }
     } else {
         tq_seed(seed);
+        memset(corr, 0, m * sizeof(float));
         for (int i = 0; i < m; i++) {
             float z = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
             for (int j = 0; j < m; j++) corr[j] += tq_gaussian() * z;
@@ -998,34 +1013,49 @@ static float qjl_project_query_element(const float * q_rot, int i, int m, uint64
     return proj;
 }
 
-// QJL correction term using pre-computed matrix:
-// rnorm * sqrt(π/2) / m * <S @ q, sign(S @ r_k)>
-static float qjl_asymmetric_dot(const float * q_rot, int m, uint64_t seed,
+// QJL correction: for 128-dim uses Hadamard (FWHT), for others uses Gaussian matrix/PRNG.
+static float qjl_asymmetric_dot(const float * q, int m, uint64_t seed,
                                  const uint8_t * signs, float rnorm) {
     if (rnorm == 0.0f) return 0.0f;
-    (void)seed;
-
-    tq_init_qjl_matrices();
-    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : (m == TQ_DIM) ? tq_qjl_mat_128 : NULL;
-
     float sum = 0.0f;
-    if (S) {
-        // Fast path: pre-computed matrix
+
+    if (m == TQ_DIM) {
+        // 128-dim Hadamard: project with FWHT, dot with signs
+        float q_proj[TQ_DIM];
+        for (int j = 0; j < m; j++) q_proj[j] = q[j];
+        tq_fwht(q_proj, m);
+        for (int i = 0; i < m; i++) {
+            float sign = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+            sum += q_proj[i] * sign;
+        }
+    } else if (m == TQ_DIM_HI) {
+        tq_init_qjl_matrices();
         for (int i = 0; i < m; i++) {
             float proj = 0.0f;
-            for (int j = 0; j < m; j++) proj += S[i * m + j] * q_rot[j];
+            for (int j = 0; j < m; j++) proj += tq_qjl_mat_32[i * m + j] * q[j];
             float sign = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
             sum += proj * sign;
         }
     } else {
-        // Fallback: regenerate on-the-fly for non-standard dimensions
         tq_seed(seed);
         for (int i = 0; i < m; i++) {
             float proj = 0.0f;
-            for (int j = 0; j < m; j++) proj += tq_gaussian() * q_rot[j];
+            for (int j = 0; j < m; j++) proj += tq_gaussian() * q[j];
             float sign = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
             sum += proj * sign;
         }
+    }
+    return 1.2533141f / (float)m * rnorm * sum;
+}
+
+// Fast variant for 128-dim when q is already FWHT-rotated — O(m) dot with signs
+static float qjl_asymmetric_dot_rotated(const float * q_rot, int m,
+                                         const uint8_t * signs, float rnorm) {
+    if (rnorm == 0.0f) return 0.0f;
+    float sum = 0.0f;
+    for (int i = 0; i < m; i++) {
+        float sign = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
+        sum += q_rot[i] * sign;
     }
     return 1.2533141f / (float)m * rnorm * sum;
 }
@@ -1561,8 +1591,8 @@ void ggml_vec_dot_tqk_had_prod5_f32(
         }
         float mse_dot = norm * dot;
 
-        // QJL asymmetric dot on residual (raw query, not rotated)
-        float qjl_dot = qjl_asymmetric_dot(q, TQ_DIM, QJL_SEED_128,
+        // QJL correction: q_rot is already FWHT(q), which is H·q — exact match for Hadamard QJL
+        float qjl_dot = qjl_asymmetric_dot_rotated(q_rot, TQ_DIM,
                                             x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm));
 
         sumf += mse_dot + qjl_dot;
@@ -1685,8 +1715,8 @@ void ggml_vec_dot_tqk_had_prod4_f32(
         }
         float mse_dot = norm * dot;
 
-        // QJL asymmetric dot on residual (raw query, not rotated)
-        float qjl_dot = qjl_asymmetric_dot(q, TQ_DIM, QJL_SEED_128,
+        // QJL correction: q_rot is already FWHT(q), which is H·q — exact match for Hadamard QJL
+        float qjl_dot = qjl_asymmetric_dot_rotated(q_rot, TQ_DIM,
                                             x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm));
 
         sumf += mse_dot + qjl_dot;

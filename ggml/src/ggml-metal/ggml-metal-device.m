@@ -1173,7 +1173,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             {
                 // Allow mixed K/V types for TQ K + fp16 V
                 if (op->src[1]->type != op->src[2]->type) {
-                    bool is_tq_k = (op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4);
+                    bool is_tq_k = (op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4);
                     bool is_fp16_v = (op->src[2]->type == GGML_TYPE_F16);
                     if (!(is_tq_k && is_fp16_v)) {
                         return false;
@@ -1268,6 +1270,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_IQ4_NL:
                     case GGML_TYPE_TQK_HAD_MSE4:
+                    case GGML_TYPE_TQK_HAD_PROD5:
+                    case GGML_TYPE_TQK_HAD_PROD4:
                         return true;
                     default:
                         return false;

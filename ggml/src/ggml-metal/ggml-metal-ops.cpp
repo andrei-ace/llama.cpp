@@ -1134,9 +1134,14 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
 
     const ggml_type src_type = op->src[0]->type;
 
-    // TQK had_mse4 — simple H_128 + 4-bit MSE, no rotation buffers needed
-    if (src_type == GGML_TYPE_TQK_HAD_MSE4) {
-        auto pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_get_rows_had_mse4", "kernel_get_rows_had_mse4", nullptr);
+    // TurboQuant get_rows — H_128 + MSE (+ QJL for prod types)
+    if (src_type == GGML_TYPE_TQK_HAD_MSE4 ||
+        src_type == GGML_TYPE_TQK_HAD_PROD5 ||
+        src_type == GGML_TYPE_TQK_HAD_PROD4) {
+        const char * name = src_type == GGML_TYPE_TQK_HAD_MSE4  ? "kernel_get_rows_had_mse4" :
+                            src_type == GGML_TYPE_TQK_HAD_PROD5 ? "kernel_get_rows_had_prod5" :
+                                                                   "kernel_get_rows_had_prod4";
+        auto pipeline = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
 
         ggml_metal_kargs_get_rows args = {
             /*.ne00t =*/ ne00 / 128,
@@ -1213,9 +1218,14 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
 
     const ggml_type dst_type = op->type;
 
-    // TQK had_mse4 — simple H_128 + 4-bit MSE quantize
-    if (dst_type == GGML_TYPE_TQK_HAD_MSE4) {
-        auto pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_set_rows_had_mse4_i32", "kernel_set_rows_had_mse4_i32", nullptr);
+    // TurboQuant set_rows — H_128 + MSE quantize (+ QJL for prod types)
+    if (dst_type == GGML_TYPE_TQK_HAD_MSE4 ||
+        dst_type == GGML_TYPE_TQK_HAD_PROD5 ||
+        dst_type == GGML_TYPE_TQK_HAD_PROD4) {
+        const char * name = dst_type == GGML_TYPE_TQK_HAD_MSE4  ? "kernel_set_rows_had_mse4_i32" :
+                            dst_type == GGML_TYPE_TQK_HAD_PROD5 ? "kernel_set_rows_had_prod5_i32" :
+                                                                   "kernel_set_rows_had_prod4_i32";
+        auto pipeline = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
 
         const int n_blocks = ne00 / 128;
         ggml_metal_kargs_set_rows args = {
