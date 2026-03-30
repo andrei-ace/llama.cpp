@@ -1437,12 +1437,12 @@ void ggml_vec_dot_tqk_5hi_3lo_qr_f32(
 }
 
 // ---------------------------------------------------------------------------
-// TQK 5hi_3lo_fwht: 32/96 split, FWHT rotation, 4-bit MSE + QJL hi, 3-bit MSE lo
+// TQK 5hi_3lo_had: 32/96 split, FWHT rotation, 4-bit MSE + QJL hi, 3-bit MSE lo
 // Hi uses H_32 FWHT. Lo uses 3 × H_32 FWHT (block-diagonal on 96=3×32).
 // Lo centroids use d=32 (each 32-dim block is independent).
 // ---------------------------------------------------------------------------
 
-void quantize_row_tqk_5hi_3lo_fwht_ref(const float * GGML_RESTRICT x, block_tqk_5hi_3lo * GGML_RESTRICT y, int64_t k) {
+void quantize_row_tqk_5hi_3lo_had_ref(const float * GGML_RESTRICT x, block_tqk_5hi_3lo * GGML_RESTRICT y, int64_t k) {
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
@@ -1516,7 +1516,7 @@ void quantize_row_tqk_5hi_3lo_fwht_ref(const float * GGML_RESTRICT x, block_tqk_
     tq_sink_write_fp16(x, y, k, sizeof(block_tqk_5hi_3lo));
 }
 
-void dequantize_row_tqk_5hi_3lo_fwht(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+void dequantize_row_tqk_5hi_3lo_had(const block_tqk_5hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
     tq_init_rotations();
@@ -1555,8 +1555,8 @@ void dequantize_row_tqk_5hi_3lo_fwht(const block_tqk_5hi_3lo * GGML_RESTRICT x, 
     }
 }
 
-// Asymmetric vec_dot for 5hi_3lo_fwht
-void ggml_vec_dot_tqk_5hi_3lo_fwht_f32(
+// Asymmetric vec_dot for 5hi_3lo_had
+void ggml_vec_dot_tqk_5hi_3lo_had_f32(
         int n, float * GGML_RESTRICT s, size_t bs,
         const void * GGML_RESTRICT vx, size_t bx,
         const void * GGML_RESTRICT vy, size_t by, int nrc) {

@@ -400,9 +400,9 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
-    [GGML_TYPE_TQK_5HI_3LO_FWHT] = {
-        .from_float               = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_fwht_ref,
-        .vec_dot                  = ggml_vec_dot_tqk_5hi_3lo_fwht_f32,
+    [GGML_TYPE_TQK_5HI_3LO_HAD] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_had_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_5hi_3lo_had_f32,
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },

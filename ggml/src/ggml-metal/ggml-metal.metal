@@ -1138,12 +1138,12 @@ void dequantize_had_prod4_t4(device const block_tqk_had_prod4 * xb, short il, th
     }
 }
 
-// 5hi_3lo_fwht: FA dequantize — outputs [hi(32), lo(96)] in block order
+// 5hi_3lo_had: FA dequantize — outputs [hi(32), lo(96)] in block order
 // Elements 0-31: 4-bit MSE d32 + QJL (hi/outlier channels)
 // Elements 32-127: 3-bit MSE d32 (lo/regular channels, 3 blocks of 32)
 // Q must be permuted to match: [outlier_ch, regular_ch] then 4×FWHT_32
 template <typename type4x4>
-void dequantize_5hi_3lo_fwht(device const block_tqk_5hi_3lo * xb, short il, thread type4x4 & reg) {
+void dequantize_5hi_3lo_had(device const block_tqk_5hi_3lo * xb, short il, thread type4x4 & reg) {
     float4x4 reg_f;
     for (int i = 0; i < 16; i++) {
         int j = il * 16 + i;
@@ -1163,7 +1163,7 @@ void dequantize_5hi_3lo_fwht(device const block_tqk_5hi_3lo * xb, short il, thre
     reg = (type4x4) reg_f;
 }
 template <typename type4>
-void dequantize_5hi_3lo_fwht_t4(device const block_tqk_5hi_3lo * xb, short il, thread type4 & reg) {
+void dequantize_5hi_3lo_had_t4(device const block_tqk_5hi_3lo * xb, short il, thread type4 & reg) {
     for (int i = 0; i < 4; i++) {
         int j = il * 4 + i;
         if (j < 32) {
@@ -5812,7 +5812,7 @@ template<
     short C,          // cache items per threadgroup
     short NSG,        // number of simd groups
     bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
-    bool TQ_SPLIT = false, // permute Q by channel map + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_SPLIT = false, // permute Q by channel map + 4×FWHT_32 (5hi_3lo_had)
     bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 void kernel_flash_attn_ext_impl(
         constant ggml_metal_kargs_flash_attn_ext & args,
@@ -6527,7 +6527,7 @@ template<
     short Q  = OP_FLASH_ATTN_EXT_NQPSG, // queries per threadgroup
     short C  = OP_FLASH_ATTN_EXT_NCPSG, // cache items per threadgroup
     bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
-    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_had)
     bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 kernel void kernel_flash_attn_ext(
         constant ggml_metal_kargs_flash_attn_ext & args,
@@ -6654,8 +6654,8 @@ template [[host_name("kernel_flash_attn_ext_q4_0_dk128_dv128")]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_f16_dk128_dv128")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4,  8, dequantize_had_mse4,  half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod5, 8, dequantize_had_prod5, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4, 8, dequantize_had_prod4, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-// 5hi_3lo_fwht K (split channels, Q permuted + 4×FWHT_32) + f16 V
-template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_fwht_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo, 8, dequantize_5hi_3lo_fwht, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// 5hi_3lo_had K (split channels, Q permuted + 4×FWHT_32) + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_had_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo, 8, dequantize_5hi_3lo_had, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
 // TQ K + TQV V (V stored rotated, inverse FWHT on output)
 template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4, 8, dequantize_had_mse4, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, false, true>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv192")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 192>;
@@ -6768,7 +6768,7 @@ template<
     short Q  = OP_FLASH_ATTN_EXT_VEC_NQPSG,  // queries per threadgroup
     short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG,  // cache items per threadgroup
     bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
-    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_had)
     bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 kernel void kernel_flash_attn_ext_vec(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
@@ -7324,7 +7324,7 @@ template [[host_name("kernel_flash_attn_ext_vec_q4_0_dk128_dv128")]] kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4,  32, dequantize_had_mse4_t4,  half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5, 32, dequantize_had_prod5_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4, 32, dequantize_had_prod4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_fwht_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo, 32, dequantize_5hi_3lo_fwht_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_had_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo, 32, dequantize_5hi_3lo_had_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
 // TQ K + TQV V (V stored rotated, inverse FWHT on output)
 template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4, 32, dequantize_had_mse4_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true, false, true>;
 template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_1, 8, dequantize_q4_1_t4, block_q4_1,  8, dequantize_q4_1_t4, 128, 128, 1>;
@@ -9790,9 +9790,9 @@ kernel void kernel_set_rows_had_prod4(
     blk->rnorm = half(sqrt(rnorm_sq));
 }
 
-// 5hi_3lo_fwht: get_rows (full dequant — uses default channel order, for debug/non-FA path)
-[[host_name("kernel_get_rows_5hi_3lo_fwht")]]
-kernel void kernel_get_rows_5hi_3lo_fwht(
+// 5hi_3lo_had: get_rows (full dequant — uses default channel order, for debug/non-FA path)
+[[host_name("kernel_get_rows_5hi_3lo_had")]]
+kernel void kernel_get_rows_5hi_3lo_had(
         constant ggml_metal_kargs_get_rows & args,
         device const void  * src0,
         device const void  * src1,
@@ -9836,9 +9836,9 @@ kernel void kernel_get_rows_5hi_3lo_fwht(
     for (int j = 0; j < 96; j++)  out[32 + j]  = lo[j];
 }
 
-// 5hi_3lo_fwht: set_rows (quantize — uses calibrated channel map if available)
-[[host_name("kernel_set_rows_5hi_3lo_fwht_i32")]]
-kernel void kernel_set_rows_5hi_3lo_fwht(
+// 5hi_3lo_had: set_rows (quantize — uses calibrated channel map if available)
+[[host_name("kernel_set_rows_5hi_3lo_had_i32")]]
+kernel void kernel_set_rows_5hi_3lo_had(
         constant ggml_metal_kargs_set_rows & args,
         device const void  * src0,
         device const void  * src1,

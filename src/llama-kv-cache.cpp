@@ -131,7 +131,7 @@ llama_kv_cache::llama_kv_cache(
     // had_mse4 also goes through fp16 calibration to support sink capture
     // Types needing calibration (channel splitting): start as fp16, re-quantize after prompt
     // had_mse4 needs no calibration — allocated directly. Sinks handled in set_tq_n_sinks().
-    const bool uses_turbo_k = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT);
+    const bool uses_turbo_k = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_HAD);
     const bool uses_turbo_v = false; // V types (tqv_had_mse4) don't need calibration
     ggml_type alloc_type_k = type_k;
     ggml_type alloc_type_v = type_v;
@@ -312,7 +312,7 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
     // TurboQuant: allocate and initialize rotation matrix for quantization quality
-    const bool uses_turbo = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT ||
+    const bool uses_turbo = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_HAD ||
                              type_k == GGML_TYPE_TQK_HAD_MSE4 || type_k == GGML_TYPE_TQK_HAD_PROD5 ||
                              type_k == GGML_TYPE_TQK_HAD_PROD4 || type_v == GGML_TYPE_TQV_HAD_MSE4);
     if (uses_turbo) {
@@ -625,16 +625,44 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    // Free calibration fp16 buffer — K and V are now in TQ tensors
-    if (tq_calib_buf_idx_ >= 0 && !sink_bufs.empty()) {
-        sink_bufs.erase(sink_bufs.begin());
-        tq_calib_buf_idx_ = -1;
-    }
+    // Create a small context for the new stream view tensors
+    ggml_init_params view_params = {
+        /*.mem_size   =*/ layers.size() * n_stream * 2 * ggml_tensor_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * tq_view_ctx = ggml_init(view_params);
 
+    // Rebuild k_stream/v_stream views to point at new TQ tensors (not old fp16)
     for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        ggml_tensor * k = layers[ikv].k;
+        ggml_tensor * v = layers[ikv].v;
+        for (uint32_t s = 0; s < n_stream; s++) {
+            if (k) {
+                ggml_tensor * ks = ggml_view_2d(tq_view_ctx, k, k->ne[0], k->ne[1], k->nb[1], s*k->nb[2]);
+                ks->buffer = k->buffer;
+                layers[ikv].k_stream[s] = ks;
+            }
+            if (v) {
+                ggml_tensor * vs = ggml_view_2d(tq_view_ctx, v, v->ne[0], v->ne[1], v->nb[1], s*v->nb[2]);
+                vs->buffer = v->buffer;
+                layers[ikv].v_stream[s] = vs;
+            }
+        }
         layers[ikv].k_tq = nullptr;
         layers[ikv].v_tq = nullptr;
     }
+
+    // TQ tensor data lives in sink_bufs[0] — move to ctxs_bufs to keep alive.
+    if (tq_calib_buf_idx_ >= 0 && !sink_bufs.empty()) {
+        ctxs_bufs.push_back(std::move(sink_bufs[0]));
+        sink_bufs.erase(sink_bufs.begin());
+        tq_calib_buf_idx_ = -1;
+    }
+    // Keep the view context alive (owns the stream view tensors)
+    ctxs_bufs.emplace_back(ggml_context_ptr(tq_view_ctx), nullptr);
+    // Defer fp16 buffer freeing to first decode step (graph scheduler holds refs during prefill)
+    tq_fp16_buf_pending_free_ = true;
 
     tq_calibrating_ = false;
 
@@ -726,6 +754,35 @@ void llama_kv_cache::tq_expire_sinks() {
 }
 
 void llama_kv_cache::clear(bool data) {
+    // Deferred fp16 buffer free — do it before iterating ctxs_bufs
+    if (tq_fp16_buf_pending_free_) {
+        tq_fp16_buf_pending_free_ = false;
+        for (auto it = ctxs_bufs.begin(); it != ctxs_bufs.end(); ++it) {
+            ggml_backend_buffer_t buf = it->second.get();
+            if (!buf) continue;
+            bool in_use = false;
+            for (const auto & l : layers) {
+                if ((l.k && l.k->buffer == buf) || (l.v && l.v->buffer == buf)) {
+                    in_use = true;
+                    break;
+                }
+            }
+            if (!in_use) {
+                LLAMA_LOG_INFO("%s: freeing fp16 calibration buffer (%.2f MiB)\n",
+                               __func__, ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
+                ggml_context * ctx = it->first.get();
+                if (ctx) {
+                    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+                        t->buffer = NULL;
+                        t->data   = NULL;
+                    }
+                }
+                ctxs_bufs.erase(it);
+                break;
+            }
+        }
+    }
+
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
         v_heads[s] = 0;
@@ -733,7 +790,9 @@ void llama_kv_cache::clear(bool data) {
 
     if (data) {
         for (auto & [_, buf] : ctxs_bufs) {
-            ggml_backend_buffer_clear(buf.get(), 0);
+            if (buf) {
+                ggml_backend_buffer_clear(buf.get(), 0);
+            }
         }
     }
 }

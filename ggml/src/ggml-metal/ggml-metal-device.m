@@ -1176,7 +1176,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     bool is_tq_k = (op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4 ||
-                                    op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_FWHT);
+                                    op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_HAD);
                     bool is_ok_v = (op->src[2]->type == GGML_TYPE_F16 ||
                                     op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4);
                     if (!(is_tq_k && is_ok_v)) {
@@ -1200,7 +1200,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             if (op->src[0]->type == GGML_TYPE_TQK_HAD_MSE4 ||
                 op->src[0]->type == GGML_TYPE_TQK_HAD_PROD5 ||
                 op->src[0]->type == GGML_TYPE_TQK_HAD_PROD4 ||
-                op->src[0]->type == GGML_TYPE_TQK_5HI_3LO_FWHT ||
+                op->src[0]->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
                 op->src[0]->type == GGML_TYPE_TQV_HAD_MSE4) {
                 return false;
             }
@@ -1282,7 +1282,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_TQK_HAD_MSE4:
                     case GGML_TYPE_TQK_HAD_PROD5:
                     case GGML_TYPE_TQK_HAD_PROD4:
-                    case GGML_TYPE_TQK_5HI_3LO_FWHT:
+                    case GGML_TYPE_TQK_5HI_3LO_HAD:
                     case GGML_TYPE_TQV_HAD_MSE4:
                         return true;
                     default:

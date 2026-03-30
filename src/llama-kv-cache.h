@@ -281,6 +281,7 @@ private:
     bool tq_calibrating_ = false;             // true during prompt (cache is fp16, accumulating)
     uint32_t tq_n_sinks_ = 0;                 // number of initial tokens to keep as fp16
     int tq_calib_buf_idx_ = -1;              // index in ctxs_bufs of the TQ buffer (for freeing fp16 after cal)
+    bool tq_fp16_buf_pending_free_ = false;  // deferred fp16 buffer free (after graph scheduler moves on)
 
     // Sink buffer storage (separate from ctxs_bufs to avoid memory_breakdown assertions)
     std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> sink_bufs;

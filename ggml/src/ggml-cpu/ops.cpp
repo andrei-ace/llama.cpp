@@ -5649,7 +5649,7 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_IQ2_S:
         case GGML_TYPE_Q8_K:
         case GGML_TYPE_TQK_5HI_3LO_QR:
-        case GGML_TYPE_TQK_5HI_3LO_FWHT:
+        case GGML_TYPE_TQK_5HI_3LO_HAD:
         case GGML_TYPE_TQK_HAD_MSE4:
         case GGML_TYPE_TQK_HAD_PROD5:
         case GGML_TYPE_TQK_HAD_PROD4:

@@ -1839,7 +1839,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_add_sinks(cur, sinks);
 
         // TQ split types: pass per-head channel permutation for Q permutation in FA
-        if (k->type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
+        if (k->type == GGML_TYPE_TQK_5HI_3LO_HAD) {
             const int n_kv_head = k->ne[2]; // after permute: [head_size, kv_size, n_kv_heads, n_stream]
             auto inp_chmap = std::make_unique<llm_graph_input_tq_chmap>(il, n_kv_head);
             inp_chmap->chmap = ggml_new_tensor_1d(ctx0, GGML_TYPE_I8, n_kv_head * 128);
