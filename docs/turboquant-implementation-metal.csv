@@ -1,0 +1,69 @@
+section,model,kv_heads,k_type,v_type,k_bpv,v_bpv,kv_bpv,ctx,chunks,sink,ppl,pp512,tg128
+# Qwen3-8B (8 KV heads) — PPL at c=512
+ppl,qwen3-8b,8,f16,f16,16.00,16.00,16.00,512,8,,10.50,459,46.5
+ppl,qwen3-8b,8,q8_0,q8_0,8.00,8.00,8.00,512,8,,10.49,453,45.8
+ppl,qwen3-8b,8,q4_0,q4_0,4.50,4.50,4.50,512,8,,10.89,453,45.3
+ppl,qwen3-8b,8,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,,10.46,428,33.7
+ppl,qwen3-8b,8,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,512,8,,10.57,432,35.9
+ppl,qwen3-8b,8,tqk_had_mse4,tqv_had_mse4,4.13,4.13,4.13,512,8,,10.70,444,39.3
+ppl,qwen3-8b,8,tqk_had_mse4,q4_0,4.13,4.50,4.31,512,8,,10.83,449,42.0
+ppl,qwen3-8b,8,tqk_had_prod4,tqv_had_mse4,4.25,4.13,4.19,512,8,,12.06,436,34.3
+ppl,qwen3-8b,8,tqk_had_prod4,q4_0,4.25,4.50,4.38,512,8,,12.34,440,36.4
+ppl,qwen3-8b,8,tqk_had_prod5,tqv_had_mse4,5.25,4.13,4.69,512,8,,10.67,435,35.0
+ppl,qwen3-8b,8,tqk_had_prod5,q4_0,5.25,4.50,4.88,512,8,,10.76,439,37.2
+# Llama 3.1-8B (8 KV heads) — PPL at c=512
+ppl,llama3.1-8b,8,f16,f16,16.00,16.00,16.00,512,8,,7.98,460,48.3
+ppl,llama3.1-8b,8,q8_0,q8_0,8.00,8.00,8.00,512,8,,7.98,455,47.7
+ppl,llama3.1-8b,8,q4_0,q4_0,4.50,4.50,4.50,512,8,,8.12,456,46.5
+ppl,llama3.1-8b,8,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,,8.15,432,35.3
+ppl,llama3.1-8b,8,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,512,8,,8.19,435,37.5
+ppl,llama3.1-8b,8,tqk_had_mse4,tqv_had_mse4,4.13,4.13,4.13,512,8,,8.15,447,41.2
+ppl,llama3.1-8b,8,tqk_had_mse4,q4_0,4.13,4.50,4.31,512,8,,8.07,451,43.7
+ppl,llama3.1-8b,8,tqk_had_prod4,tqv_had_mse4,4.25,4.13,4.19,512,8,,8.41,439,36.2
+ppl,llama3.1-8b,8,tqk_had_prod4,q4_0,4.25,4.50,4.38,512,8,,8.35,444,38.2
+ppl,llama3.1-8b,8,tqk_had_prod5,tqv_had_mse4,5.25,4.13,4.69,512,8,,8.09,439,36.8
+ppl,llama3.1-8b,8,tqk_had_prod5,q4_0,5.25,4.50,4.88,512,8,,8.08,442,38.9
+# Mistral 7B (32 KV heads) — PPL at c=512
+ppl,mistral-7b,32,f16,f16,16.00,16.00,16.00,512,8,,7.13,460,51.3
+ppl,mistral-7b,32,q8_0,q8_0,8.00,8.00,8.00,512,8,,7.13,455,50.4
+ppl,mistral-7b,32,q4_0,q4_0,4.50,4.50,4.50,512,8,,7.11,456,49.6
+ppl,mistral-7b,32,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,,7.14,433,37.2
+ppl,mistral-7b,32,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,512,8,,7.20,435,39.6
+ppl,mistral-7b,32,tqk_had_mse4,tqv_had_mse4,4.13,4.13,4.13,512,8,,7.13,447,43.3
+ppl,mistral-7b,32,tqk_had_mse4,q4_0,4.13,4.50,4.31,512,8,,7.11,451,46.0
+ppl,mistral-7b,32,tqk_had_prod4,tqv_had_mse4,4.25,4.13,4.19,512,8,,7.28,440,37.8
+ppl,mistral-7b,32,tqk_had_prod4,q4_0,4.25,4.50,4.38,512,8,,7.26,444,39.9
+ppl,mistral-7b,32,tqk_had_prod5,tqv_had_mse4,5.25,4.13,4.69,512,8,,7.13,437,38.5
+ppl,mistral-7b,32,tqk_had_prod5,q4_0,5.25,4.50,4.88,512,8,,7.11,443,40.8
+# Qwen2.5-7B (2 KV heads) — broken
+ppl,qwen2.5-7b,2,f16,f16,16.00,16.00,16.00,512,8,,7.13,496,51.3
+ppl,qwen2.5-7b,2,q8_0,q8_0,8.00,8.00,8.00,512,8,,7.15,491,50.0
+ppl,qwen2.5-7b,2,q4_0,q4_0,4.50,4.50,4.50,512,8,,4652,492,49.8
+ppl,qwen2.5-7b,2,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,,142,472,38.3
+ppl,qwen2.5-7b,2,tqk_had_mse4,tqv_had_mse4,4.13,4.13,4.13,512,8,,5263,485,44.2
+# Qwen2.5-1.5B (2 KV heads) — broken
+ppl,qwen2.5-1.5b,2,f16,f16,16.00,16.00,16.00,512,8,,11.16,2282,168
+ppl,qwen2.5-1.5b,2,q8_0,q8_0,8.00,8.00,8.00,512,8,,11.16,2238,154
+ppl,qwen2.5-1.5b,2,q4_0,q4_0,4.50,4.50,4.50,512,8,,3644,2243,153
+ppl,qwen2.5-1.5b,2,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,,108,2004,81
+ppl,qwen2.5-1.5b,2,tqk_had_mse4,tqv_had_mse4,4.13,4.13,4.13,512,8,,7796,2144,110
+# Calibration windows — Qwen3-8B
+sinks,qwen3-8b,8,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,32,10.46,,
+sinks,qwen3-8b,8,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,64,10.68,,
+sinks,qwen3-8b,8,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,128,10.52,,
+sinks,qwen3-8b,8,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,256,10.48,,
+sinks,qwen3-8b,8,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,512,8,32,10.57,,
+sinks,qwen3-8b,8,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,512,8,128,10.54,,
+sinks,qwen3-8b,8,tqk_5hi_3lo_had,q4_0,3.88,4.50,4.19,512,8,256,10.51,,
+# Calibration windows — Qwen2.5-7B (2 heads)
+sinks,qwen2.5-7b,2,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,32,142,,
+sinks,qwen2.5-7b,2,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,128,119,,
+sinks,qwen2.5-7b,2,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,512,8,256,107,,
+# Long context — Mistral 7B at 16K
+longctx,mistral-7b,32,f16,f16,16.00,16.00,16.00,16384,1,0,3.594,,
+longctx,mistral-7b,32,q8_0,q8_0,8.00,8.00,8.00,16384,1,0,3.593,,
+longctx,mistral-7b,32,q4_0,q4_0,4.50,4.50,4.50,16384,1,0,3.628,,
+longctx,mistral-7b,32,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,16384,1,0,3.658,,
+longctx,mistral-7b,32,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,16384,1,64,3.659,,
+longctx,mistral-7b,32,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,16384,1,128,3.654,,
+longctx,mistral-7b,32,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,4.00,16384,1,256,3.656,,
