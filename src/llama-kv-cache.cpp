@@ -632,9 +632,8 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    // Move TQ buffer from sink_bufs into ctxs_bufs so it outlives calibration.
+    // Free calibration fp16 buffer — K and V are now in TQ tensors
     if (tq_calib_buf_idx_ >= 0 && !sink_bufs.empty()) {
-        ctxs_bufs.push_back(std::move(sink_bufs[0]));
         sink_bufs.erase(sink_bufs.begin());
         tq_calib_buf_idx_ = -1;
     }
