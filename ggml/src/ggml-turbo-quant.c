@@ -327,30 +327,35 @@ static float tq_gaussian(void) {
 #define QJL_SEED_128  0x514A4C80ULL
 
 // Pre-computed QJL matrix (generated once, reused everywhere)
-static float tq_qjl_mat_32[TQ_DIM_HI * TQ_DIM_HI];  // 32×32 = 4KB
+static float tq_qjl_mat_32[TQ_DIM_HI * TQ_DIM_HI];    // 32×32 = 4KB
+static float * tq_qjl_mat_128 = NULL;                   // 128×128 = 64KB (heap allocated)
 static int   tq_qjl_mat_initialized = 0;
 
-static void tq_init_qjl_matrices(void) {
-    if (tq_qjl_mat_initialized) return;
-    // Forward declaration — tq_get_qjl_matrix is defined later
-    // Use inline generation instead
-    uint64_t st = QJL_SEED_32;
-    for (int i = 0; i < TQ_DIM_HI; i++) {
-        for (int j = 0; j < TQ_DIM_HI; j++) {
+static void tq_gen_qjl_matrix(float * out, int dim, uint64_t seed) {
+    uint64_t st = seed;
+    for (int i = 0; i < dim; i++) {
+        for (int j = 0; j < dim; j++) {
             st = st * 6364136223846793005ULL + 1442695040888963407ULL;
             float u1 = ((float)(uint32_t)(st >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
             st = st * 6364136223846793005ULL + 1442695040888963407ULL;
             float u2 = ((float)(uint32_t)(st >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
-            tq_qjl_mat_32[i * TQ_DIM_HI + j] = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+            out[i * dim + j] = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
         }
     }
+}
+
+static void tq_init_qjl_matrices(void) {
+    if (tq_qjl_mat_initialized) return;
+    tq_gen_qjl_matrix(tq_qjl_mat_32, TQ_DIM_HI, QJL_SEED_32);
+    tq_qjl_mat_128 = (float *)malloc(TQ_DIM * TQ_DIM * sizeof(float));
+    tq_gen_qjl_matrix(tq_qjl_mat_128, TQ_DIM, QJL_SEED_128);
     tq_qjl_mat_initialized = 1;
 }
 
 static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed) {
     (void)seed;
     tq_init_qjl_matrices();
-    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : NULL;
+    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : (m == TQ_DIM) ? tq_qjl_mat_128 : NULL;
 
     float rnorm_sq = 0.0f;
     for (int j = 0; j < m; j++) rnorm_sq += r[j] * r[j];
@@ -376,7 +381,7 @@ static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed)
 static void qjl_inverse(const uint8_t * signs, float rnorm, float * corr, int m, uint64_t seed) {
     (void)seed;
     tq_init_qjl_matrices();
-    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : NULL;
+    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : (m == TQ_DIM) ? tq_qjl_mat_128 : NULL;
 
     memset(corr, 0, m * sizeof(float));
     if (S) {
@@ -1001,7 +1006,7 @@ static float qjl_asymmetric_dot(const float * q_rot, int m, uint64_t seed,
     (void)seed;
 
     tq_init_qjl_matrices();
-    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : NULL;
+    const float * S = (m == TQ_DIM_HI) ? tq_qjl_mat_32 : (m == TQ_DIM) ? tq_qjl_mat_128 : NULL;
 
     float sum = 0.0f;
     if (S) {
