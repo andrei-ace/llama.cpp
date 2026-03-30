@@ -399,7 +399,7 @@ static void qjl_inverse(const uint8_t * signs, float rnorm, float * corr, int m,
 // Called from each TQ quantize function after writing TQ data.
 // k_sink is small: [n_embd_k_gqa, n_sinks] — only n_sinks rows, NOT kv_size.
 // Only writes for positions < n_sinks; skips everything else.
-static void tq_sink_write_fp16(const float * x, const void * tq_dst, int64_t k, int64_t tq_block_bytes) {
+void tq_sink_write_fp16(const float * x, const void * tq_dst, int64_t k, int64_t tq_block_bytes) {
     (void)tq_block_bytes;
     if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return;
     const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
@@ -454,9 +454,21 @@ static int tq_try_sink_dot(const void * tq_ptr, const float * q, int64_t k, floa
 
     if (cell < 0 || cell >= tq_sink_n_global) return 0;
 
-    // Read fp16 from k_sink (n_sinks rows per stream)
+    // Read fp16 from k_sink (n_sinks rows per stream), offset by head
+    int64_t head_off = within % k_stride;
+    int64_t head_idx = head_off / (int64_t)ggml_type_size(tq_cur_is_k ? GGML_TYPE_TQK_HAD_MSE4 : GGML_TYPE_F16);
+    // Actually: we don't know which TQ type. Use k as HEAD_DIM to compute head index.
+    // head_off / (k_stride / n_heads) = head_off * n_heads / k_stride
+    // Simpler: fp16 offset = head_off * (k * sizeof(fp16)) / block_size
+    // But we don't have block_size here. Use: head offset in fp16 = (head_off / tq_block_size) * k * sizeof(fp16)
+    // We don't know tq_block_size. Compute from k_stride and k: n_heads = k_stride / block_size, block_size = k_stride / n_heads.
+    // n_heads = fp16_stride / (k * sizeof(fp16)).
+    int64_t n_heads = fp16_stride / (k * (int64_t)sizeof(ggml_half));
+    int64_t tq_block_size = (n_heads > 0) ? k_stride / n_heads : k_stride;
+    int64_t head = (tq_block_size > 0) ? head_off / tq_block_size : 0;
+
     int64_t fp16_row = stream_idx * tq_sink_n_global + cell;
-    const ggml_half * src = (const ggml_half *)(fp16_base + fp16_row * fp16_stride);
+    const ggml_half * src = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head * k * (int64_t)sizeof(ggml_half));
     float dot = 0.0f;
     for (int64_t j = 0; j < k; j++) {
         dot += GGML_FP16_TO_FP32(src[j]) * q[j];
@@ -485,9 +497,14 @@ static int tq_try_sink_dequant(const void * tq_ptr, float * out, int64_t k) {
 
     if (cell < 0 || cell >= tq_sink_n_global) return 0;
 
-    // Read fp16 from k_sink (n_sinks rows per stream)
+    // Read fp16 from k_sink (n_sinks rows per stream), offset by head
+    int64_t head_off = within % k_stride;
+    int64_t n_heads = fp16_stride / (k * (int64_t)sizeof(ggml_half));
+    int64_t tq_block_size = (n_heads > 0) ? k_stride / n_heads : k_stride;
+    int64_t head = (tq_block_size > 0) ? head_off / tq_block_size : 0;
+
     int64_t fp16_row = stream_idx * tq_sink_n_global + cell;
-    const ggml_half * src = (const ggml_half *)(fp16_base + fp16_row * fp16_stride);
+    const ggml_half * src = (const ggml_half *)(fp16_base + fp16_row * fp16_stride + head * k * (int64_t)sizeof(ggml_half));
     for (int64_t j = 0; j < k; j++) {
         out[j] = GGML_FP16_TO_FP32(src[j]);
     }
