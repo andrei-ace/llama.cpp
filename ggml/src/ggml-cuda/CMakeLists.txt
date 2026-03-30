@@ -123,6 +123,10 @@ if (CUDAToolkit_FOUND)
             template-instances/fattn-vec-instance-bf16-bf16.cu)
     endif()
 
+    # TurboQuant FA vec instances — always built (D=128 only, 12 instances)
+    file(GLOB SRCS "template-instances/fattn-vec-instance-tq*.cu")
+    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}

@@ -29,6 +29,12 @@ extern "C" {
 }
 #endif
 
+#ifdef GGML_USE_CUDA
+extern "C" {
+    void ggml_cuda_set_tq_channel_map(const int32_t * data, int n_layers, int n_kv_heads);
+}
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -572,6 +578,18 @@ void llama_kv_cache::tq_finish_calibration() {
                     LLAMA_LOG_INFO("%s: uploaded channel maps to Metal (%d layers, %d heads)\n",
                                    __func__, n_layers_actual, n_kv_heads);
                 }
+            }
+        }
+#endif
+
+#ifdef GGML_USE_CUDA
+        if (!layers.empty() && layers[0].k && layers[0].k->buffer) {
+            ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(layers[0].k->buffer);
+            ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+            if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+                ggml_cuda_set_tq_channel_map(chmap.data(), n_layers_actual, n_kv_heads);
+                LLAMA_LOG_INFO("%s: uploaded channel maps to CUDA (%d layers, %d heads)\n",
+                               __func__, n_layers_actual, n_kv_heads);
             }
         }
 #endif

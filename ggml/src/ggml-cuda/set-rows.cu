@@ -1,5 +1,6 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
+#include "tq-set-rows.cuh"
 
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
@@ -309,6 +310,49 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
+    } else if (dst->type == GGML_TYPE_TQK_HAD_MSE4) {
+        set_rows_cuda_quant<idx_t, block_tqk_had_mse4, TQK_BLOCK_SIZE, quantize_f32_tqk_had_mse4_block>(
+            src0_d, src1_d, (block_tqk_had_mse4*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TQV_HAD_MSE4) {
+        set_rows_cuda_quant<idx_t, block_tqv_had_mse4, TQK_BLOCK_SIZE, quantize_f32_tqv_had_mse4_block>(
+            src0_d, src1_d, (block_tqv_had_mse4*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TQK_HAD_PROD5) {
+        set_rows_cuda_quant<idx_t, block_tqk_had_prod5, TQK_BLOCK_SIZE, quantize_f32_tqk_had_prod5_block>(
+            src0_d, src1_d, (block_tqk_had_prod5*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TQK_HAD_PROD4) {
+        set_rows_cuda_quant<idx_t, block_tqk_had_prod4, TQK_BLOCK_SIZE, quantize_f32_tqk_had_prod4_block>(
+            src0_d, src1_d, (block_tqk_had_prod4*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TQK_5HI_3LO_HAD) {
+        // Custom path — needs channel map
+        ggml_cuda_op_set_rows_tq_5hi_3lo_had(ctx, dst);
     } else {
         GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
     }

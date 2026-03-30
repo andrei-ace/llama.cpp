@@ -3,6 +3,7 @@
 #include "common.cuh"
 #include "convert.cuh"
 #include "vecdotq.cuh"
+#include "tq-common.cuh"
 
 #include <cstdint>
 
@@ -577,6 +578,166 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+// ---------------------------------------------------------------------------
+// TurboQuant vec_dot_KQ functions for Flash Attention
+// Q is pre-rotated with FWHT and stored as fp32 in Q_v.
+// K is in Hadamard domain: centroid_lookup * norm. No inverse FWHT needed.
+// ---------------------------------------------------------------------------
+
+// TQK had_mse4: dot product with 4-bit centroid lookup + norm
+// Q_v stores FWHT-rotated Q as float2 with the same interleaved layout as f16 Q loading.
+// We use the same loop pattern as vec_dot_fattn_vec_KQ_f16 to match the Q_reg indexing.
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_mse4(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const block_tqk_had_mse4 * blk = (const block_tqk_had_mse4 *) K_c;
+    float norm = __half2float(blk->norm);
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+        const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+            const int j0 = j_base + k_KQ_1 * 2;
+            float kv0 = norm * tq_c16_d128[tq_up4(blk->qs, j0)];
+            float kv1 = norm * tq_c16_d128[tq_up4(blk->qs, j0 + 1)];
+            float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+            sum += kv0 * qv.x + kv1 * qv.y;
+        }
+    }
+    return sum;
+}
+
+// TQK had_prod5: 4-bit MSE + QJL correction
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_prod5(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const block_tqk_had_prod5 * blk = (const block_tqk_had_prod5 *) K_c;
+    float norm  = __half2float(blk->norm);
+    float rnorm = __half2float(blk->rnorm);
+    float qjl_scale = QJL_SCALE_128 * rnorm;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+        const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+            const int j0 = j_base + k_KQ_1 * 2;
+            float kv0 = norm * tq_c16_d128[tq_up4(blk->qs, j0)]     + qjl_scale * tq_sign_bit(blk->signs, j0);
+            float kv1 = norm * tq_c16_d128[tq_up4(blk->qs, j0 + 1)] + qjl_scale * tq_sign_bit(blk->signs, j0 + 1);
+            float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+            sum += kv0 * qv.x + kv1 * qv.y;
+        }
+    }
+    return sum;
+}
+
+// TQK had_prod4: 3-bit MSE + QJL correction
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_prod4(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const block_tqk_had_prod4 * blk = (const block_tqk_had_prod4 *) K_c;
+    float norm  = __half2float(blk->norm);
+    float rnorm = __half2float(blk->rnorm);
+    float qjl_scale = QJL_SCALE_128 * rnorm;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+        const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+            const int j0 = j_base + k_KQ_1 * 2;
+            float kv0 = norm * tq_c8_d128[tq_up3(blk->qs, j0)]     + qjl_scale * tq_sign_bit(blk->signs, j0);
+            float kv1 = norm * tq_c8_d128[tq_up3(blk->qs, j0 + 1)] + qjl_scale * tq_sign_bit(blk->signs, j0 + 1);
+            float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+            sum += kv0 * qv.x + kv1 * qv.y;
+        }
+    }
+    return sum;
+}
+
+// TQK 5hi_3lo_had: split 32/96, dual norm + QJL on hi
+// The block stores: hi[0..31] (4-bit+QJL) then lo[0..95] (3-bit)
+// Q has been FWHT-rotated with full H_128, but 5hi_3lo uses sub-block FWHTs.
+// TODO: For exact correctness, Q needs channel-map permutation + sub-FWHTs.
+// For now, treats the concatenated [hi, lo] as a 128-dim Hadamard-domain vector.
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_5hi_3lo_had(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const block_tqk_5hi_3lo * blk = (const block_tqk_5hi_3lo *) K_c;
+    float norm_hi  = __half2float(blk->norm_hi);
+    float norm_lo  = __half2float(blk->norm_lo);
+    float rnorm_hi = __half2float(blk->rnorm_hi);
+    float qjl_scale_hi = QJL_SCALE_32 * rnorm_hi;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+        const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+            const int j0 = j_base + k_KQ_1 * 2;
+            float kv0, kv1;
+            if (j0 < 32) {
+                kv0 = norm_hi * tq_c16_d32[tq_up4(blk->qs_hi, j0)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0);
+            } else {
+                kv0 = norm_lo * tq_c8_d32[tq_up3(blk->qs_lo, j0 - 32)];
+            }
+            if (j0 + 1 < 32) {
+                kv1 = norm_hi * tq_c16_d32[tq_up4(blk->qs_hi, j0 + 1)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0 + 1);
+            } else if (j0 + 1 == 32) {
+                kv1 = norm_lo * tq_c8_d32[tq_up3(blk->qs_lo, 0)];
+            } else {
+                kv1 = norm_lo * tq_c8_d32[tq_up3(blk->qs_lo, j0 + 1 - 32)];
+            }
+            float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+            sum += kv0 * qv.x + kv1 * qv.y;
+        }
+    }
+    return sum;
+}
+
+// TQV had_mse4 dequantize for V accumulation in FA vec kernel
+// V is stored in Hadamard domain: centroid * norm
+// i0 = element index within the row (starting from beginning of row, not block)
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_tqv_had_mse4(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_tqv_had_mse4 * x = (const block_tqv_had_mse4 *) vx;
+
+    const int64_t ib = i0 / TQK_BLOCK_SIZE; // block index
+    const int     il = i0 % TQK_BLOCK_SIZE;  // element within block
+
+    const float norm = __half2float(x[ib].norm);
+    T * result = (T *)dst;
+
+#pragma unroll
+    for (int i = 0; i < ne; i++) {
+        const int j = il + i;
+        float v = (j < TQK_BLOCK_SIZE) ? norm * tq_c16_d128[tq_up4(x[ib].qs, j)] : 0.0f;
+        result[i] = (T)v;
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -593,6 +754,14 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_HAD_MSE4) {
+        return vec_dot_fattn_vec_KQ_tqk_had_mse4<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_HAD_PROD5) {
+        return vec_dot_fattn_vec_KQ_tqk_had_prod5<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_HAD_PROD4) {
+        return vec_dot_fattn_vec_KQ_tqk_had_prod4<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_5HI_3LO_HAD) {
+        return vec_dot_fattn_vec_KQ_tqk_5hi_3lo_had<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -615,6 +784,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q8_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TQV_HAD_MSE4) {
+        return dequantize_V_tqv_had_mse4<T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;
