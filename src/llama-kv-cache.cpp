@@ -529,7 +529,8 @@ void llama_kv_cache::tq_try_finish_calibration() {
         std::vector<ggml_fp16_t> fp16_buf(n_embd);
         std::vector<float> f32_buf(n_embd);
 
-        for (uint32_t cell = 0; cell < occupied; cell++) {
+        const uint32_t calib_cells = std::min(occupied, (uint32_t)TQ_MIN_CALIB_VECTORS);
+        for (uint32_t cell = 0; cell < calib_cells; cell++) {
             if (v_cells[0].is_empty(cell)) continue;
             ggml_backend_tensor_get(k, fp16_buf.data(), cell * fp16_row_sz, n_embd * sizeof(ggml_fp16_t));
             ggml_fp16_to_fp32_row(fp16_buf.data(), f32_buf.data(), n_embd);
