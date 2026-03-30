@@ -144,10 +144,9 @@ llama_kv_cache::llama_kv_cache(
             ggml_backend_dev_type(model.dev_layer(0)) == GGML_BACKEND_DEVICE_TYPE_GPU;
 
         if (uses_turbo_k) {
-            // Start fp16 for calibration. On GPU, also pre-allocate TQ buffers
-            // to avoid Metal allocation deadlock when calibration completes.
+            // Only K starts as fp16 for calibration. V is allocated directly as target type.
             alloc_type_k = GGML_TYPE_F16;
-            alloc_type_v = GGML_TYPE_F16;
+            // V stays at target type — no calibration needed for V
             tq_calibrating_ = true;
             tq_reset_calibration();
             LLAMA_LOG_INFO("%s: TurboQuant calibration enabled — K+V start as fp16\n", __func__);
@@ -158,6 +157,8 @@ llama_kv_cache::llama_kv_cache(
 
     // Separate context for TQ pre-allocated tensors so fp16 buffer can be freed after calibration
     ggml_context * tq_ctx = nullptr;
+    // Separate context for calibration K tensors (fp16) — allows freeing independently of V
+    ggml_context * tq_calib_k_ctx = nullptr;
     if (tq_calibrating_) {
         ggml_init_params tq_params = {
             /*.mem_size   =*/ size_t(2u * (1 + n_stream) * n_layer_kv * ggml_tensor_overhead()),
@@ -166,6 +167,15 @@ llama_kv_cache::llama_kv_cache(
         };
         tq_ctx = ggml_init(tq_params);
         GGML_ASSERT(tq_ctx);
+
+        // Calibration K context — same overhead estimate
+        ggml_init_params calib_k_params = {
+            /*.mem_size   =*/ size_t((1 + n_stream) * n_layer_kv * ggml_tensor_overhead()),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        tq_calib_k_ctx = ggml_init(calib_k_params);
+        GGML_ASSERT(tq_calib_k_ctx);
     }
 
     for (uint32_t il = 0; il < hparams.n_layer; il++) {
@@ -204,7 +214,11 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, alloc_type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+        // Calibration K tensors go in a separate context (tq_calib_k_ctx) so the fp16
+        // buffer can be freed independently of V after calibration completes.
+        ggml_context * k_alloc_ctx = (tq_calibrating_ && alloc_type_k != type_k && tq_calib_k_ctx)
+                                     ? tq_calib_k_ctx : ctx;
+        ggml_tensor * k = has_k ? ggml_new_tensor_3d(k_alloc_ctx, alloc_type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, alloc_type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
         has_k && ggml_format_name(k, "cache_k_l%d", il);
@@ -226,7 +240,7 @@ llama_kv_cache::llama_kv_cache(
         std::vector<ggml_tensor *> v_stream;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
-            k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
+            k_stream.push_back(has_k ? ggml_view_2d(k_alloc_ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
             v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
         }
 
@@ -257,6 +271,21 @@ llama_kv_cache::llama_kv_cache(
 
             LLAMA_LOG_DEBUG("%s: - layer %3d: reuse layer %d, is_swa = %d\n", __func__, il, il_reuse, hparams.is_swa(il));
         }
+    }
+
+    // Allocate calibration K(fp16) buffer FIRST (views in main context reference it)
+    if (tq_calib_k_ctx) {
+        ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
+        if (offload && model.dev_layer(0)) {
+            buft = ggml_backend_dev_buffer_type(model.dev_layer(0));
+        }
+        ggml_backend_buffer_t calib_k_buf = ggml_backend_alloc_ctx_tensors_from_buft(tq_calib_k_ctx, buft);
+        if (!calib_k_buf) {
+            throw std::runtime_error("failed to allocate buffer for calibration K tensors");
+        }
+        ggml_backend_buffer_clear(calib_k_buf, 0);
+        LLAMA_LOG_INFO("%s: %10s calib K buffer  = %8.2f MiB\n", __func__, ggml_backend_buffer_name(calib_k_buf), ggml_backend_buffer_get_size(calib_k_buf)/1024.0/1024.0);
+        sink_bufs.emplace_back(ggml_context_ptr(tq_calib_k_ctx), calib_k_buf);
     }
 
     // allocate tensors and initialize the buffers to avoid NaNs in the padding
@@ -297,6 +326,7 @@ llama_kv_cache::llama_kv_cache(
         tq_calib_buf_idx_ = 0; // signals that TQ buffer exists in sink_bufs[0]
         sink_bufs.emplace_back(ggml_context_ptr(tq_ctx), tq_buf);
     }
+
 
     {
         const size_t memory_size_k = size_k_bytes();
@@ -653,16 +683,21 @@ void llama_kv_cache::tq_finish_calibration() {
         layers[ikv].v_tq = nullptr;
     }
 
-    // TQ tensor data lives in sink_bufs[0] — move to ctxs_bufs to keep alive.
-    if (tq_calib_buf_idx_ >= 0 && !sink_bufs.empty()) {
-        ctxs_bufs.push_back(std::move(sink_bufs[0]));
-        sink_bufs.erase(sink_bufs.begin());
-        tq_calib_buf_idx_ = -1;
+    // sink_bufs layout: [0]=calib K(fp16), [1]=TQ buffer
+    // Move TQ buffer (index 1) to ctxs_bufs to keep alive
+    if (sink_bufs.size() >= 2) {
+        ctxs_bufs.push_back(std::move(sink_bufs[1]));
+        sink_bufs.erase(sink_bufs.begin() + 1);
     }
     // Keep the view context alive (owns the stream view tensors)
     ctxs_bufs.emplace_back(ggml_context_ptr(tq_view_ctx), nullptr);
-    // Defer fp16 buffer freeing — only possible when ALL tensors moved out of it (K+V both swapped)
-    tq_fp16_buf_pending_free_ = true;
+    // Free calibration K(fp16) buffer — separate from V, always safe to free
+    if (!sink_bufs.empty()) {
+        LLAMA_LOG_INFO("%s: freeing calibration K(fp16) buffer (%.2f MiB)\n",
+                       __func__, ggml_backend_buffer_get_size(sink_bufs[0].second.get())/1024.0/1024.0);
+        sink_bufs.clear();
+    }
+    tq_calib_buf_idx_ = -1;
 
     tq_calibrating_ = false;
 
@@ -754,8 +789,6 @@ void llama_kv_cache::tq_expire_sinks() {
 }
 
 void llama_kv_cache::clear(bool data) {
-    tq_try_free_fp16_buf();
-
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
         v_heads[s] = 0;
@@ -1445,37 +1478,7 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
     return res;
 }
 
-void llama_kv_cache::tq_try_free_fp16_buf() {
-    if (!tq_fp16_buf_pending_free_) return;
-    tq_fp16_buf_pending_free_ = false;
-    for (auto it = ctxs_bufs.begin(); it != ctxs_bufs.end(); ++it) {
-        ggml_backend_buffer_t buf = it->second.get();
-        if (!buf) continue;
-        bool in_use = false;
-        for (const auto & l : layers) {
-            if ((l.k && l.k->buffer == buf) || (l.v && l.v->buffer == buf)) {
-                in_use = true;
-                break;
-            }
-        }
-        if (!in_use) {
-            LLAMA_LOG_INFO("%s: freeing fp16 calibration buffer (%.2f MiB)\n",
-                           __func__, ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
-            ggml_context * ctx = it->first.get();
-            if (ctx) {
-                for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
-                    t->buffer = NULL;
-                    t->data   = NULL;
-                }
-            }
-            ctxs_bufs.erase(it);
-            break;
-        }
-    }
-}
-
 void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch) {
-    tq_try_free_fp16_buf();
 
     // keep track of the max sequence position that we would overwrite with this ubatch
     // for non-SWA cache, this would be always empty
