@@ -393,6 +393,62 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_I32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_i32,
     },
+    [GGML_TYPE_TQK_5HI_3LO_HAD] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_had_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_5hi_3lo_had_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_MSE4] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_mse4_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_mse4_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_PROD5] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_prod5_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_prod5_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_PROD4] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_prod4_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_prod4_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQV_HAD_MSE4] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqv_had_mse4_ref,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_MSE4_D256] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_mse4_d256_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_mse4_d256_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_PROD5_D256] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_prod5_d256_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_prod5_d256_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_PROD4_D256] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_prod4_d256_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_prod4_d256_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_5HI_3LO_HAD_D256] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_had_d256_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_5hi_3lo_had_d256_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQV_HAD_MSE4_D256] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqv_had_mse4_d256_ref,
+        .nrows                    = 1,
+    },
 };
 
 const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type) {

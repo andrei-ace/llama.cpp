@@ -7,6 +7,7 @@
 #include "ggml.h"
 #include "unary-ops.h"
 #include "vec.h"
+#include "quants.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -4662,6 +4663,16 @@ static void ggml_compute_forward_get_rows_q(
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
+    // TurboQuant: set per-layer context for dequantize
+    {
+        const struct ggml_tensor * root = src0;
+        while (root->view_src) root = root->view_src;
+        int layer = -1; int is_k = 1;
+        if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
+        else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
+        if (layer >= 0) { tq_set_current_layer(layer, is_k); }
+    }
+
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int64_t nc = ne00;
@@ -4913,6 +4924,15 @@ static void ggml_compute_forward_set_rows_f32(
     assert(src0->type == GGML_TYPE_F32);
     assert(ne02 % ne11 == 0);
     assert(ne03 % ne12 == 0);
+
+    // TurboQuant: detect layer from cache tensor name for quantize context
+    {
+        const struct ggml_tensor * root = dst->view_src ? dst->view_src : dst;
+        int layer = -1; int is_k = 1;
+        if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
+        else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
+        if (layer >= 0) { tq_set_current_layer(layer, is_k); }
+    }
 
     const int ith = params->ith;
     const int nth = params->nth;
@@ -8172,6 +8192,20 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
+    // TurboQuant: parse layer indices from K/V cache tensor names
+    int tq_k_layer = -1, tq_v_layer = -1;
+    {
+        const struct ggml_tensor * k_root = k;
+        while (k_root->view_src) k_root = k_root->view_src;
+        sscanf(k_root->name, "cache_k_l%d", &tq_k_layer);
+
+        const struct ggml_tensor * v_root = v;
+        while (v_root->view_src) v_root = v_root->view_src;
+        sscanf(v_root->name, "cache_v_l%d", &tq_v_layer);
+
+        if (tq_k_layer >= 0) { tq_set_current_layer(tq_k_layer, 1); }
+    }
+
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
     GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
     GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
@@ -8291,6 +8325,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             float s; // KQ value
 
             const char * k_data = (const char *) k->data + ( ic*nbk1 + ik2*nbk2 + ik3*nbk3);
+            if (tq_k_layer >= 0) { tq_set_current_head(ik2); }
             kq_vec_dot(DK, &s, 0, k_data, 0, Q_q, 0, 1);
 
             s = s*scale; // scale KQ value
@@ -8338,7 +8373,9 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
                 // V += v*expf(s - M)
                 if (v_to_float) {
+                    if (tq_v_layer >= 0) { tq_set_current_layer(tq_v_layer, 0); tq_set_current_head(iv2); }
                     v_to_float(v_data, V32, DV);
+                    if (tq_k_layer >= 0) { tq_set_current_layer(tq_k_layer, 1); }
                     ggml_vec_mad_f32(DV, VKQ32, V32, vs);
                 } else {
                     // V is F32

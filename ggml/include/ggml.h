@@ -427,8 +427,20 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_4_8 = 37,
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
-        GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
-        GGML_TYPE_COUNT   = 41,
+        GGML_TYPE_NVFP4     = 40, // NVFP4 (4 blocks, E4M3 scale)
+        // 41-49: reserved
+        // TurboQuant types (50+)
+        GGML_TYPE_TQK_5HI_3LO_HAD      = 50, // TQK 3.88 bpv: 32/96 split, FWHT rotation, 4b+QJL hi / 3b lo
+        GGML_TYPE_TQK_HAD_MSE4         = 51, // TQK 4.13 bpv: H_128 Hadamard, 4-bit MSE, no split
+        GGML_TYPE_TQK_HAD_PROD5        = 52, // TQK 5.25 bpv: H_128 Hadamard, 4-bit MSE + 1-bit QJL (unbiased)
+        GGML_TYPE_TQK_HAD_PROD4        = 53, // TQK 4.25 bpv: H_128 Hadamard, 3-bit MSE + 1-bit QJL (unbiased)
+        GGML_TYPE_TQV_HAD_MSE4         = 54, // TQV 4.13 bpv: 4-bit MSE, per-block norm (no rotation needed for dequant)
+        GGML_TYPE_TQK_HAD_MSE4_D256    = 55, // TQK 4.06 bpv: H_256 Hadamard, 4-bit MSE, d=256
+        GGML_TYPE_TQK_HAD_PROD5_D256   = 56, // TQK 5.13 bpv: H_256 Hadamard, 4-bit MSE + 1-bit QJL, d=256
+        GGML_TYPE_TQK_HAD_PROD4_D256   = 57, // TQK 4.13 bpv: H_256 Hadamard, 3-bit MSE + 1-bit QJL, d=256
+        GGML_TYPE_TQK_5HI_3LO_HAD_D256 = 58, // TQK 3.69 bpv: 64/192 split, FWHT rotation, d=256
+        GGML_TYPE_TQV_HAD_MSE4_D256    = 59, // TQV 4.06 bpv: 4-bit MSE, per-block norm, d=256
+        GGML_TYPE_COUNT     = 60,
     };
 
     // precision
@@ -2346,6 +2358,11 @@ extern "C" {
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
+
+    // add per-KV-head channel permutation for TQ split types (5hi_3lo)
+    GGML_API void ggml_flash_attn_ext_add_chmap(
+            struct ggml_tensor * a,
+            struct ggml_tensor * chmap);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(

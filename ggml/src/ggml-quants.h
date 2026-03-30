@@ -34,6 +34,19 @@ GGML_API void quantize_row_q8_K_ref(const float * GGML_RESTRICT x, block_q8_K * 
 GGML_API void quantize_row_tq1_0_ref(const float * GGML_RESTRICT x, block_tq1_0 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_tq2_0_ref(const float * GGML_RESTRICT x, block_tq2_0 * GGML_RESTRICT y, int64_t k);
 
+// TurboQuant quantize
+GGML_API void quantize_row_tqk_5hi_3lo_had_ref(const float * GGML_RESTRICT x, block_tqk_5hi_3lo   * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_had_mse4_ref   (const float * GGML_RESTRICT x, block_tqk_had_mse4  * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_had_prod5_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod5 * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_had_prod4_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod4 * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqv_had_mse4_ref   (const float * GGML_RESTRICT x, block_tqv_had_mse4  * GGML_RESTRICT y, int64_t k);
+// TurboQuant d=256 quantize
+GGML_API void quantize_row_tqk_had_mse4_d256_ref   (const float * GGML_RESTRICT x, block_tqk_had_mse4_d256  * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_had_prod5_d256_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod5_d256 * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_had_prod4_d256_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod4_d256 * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_5hi_3lo_had_d256_ref(const float * GGML_RESTRICT x, block_tqk_5hi_3lo_d256   * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqv_had_mse4_d256_ref   (const float * GGML_RESTRICT x, block_tqv_had_mse4_d256  * GGML_RESTRICT y, int64_t k);
+
 GGML_API void quantize_row_iq3_xxs_ref(const float * GGML_RESTRICT x, block_iq3_xxs * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_iq4_nl_ref (const float * GGML_RESTRICT x, block_iq4_nl  * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_iq4_xs_ref (const float * GGML_RESTRICT x, block_iq4_xs  * GGML_RESTRICT y, int64_t k);
@@ -60,6 +73,19 @@ GGML_API void dequantize_row_q8_K(const block_q8_K * GGML_RESTRICT x, float * GG
 
 GGML_API void dequantize_row_tq1_0(const block_tq1_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_tq2_0(const block_tq2_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+
+// TurboQuant dequantize
+GGML_API void dequantize_row_tqk_5hi_3lo_had(const block_tqk_5hi_3lo  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_had_mse4   (const block_tqk_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_had_prod5  (const block_tqk_had_prod5 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_had_prod4  (const block_tqk_had_prod4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqv_had_mse4   (const block_tqv_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+// TurboQuant d=256 dequantize
+GGML_API void dequantize_row_tqk_had_mse4_d256   (const block_tqk_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_had_prod5_d256  (const block_tqk_had_prod5_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_had_prod4_d256  (const block_tqk_had_prod4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_5hi_3lo_had_d256(const block_tqk_5hi_3lo_d256   * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqv_had_mse4_d256   (const block_tqv_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 
 GGML_API void dequantize_row_iq2_xxs(const block_iq2_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_iq2_xs (const block_iq2_xs  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
