@@ -280,69 +280,6 @@ static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 
 #define TQK_BLOCK_SIZE  128
 #define TQK_N_OUTLIER    32
 #define TQK_N_REGULAR    96
-#define TQV_BLOCK_SIZE  128
-#define TQV_N_OUTLIER    32
-#define TQV_N_REGULAR    96
-
-// TQK 2.5 bpv (K cache with QJL)
-//   outlier: 2-bit MSE (4 centroids, d=32) + 1-bit QJL
-//   regular: 1-bit MSE (2 centroids, d=96) + 1-bit QJL
-#define QR_TQK_25     1
-typedef struct {
-    ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
-    ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
-    ggml_half rnorm_hi;                                // 2 bytes: outlier QJL residual norm
-    ggml_half rnorm_lo;                                // 2 bytes: regular QJL residual norm
-    uint8_t   qs_hi[TQK_N_OUTLIER * 2 / 8];       // 8 bytes: 2-bit MSE indices (32 outlier channels)
-    uint8_t   qs_lo[TQK_N_REGULAR / 8];           // 12 bytes: 1-bit MSE indices (96 regular channels)
-    uint8_t   signs_hi[TQK_N_OUTLIER / 8];        // 4 bytes: 1-bit QJL signs (32-dim)
-    uint8_t   signs_lo[TQK_N_REGULAR / 8];        // 12 bytes: 1-bit QJL signs (96-dim)
-} block_tqk_25;
-static_assert(sizeof(block_tqk_25) == 4*sizeof(ggml_half) + TQK_N_OUTLIER*2/8 + TQK_N_REGULAR/8 + TQK_N_OUTLIER/8 + TQK_N_REGULAR/8, "wrong tqk_25 block size");
-// Total: 44 bytes for 128 elements = 2.75 bpv
-
-// TQK 3.5 bpv (K cache with QJL)
-//   outlier: 3-bit MSE (8 centroids, d=32) + 1-bit QJL
-//   regular: 2-bit MSE (4 centroids, d=96) + 1-bit QJL
-#define QR_TQK_35     1
-typedef struct {
-    ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
-    ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
-    ggml_half rnorm_hi;                                // 2 bytes: outlier QJL residual norm
-    ggml_half rnorm_lo;                                // 2 bytes: regular QJL residual norm
-    uint8_t   qs_hi[TQK_N_OUTLIER * 3 / 8];       // 12 bytes: 3-bit MSE indices (32 outlier channels)
-    uint8_t   qs_lo[TQK_N_REGULAR * 2 / 8];       // 24 bytes: 2-bit MSE indices (96 regular channels)
-    uint8_t   signs_hi[TQK_N_OUTLIER / 8];        // 4 bytes: 1-bit QJL signs (32-dim)
-    uint8_t   signs_lo[TQK_N_REGULAR / 8];        // 12 bytes: 1-bit QJL signs (96-dim)
-} block_tqk_35;
-static_assert(sizeof(block_tqk_35) == 4*sizeof(ggml_half) + TQK_N_OUTLIER*3/8 + TQK_N_REGULAR*2/8 + TQK_N_OUTLIER/8 + TQK_N_REGULAR/8, "wrong tqk_35 block size");
-// Total: 60 bytes for 128 elements = 3.75 bpv
-
-// TQV 2.5 bpv (V cache, MSE only, no QJL)
-//   outlier: 3-bit MSE (8 centroids, d=32)
-//   regular: 2-bit MSE (4 centroids, d=96)
-#define QR_TQV_25     1
-typedef struct {
-    ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
-    ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
-    uint8_t   qs_hi[TQV_N_OUTLIER * 3 / 8];       // 12 bytes: 3-bit MSE indices (32 outlier channels)
-    uint8_t   qs_lo[TQV_N_REGULAR * 2 / 8];       // 24 bytes: 2-bit MSE indices (96 regular channels)
-} block_tqv_25;
-static_assert(sizeof(block_tqv_25) == 2*sizeof(ggml_half) + TQV_N_OUTLIER*3/8 + TQV_N_REGULAR*2/8, "wrong tqv_25 block size");
-// Total: 40 bytes for 128 elements = 2.5 bpv
-
-// TQV 3.5 bpv (V cache, MSE only, no QJL)
-//   outlier: 4-bit MSE (16 centroids, d=32)
-//   regular: 3-bit MSE (8 centroids, d=96)
-#define QR_TQV_35     1
-typedef struct {
-    ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
-    ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
-    uint8_t   qs_hi[TQV_N_OUTLIER * 4 / 8];       // 16 bytes: 4-bit MSE indices (32 outlier channels)
-    uint8_t   qs_lo[TQV_N_REGULAR * 3 / 8];       // 36 bytes: 3-bit MSE indices (96 regular channels)
-} block_tqv_35;
-static_assert(sizeof(block_tqv_35) == 2*sizeof(ggml_half) + TQV_N_OUTLIER*4/8 + TQV_N_REGULAR*3/8, "wrong tqv_35 block size");
-// Total: 56 bytes for 128 elements = 3.5 bpv
 
 // TQK had_mse4: full H_128 Hadamard + 4-bit MSE, no split, no calibration
 // Sink positions are stored in a separate fp16 tensor (k_sink), not in-block.
