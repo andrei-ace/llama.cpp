@@ -51,10 +51,57 @@ constexpr constant static float kvalues_mxfp4_f[16] = {
 };
 
 // ---------------------------------------------------------------------------
-// TurboQuant centroids — exact Lloyd-Max for Beta((d-1)/2, (d-1)/2)
+// TurboQuant building blocks — FWHT, MSE centroids, bit helpers
 // ---------------------------------------------------------------------------
 
-// d=128 centroids (TQV types — V cache, full 128-dim rotation)
+// Fast Walsh-Hadamard Transform — in-place, normalized, self-inverse
+template<int N>
+inline void tq_fwht(thread float * x) {
+    for (int step = 1; step < N; step *= 2) {
+        for (int i = 0; i < N; i += 2 * step) {
+            for (int j = 0; j < step; j++) {
+                float a = x[i + j];
+                float b = x[i + j + step];
+                x[i + j]        = a + b;
+                x[i + j + step] = a - b;
+            }
+        }
+    }
+    float s = 1.0f / sqrt((float)N);
+    for (int i = 0; i < N; i++) x[i] *= s;
+}
+
+// d=128 centroids — 16 (4-bit) and 8 (3-bit)
+constexpr constant static float tq_c16_d128[16] = {
+    -0.2376271868f, -0.1807937296f, -0.1417616544f, -0.1102470655f,
+    -0.0827925668f, -0.0577445357f, -0.0341340283f, -0.0112964982f,
+     0.0112964982f,  0.0341340283f,  0.0577445357f,  0.0827925668f,
+     0.1102470655f,  0.1417616544f,  0.1807937296f,  0.2376271868f,
+};
+constexpr constant static float tq_c8_d128[8] = {
+    -0.1883971860f, -0.1181397670f, -0.0665856080f, -0.0216043106f,
+     0.0216043106f,  0.0665856080f,  0.1181397670f,  0.1883971860f,
+};
+
+// d=32 centroids — 16 (4-bit) and 8 (3-bit)
+constexpr constant static float tq_c16_d32[16] = {
+    -0.4533721997f, -0.3498559145f, -0.2764914062f, -0.2161194569f,
+    -0.1628573862f, -0.1138475776f, -0.0673934339f, -0.0223187462f,
+     0.0223187462f,  0.0673934339f,  0.1138475776f,  0.1628573862f,
+     0.2161194569f,  0.2764914062f,  0.3498559145f,  0.4533721997f,
+};
+constexpr constant static float tq_c8_d32[8] = {
+    -0.3662682422f, -0.2324605670f, -0.1317560968f, -0.0428515156f,
+     0.0428515156f,  0.1317560968f,  0.2324605670f,  0.3662682422f,
+};
+
+// d=96 centroids — 8 (3-bit)
+constexpr constant static float tq_c8_d96[8] = {
+    -0.2168529349f, -0.1361685800f, -0.0767954958f, -0.0249236898f,
+     0.0249236898f,  0.0767954958f,  0.1361685800f,  0.2168529349f,
+};
+
+// Backward-compat aliases — used by existing 2.5/3.5 bpv block formats
 constexpr constant static float tq_c16[16] = {
     -0.2376271868f, -0.1807937296f, -0.1417616544f, -0.1102470655f,
     -0.0827925668f, -0.0577445357f, -0.0341340283f, -0.0112964982f,
@@ -71,17 +118,9 @@ constexpr constant static float tq_c4[4] = {
 constexpr constant static float tq_c2[2] = {
     -0.0706615727f, 0.0706615727f,
 };
-
-// d=32 centroids (TQK types — K cache outlier subset)
-constexpr constant static float tq_c8_d32[8] = {
-    -0.3662682422f, -0.2324605670f, -0.1317560968f, -0.0428515156f,
-     0.0428515156f,  0.1317560968f,  0.2324605670f,  0.3662682422f,
-};
 constexpr constant static float tq_c4_d32[4] = {
     -0.2633194113f, -0.0798019295f, 0.0798019295f, 0.2633194113f,
 };
-
-// d=96 centroids (TQK types — K cache regular subset)
 constexpr constant static float tq_c4_d96[4] = {
     -0.1534455138f, -0.0461670286f, 0.0461670286f, 0.1534455138f,
 };
@@ -89,30 +128,37 @@ constexpr constant static float tq_c2_d96[2] = {
     -0.0816460916f, 0.0816460916f,
 };
 
-// TQ bit unpacking helpers
-static inline int tq_up3(device const uint8_t * q, int j) {
+// Bit unpacking: 3-bit and 4-bit from device memory
+inline int tq_up3(device const uint8_t * q, int j) {
     int bp = j * 3, bi = bp >> 3, sh = bp & 7;
-    return (sh <= 5) ? (q[bi] >> sh) & 7 : ((q[bi] >> sh) | (q[bi+1] << (8-sh))) & 7;
+    return (sh <= 5) ? (q[bi] >> sh) & 7 : ((q[bi] >> sh) | (q[bi+1] << (8 - sh))) & 7;
 }
-
-static inline int tq_up4(device const uint8_t * q, int j) {
+inline int tq_up4(device const uint8_t * q, int j) {
     return (q[j / 2] >> ((j % 2) * 4)) & 0xF;
 }
 
-// TQ bit packing helpers (use atomic_fetch_or_explicit for thread safety)
-static inline void tq_pk3(device uint8_t * q, int j, int v) {
+// Bit packing: 3-bit and 4-bit to thread memory
+inline void tq_pk3(thread uint8_t * q, int j, int v) {
     int bp = j * 3, bi = bp >> 3, sh = bp & 7;
-    // Note: caller must ensure no concurrent writes to same byte
     q[bi] |= (uint8_t)((v << sh) & 0xFF);
-    if (sh > 5) { q[bi+1] |= (uint8_t)(v >> (8 - sh)); }
+    if (sh > 5) q[bi+1] |= (uint8_t)(v >> (8 - sh));
 }
-
-static inline void tq_pk4(device uint8_t * q, int j, int v) {
+inline void tq_pk4(thread uint8_t * q, int j, int v) {
     q[j / 2] |= (uint8_t)(v << ((j % 2) * 4));
 }
 
-// nearest centroid lookup
-static inline int tq_nearest(float val, constant float * c, int n) {
+// Bit packing: device memory overloads (for set_rows kernels)
+inline void tq_pk3(device uint8_t * q, int j, int v) {
+    int bp = j * 3, bi = bp >> 3, sh = bp & 7;
+    q[bi] |= (uint8_t)((v << sh) & 0xFF);
+    if (sh > 5) q[bi+1] |= (uint8_t)(v >> (8 - sh));
+}
+inline void tq_pk4(device uint8_t * q, int j, int v) {
+    q[j / 2] |= (uint8_t)(v << ((j % 2) * 4));
+}
+
+// Nearest centroid search
+inline int tq_nearest(float val, constant float * c, int n) {
     int best = 0;
     float bd = abs(val - c[0]);
     for (int i = 1; i < n; i++) {
@@ -180,13 +226,13 @@ void dequantize_tqv_35(device const block_tqv_35 * xb, short il, thread type4x4 
         float norm = (float)xb->norm_hi;
         for (int i = 0; i < 16; i++) {
             int j = il * 16 + i;
-            r[i/4][i%4] = norm * tq_c16[tq_up4(xb->qs_hi, j)];
+            r[i/4][i%4] = norm * tq_c16_d128[tq_up4(xb->qs_hi, j)];
         }
     } else {
         float norm = (float)xb->norm_hi; // single norm for full V vector
         for (int i = 0; i < 16; i++) {
             int j = (il - 2) * 16 + i;
-            r[i/4][i%4] = norm * tq_c8[tq_up3(xb->qs_lo, j)];
+            r[i/4][i%4] = norm * tq_c8_d128[tq_up3(xb->qs_lo, j)];
         }
     }
     reg = (type4x4) r;
@@ -199,12 +245,12 @@ void dequantize_tqv_35_t4(device const block_tqv_35 * xb, short il, thread type4
     if (base < 32) {
         float norm = (float)xb->norm_hi;
         for (int i = 0; i < 4; i++) {
-            r[i] = norm * tq_c16[tq_up4(xb->qs_hi, base + i)];
+            r[i] = norm * tq_c16_d128[tq_up4(xb->qs_hi, base + i)];
         }
     } else {
         float norm = (float)xb->norm_hi;
         for (int i = 0; i < 4; i++) {
-            r[i] = norm * tq_c8[tq_up3(xb->qs_lo, (base - 32) + i)];
+            r[i] = norm * tq_c8_d128[tq_up3(xb->qs_lo, (base - 32) + i)];
         }
     }
     reg = (type4) r;
