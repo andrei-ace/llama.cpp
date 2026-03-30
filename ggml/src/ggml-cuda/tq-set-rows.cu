@@ -4,6 +4,8 @@
 #include "tq-set-rows.cuh"
 #include "set-rows.cuh"
 
+// Device-side channel map pointer defined in ggml-cuda.cu
+
 // Forward declaration of channel map accessor (defined in ggml-cuda.cu)
 extern int32_t * ggml_cuda_get_tq_channel_map_device(void);
 extern int       ggml_cuda_get_tq_chmap_n_heads(void);

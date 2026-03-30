@@ -93,6 +93,15 @@ static int32_t * g_tq_channel_map_d = nullptr;  // device pointer
 static int       g_tq_chmap_n_layers = 0;
 static int       g_tq_chmap_n_heads = 0;
 
+// Device-side pointers for FA kernel access to channel map
+__device__ const int32_t * tq_fa_channel_map_ptr = nullptr;
+__device__ int             tq_fa_chmap_n_heads   = 0;
+
+static void tq_update_device_pointers(const int32_t * dev_ptr, int n_kv_heads) {
+    CUDA_CHECK(cudaMemcpyToSymbol(tq_fa_channel_map_ptr, &dev_ptr, sizeof(dev_ptr)));
+    CUDA_CHECK(cudaMemcpyToSymbol(tq_fa_chmap_n_heads, &n_kv_heads, sizeof(n_kv_heads)));
+}
+
 // Default identity channel map: channels 0-31 = outlier, 32-127 = regular
 static void tq_ensure_default_channel_map(int n_layers, int n_heads) {
     if (g_tq_channel_map_d != nullptr) return;
@@ -111,6 +120,7 @@ static void tq_ensure_default_channel_map(int n_layers, int n_heads) {
     CUDA_CHECK(cudaMemcpy(g_tq_channel_map_d, chmap.data(), sz, cudaMemcpyHostToDevice));
     g_tq_chmap_n_layers = n_layers;
     g_tq_chmap_n_heads = n_heads;
+    tq_update_device_pointers(g_tq_channel_map_d, n_heads);
 }
 
 extern "C" void ggml_cuda_set_tq_channel_map(const int32_t * data, int n_layers, int n_kv_heads) {
@@ -123,6 +133,7 @@ extern "C" void ggml_cuda_set_tq_channel_map(const int32_t * data, int n_layers,
     CUDA_CHECK(cudaMemcpy(g_tq_channel_map_d, data, sz, cudaMemcpyHostToDevice));
     g_tq_chmap_n_layers = n_layers;
     g_tq_chmap_n_heads = n_kv_heads;
+    tq_update_device_pointers(g_tq_channel_map_d, n_kv_heads);
 }
 
 int32_t * ggml_cuda_get_tq_channel_map_device(void) {
