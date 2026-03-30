@@ -636,6 +636,75 @@ void llama_kv_cache::tq_finish_calibration() {
                    ggml_type_name(target_type_k), ggml_type_name(target_type_v));
 }
 
+void llama_kv_cache::tq_expire_sinks() {
+    if (tq_n_sinks_ == 0) return;
+
+    LLAMA_LOG_INFO("%s: re-quantizing %u sink blocks to TQ across %zu layers\n",
+                   __func__, tq_n_sinks_, layers.size());
+
+    const auto * traits = ggml_get_type_traits_cpu(layers[0].k->type);
+    const int64_t blk_size = ggml_type_size(layers[0].k->type);
+    const int64_t head_dim = ggml_blck_size(layers[0].k->type);
+
+    for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
+        ggml_tensor * k = layers[ikv].k;
+        if (!k || !ggml_is_quantized(k->type)) continue;
+
+        tq_set_current_layer(layers[ikv].il, 1);
+        const int64_t n_embd = k->ne[0];
+        const size_t row_sz = ggml_row_size(k->type, n_embd);
+        const uint32_t kv_sz = get_size();
+
+        std::vector<uint8_t> row_buf(row_sz);
+        std::vector<float> f32_buf(n_embd);
+
+        for (uint32_t s = 0; s < n_stream; s++) {
+            for (uint32_t cell = 0; cell < std::min(tq_n_sinks_, kv_sz); cell++) {
+                // Read the block row
+                ggml_backend_tensor_get(k, row_buf.data(), (s * kv_sz + cell) * row_sz, row_sz);
+
+                // Check if any block in this row has is_fp16 flag
+                int n_blocks = (int)(n_embd / head_dim);
+                bool has_fp16 = false;
+                for (int b = 0; b < n_blocks; b++) {
+                    if (row_buf[b * blk_size] != 0) { has_fp16 = true; break; }
+                }
+                if (!has_fp16) continue;
+
+                // Convert fp16 blocks back to f32, then re-quantize the whole row
+                for (int b = 0; b < n_blocks; b++) {
+                    uint8_t * blk = row_buf.data() + b * blk_size;
+                    if (blk[0] != 0) {
+                        // fp16 block: extract fp16 → f32
+                        ggml_fp16_t * fp16_data = (ggml_fp16_t *)(blk + 2);
+                        ggml_fp16_to_fp32_row(fp16_data, &f32_buf[b * head_dim], head_dim);
+                    } else {
+                        // TQ block: dequant → f32
+                        ggml_to_float_t to_float = ggml_get_type_traits(k->type)->to_float;
+                        to_float(blk, &f32_buf[b * head_dim], head_dim);
+                    }
+                }
+
+                // Re-quantize entire row as TQ (no sinks)
+                uint32_t saved_sinks = tq_n_sinks_;
+                tq_n_sinks_ = 0; // temporarily disable sink detection in from_float
+                traits->from_float(f32_buf.data(), row_buf.data(), n_embd);
+                tq_n_sinks_ = saved_sinks;
+
+                // Write back
+                ggml_backend_tensor_set(k, row_buf.data(), (s * kv_sz + cell) * row_sz, row_sz);
+            }
+        }
+    }
+
+    // Clear sink state
+    tq_clear_sink_state();
+    tq_n_sinks_ = 0;
+    sink_bufs.clear(); // free k_sink buffers
+
+    LLAMA_LOG_INFO("%s: sinks expired, all blocks are now TQ\n", __func__);
+}
+
 void llama_kv_cache::clear(bool data) {
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();

@@ -212,6 +212,7 @@ public:
     bool is_tq_calibrating() const { return tq_calibrating_; }
     void tq_try_finish_calibration(); // checks min accumulation threshold
     void tq_finish_calibration();     // unconditionally locks and re-quantizes
+    void tq_expire_sinks();           // re-quantize fp16 sink blocks → TQ, clear sink state
 
 private:
     const llama_model & model;
