@@ -239,6 +239,54 @@ Sinks barely help had_mse4 on Llama: 0→512 gains +0.00009 avg cos_sim. Already
 
 Qwen head 1 (GQA 6:1) is the hardest case. had_mse4 beats q4_0 on all sinks. 3lo_qr needs 512 sinks to match q4_0 on head 1.
 
+## End-to-End Generation Results
+
+Tested with `llama-completion`, seed=42, c=512, `tqk_5hi_3lo_fwht` (3.88 bpv) with calibrated outlier
+channels. After calibration completes, all positions use pure TQ (no fp16 sinks).
+
+### Model compatibility (pure TQ after calibration)
+
+| Model | KV heads | GQA ratio | 5hi_3lo_fwht (3.88 bpv) | q4_0 (4.50 bpv) |
+|---|---|---|---|---|
+| Qwen 2.5 1.5B | 2 | 6:1 | **Collapse** | **Collapse** |
+| Qwen 2.5 7B | 2 | 6:1 | **Collapse** | **Collapse** |
+| Qwen 2.5 32B | 8 | 5:1 | **Coherent** | Coherent |
+| Qwen3 8B | 8 | 4:1 | **Coherent** | Coherent |
+| Llama 3.1 8B | 8 | 4:1 | **Coherent** | Coherent |
+| Mistral 7B v0.3 | 8 | 4:1 | **Coherent** | Coherent |
+
+**Finding: 2 KV heads = too few for any K cache quantization below q8_0.**
+This is NOT specific to TurboQuant — standard q4_0 also collapses on Qwen 2-head models.
+Models with 8+ KV heads work perfectly with 5hi_3lo_fwht at 3.88 bpv.
+
+### Quality comparison on 8-head models
+
+Math problem: "A train travels at 60 km/h one way and 90 km/h back. Distance is 360 km.
+What is the average speed?" (correct answer: 72 km/h)
+
+- **fwht matches f16 quality** — same answers, same reasoning structure
+- **fwht at 3.88 bpv ≥ q4_0 at 4.50 bpv** — equal or better output, 14% less K cache memory
+- **Qwen3 8B fwht** gets correct answer (72 km/h) with step-by-step math, coherent past calibration
+- Generation continues seamlessly through the calibration boundary (fp16 → TQ transition)
+
+### fp16 sinks (`--tq-sinks N`)
+
+For 2-head models (Qwen 1.5B/7B), sinks keep the first N tokens as fp16 in the K cache.
+In-block flag (`is_fp16`) in each TQ block dispatches to fp16 dot product for sink positions.
+
+| Qwen 7B, c=512 | sinks=0 | sinks=128 | sinks=256 | sinks=512 |
+|---|---|---|---|---|
+| Generation quality | Collapse | Coherent ~100 tok | **Coherent** | **Coherent** |
+
+Sinks delay the TQ collapse proportionally to sink count. sinks=256 at c=512 (50% fp16)
+achieves fp16-equivalent quality. At longer contexts (c=4096, sinks=256), effective bpv = 4.6.
+
+### Sink expiry
+
+`tq_expire_sinks()` re-quantizes fp16 sink blocks to TQ, freeing the sink buffers.
+After expiry, all positions use pure TQ. Currently disabled (needs proper token counter).
+For 8-head models, sinks are unnecessary — pure TQ works after calibration.
+
 ### Sanity test (synthetic data, `tests/test-tq-sanity.cpp`) — 16/16 passed
 
 - Rotation roundtrips (QR, FWHT split, H_128): all < 1e-5 error

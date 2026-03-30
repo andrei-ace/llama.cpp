@@ -417,7 +417,7 @@ void llama_kv_cache::set_tq_n_sinks(uint32_t n) {
         ggml_tensor * k = layers[ikv].k;
         if (!k) continue;
         const int64_t n_embd = k->ne[0];
-        layers[ikv].k_sink = ggml_new_tensor_2d(sink_ctx, GGML_TYPE_F16, n_embd, (int64_t)get_size() * n_stream);
+        layers[ikv].k_sink = ggml_new_tensor_2d(sink_ctx, GGML_TYPE_F16, n_embd, (int64_t)n * n_stream);
         ggml_format_name(layers[ikv].k_sink, "cache_k_sink_l%d", layers[ikv].il);
     }
 
@@ -456,7 +456,8 @@ void llama_kv_cache::tq_try_finish_calibration() {
     // No minimum token threshold — use whatever prompt tokens are available.
     // Check if enough tokens are available for calibration.
     // On GPU, CPU-side accumulation doesn't happen — readback when we have enough cells.
-    static const int TQ_MIN_CALIB_VECTORS = 32;
+    // Calibrate on at least n_sinks tokens (or 32 minimum) for reliable outlier detection
+    const int TQ_MIN_CALIB_VECTORS = (tq_n_sinks_ > 32) ? (int)tq_n_sinks_ : 32;
 
     const uint32_t occupied = v_cells[0].used_max_p1();
     if ((int)occupied < TQ_MIN_CALIB_VECTORS) {
@@ -554,27 +555,14 @@ void llama_kv_cache::tq_finish_calibration() {
                     ggml_backend_tensor_get(old_k, fp16_buf.data(), (s*kv_sz+cell)*fp16_row_sz, n_embd*sizeof(ggml_fp16_t));
                     ggml_fp16_to_fp32_row(fp16_buf.data(), tmp.data(), n_embd);
 
-                    bool is_sink_cell = (tq_n_sinks_ > 0 && cell < tq_n_sinks_);
-                    if (is_sink_cell && (target_type_k == GGML_TYPE_TQK_HAD_MSE4 ||
-                                         target_type_k == GGML_TYPE_TQK_5HI_3LO_QR ||
-                                         target_type_k == GGML_TYPE_TQK_5HI_3LO_FWHT)) {
-                        // Sink cell: store fp16 directly in each TQ block with is_fp16 flag
-                        // Block layout: [is_fp16(1) pad(1) fp16_data(256)] = 258 bytes
-                        const int64_t blk_size = ggml_type_size(target_type_k);
-                        const int64_t head_dim = ggml_blck_size(target_type_k);
-                        const int n_blocks = (int)(n_embd / head_dim);
-                        memset(tq_buf.data(), 0, tq_row_sz);
-                        for (int b = 0; b < n_blocks; b++) {
-                            uint8_t * blk = tq_buf.data() + b * blk_size;
-                            blk[0] = 0xFF;  // is_fp16 flag
-                            blk[1] = 0;     // pad
-                            // Copy fp16 data starting at offset 2
-                            memcpy(blk + 2, &fp16_buf[b * head_dim], head_dim * sizeof(ggml_fp16_t));
-                        }
-                    } else {
-                        // Normal TQ quantization
-                        traits->from_float(tmp.data(), tq_buf.data(), n_embd);
+                    // Write fp16 to k_sink for sink cells
+                    if (tq_n_sinks_ > 0 && cell < tq_n_sinks_ && layers[ikv].k_sink) {
+                        ggml_tensor * ks = layers[ikv].k_sink;
+                        size_t sink_fp16_row_sz = ggml_row_size(GGML_TYPE_F16, n_embd);
+                        ggml_backend_tensor_set(ks, fp16_buf.data(), (s*tq_n_sinks_+cell)*sink_fp16_row_sz, n_embd*sizeof(ggml_fp16_t));
                     }
+                    // Re-quantize ALL cells to TQ with calibrated channels (including sinks)
+                    traits->from_float(tmp.data(), tq_buf.data(), n_embd);
                     ggml_backend_tensor_set(new_k, tq_buf.data(), (s*kv_sz+cell)*tq_row_sz, tq_row_sz);
                 }
             }
@@ -631,7 +619,11 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers (K: %s, V: %s)\n",
+    // After calibration, disable sink dispatch — all positions use TQ with calibrated channels
+    // The sink fp16 data stays in k_sink for potential future use (expire/restore)
+    tq_clear_sink_state();
+    tq_n_sinks_ = 0;
+    LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers, sinks disabled (K: %s, V: %s)\n",
                    __func__, (int)layers.size(),
                    ggml_type_name(target_type_k), ggml_type_name(target_type_v));
 }

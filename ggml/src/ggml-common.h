@@ -345,42 +345,27 @@ static_assert(sizeof(block_tqv_35) == 2*sizeof(ggml_half) + TQV_N_OUTLIER*4/8 + 
 // Total: 56 bytes for 128 elements = 3.5 bpv
 
 // TQK had_mse4: full H_128 Hadamard + 4-bit MSE, no split, no calibration
-// Block can hold either TQ data (66 bytes used) or raw fp16 (256 bytes) for sinks.
-// The is_fp16 flag selects which format. Non-sink blocks waste 192 bytes padding.
+// Sink positions are stored in a separate fp16 tensor (k_sink), not in-block.
 typedef struct {
-    uint8_t   is_fp16;                                 // 1 byte: 0 = TQ, 0xFF = fp16 sink
-    uint8_t   pad;                                     // 1 byte: alignment
-    union {
-        struct {
-            ggml_half norm;                            // 2 bytes: L2 norm
-            uint8_t   qs[TQK_BLOCK_SIZE * 4 / 8];   // 64 bytes: 4-bit MSE indices
-        } tq;                                          // 66 bytes
-        ggml_half fp16[TQK_BLOCK_SIZE];                // 256 bytes: raw fp16 for sinks
-    } d;
+    ggml_half norm;                                    // 2 bytes: L2 norm
+    uint8_t   qs[TQK_BLOCK_SIZE * 4 / 8];             // 64 bytes: 4-bit MSE indices
 } block_tqk_had_mse4;
-static_assert(sizeof(block_tqk_had_mse4) == 2 + TQK_BLOCK_SIZE * sizeof(ggml_half), "wrong tqk_had_mse4 block size");
-// Total: 258 bytes for 128 elements. Non-sink effective = 4.13 bpv + 192 bytes padding.
+static_assert(sizeof(block_tqk_had_mse4) == sizeof(ggml_half) + TQK_BLOCK_SIZE * 4 / 8, "wrong tqk_had_mse4 block size");
+// Total: 66 bytes for 128 elements = 4.125 bpv
 
 // TQK 5hi_3lo: 32/96 split, 4-bit MSE + 1-bit QJL on outliers, 3-bit MSE on regulars
 // Used by both QR and FWHT variants (different rotation, same storage)
-// Block can hold either TQ data (62 bytes used) or raw fp16 (256 bytes) for sinks.
+// Sink positions are stored in a separate fp16 tensor (k_sink), not in-block.
 typedef struct {
-    uint8_t   is_fp16;                                 // 1 byte: 0 = TQ, 0xFF = fp16 sink
-    uint8_t   pad;                                     // 1 byte: alignment
-    union {
-        struct {
-            ggml_half norm_hi;                         // 2 bytes: outlier subset L2 norm
-            ggml_half norm_lo;                         // 2 bytes: regular subset L2 norm
-            ggml_half rnorm_hi;                        // 2 bytes: outlier QJL residual norm
-            uint8_t   qs_hi[TQK_N_OUTLIER * 4 / 8];   // 16 bytes
-            uint8_t   qs_lo[TQK_N_REGULAR * 3 / 8];   // 36 bytes
-            uint8_t   signs_hi[TQK_N_OUTLIER / 8];    // 4 bytes
-        } tq;                                          // 62 bytes
-        ggml_half fp16[TQK_BLOCK_SIZE];                // 256 bytes: raw fp16 for sinks
-    } d;
+    ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
+    ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
+    ggml_half rnorm_hi;                                // 2 bytes: outlier QJL residual norm
+    uint8_t   qs_hi[TQK_N_OUTLIER * 4 / 8];           // 16 bytes
+    uint8_t   qs_lo[TQK_N_REGULAR * 3 / 8];           // 36 bytes
+    uint8_t   signs_hi[TQK_N_OUTLIER / 8];            // 4 bytes
 } block_tqk_5hi_3lo;
-static_assert(sizeof(block_tqk_5hi_3lo) == 2 + TQK_BLOCK_SIZE * sizeof(ggml_half), "wrong tqk_5hi_3lo block size");
-// Total: 258 bytes for 128 elements. Non-sink effective = 3.88 bpv + 196 bytes padding.
+static_assert(sizeof(block_tqk_5hi_3lo) == 3*sizeof(ggml_half) + TQK_N_OUTLIER*4/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8, "wrong tqk_5hi_3lo block size");
+// Total: 62 bytes for 128 elements = 3.875 bpv
 
 //
 // Super-block quantization structures
