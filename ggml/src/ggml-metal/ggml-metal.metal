@@ -50,6 +50,151 @@ constexpr constant static float kvalues_mxfp4_f[16] = {
     0, .5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f, -0, -.5f, -1.f, -1.5f, -2.f, -3.f, -4.f, -6.f
 };
 
+// ---------------------------------------------------------------------------
+// TurboQuant building blocks — FWHT, MSE centroids, bit helpers
+// ---------------------------------------------------------------------------
+
+// Fast Walsh-Hadamard Transform — in-place, normalized, self-inverse
+template<int N>
+inline void tq_fwht(thread float * x) {
+    for (int step = 1; step < N; step *= 2) {
+        for (int i = 0; i < N; i += 2 * step) {
+            for (int j = 0; j < step; j++) {
+                float a = x[i + j];
+                float b = x[i + j + step];
+                x[i + j]        = a + b;
+                x[i + j + step] = a - b;
+            }
+        }
+    }
+    float s = 1.0f / sqrt((float)N);
+    for (int i = 0; i < N; i++) x[i] *= s;
+}
+
+// FWHT in threadgroup memory using SIMD parallelism (32 threads per vector)
+template<short N, typename T>
+inline void tq_fwht_shared(threadgroup T * x, ushort tiisg) {
+    for (short step = 1; step < N; step *= 2) {
+        for (short idx = tiisg; idx < N/2; idx += N_SIMDWIDTH) {
+            short i = (idx / step) * (2 * step) + (idx % step);
+            float a = float(x[i]);
+            float b = float(x[i + step]);
+            x[i]        = T(a + b);
+            x[i + step] = T(a - b);
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const T s = T(1.0f / sqrt(float(N)));
+    for (short i = tiisg; i < N; i += N_SIMDWIDTH) {
+        x[i] *= s;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// d=128 centroids — 16 (4-bit) and 8 (3-bit)
+constexpr constant static float tq_c16_d128[16] = {
+    -0.2376271868f, -0.1807937296f, -0.1417616544f, -0.1102470655f,
+    -0.0827925668f, -0.0577445357f, -0.0341340283f, -0.0112964982f,
+     0.0112964982f,  0.0341340283f,  0.0577445357f,  0.0827925668f,
+     0.1102470655f,  0.1417616544f,  0.1807937296f,  0.2376271868f,
+};
+constexpr constant static float tq_c8_d128[8] = {
+    -0.1883971860f, -0.1181397670f, -0.0665856080f, -0.0216043106f,
+     0.0216043106f,  0.0665856080f,  0.1181397670f,  0.1883971860f,
+};
+
+// d=32 centroids — 16 (4-bit) and 8 (3-bit)
+constexpr constant static float tq_c16_d32[16] = {
+    -0.4533721997f, -0.3498559145f, -0.2764914062f, -0.2161194569f,
+    -0.1628573862f, -0.1138475776f, -0.0673934339f, -0.0223187462f,
+     0.0223187462f,  0.0673934339f,  0.1138475776f,  0.1628573862f,
+     0.2161194569f,  0.2764914062f,  0.3498559145f,  0.4533721997f,
+};
+constexpr constant static float tq_c8_d32[8] = {
+    -0.3662682422f, -0.2324605670f, -0.1317560968f, -0.0428515156f,
+     0.0428515156f,  0.1317560968f,  0.2324605670f,  0.3662682422f,
+};
+
+// d=96 centroids — 8 (3-bit)
+constexpr constant static float tq_c8_d96[8] = {
+    -0.2168529349f, -0.1361685800f, -0.0767954958f, -0.0249236898f,
+     0.0249236898f,  0.0767954958f,  0.1361685800f,  0.2168529349f,
+};
+
+// d=256 centroids
+constexpr constant static float tq_c16_d256[16] = {
+    -0.1694104365f, -0.1285881998f, -0.1006980067f, -0.0782493129f,
+    -0.0587321071f, -0.0409491965f, -0.0242008774f, -0.0080083741f,
+     0.0080083741f,  0.0242008774f,  0.0409491965f,  0.0587321071f,
+     0.0782493129f,  0.1006980067f,  0.1285881998f,  0.1694104365f,
+};
+constexpr constant static float tq_c8_d256[8] = {
+    -0.1338542901f, -0.0837654569f, -0.0471667103f, -0.0152974877f,
+     0.0152974877f,  0.0471667103f,  0.0837654569f,  0.1338542901f,
+};
+constexpr constant static float tq_c16_d64[16] = {
+    -0.3389919281f, -0.2586479166f, -0.2033218447f, -0.1583036541f,
+    -0.1191039932f, -0.0831167296f, -0.0491520456f, -0.0162627764f,
+     0.0162627764f,  0.0491520456f,  0.0831167296f,  0.1191039932f,
+     0.1583036541f,  0.2033218447f,  0.2586479166f,  0.3389919281f,
+};
+constexpr constant static float tq_c8_d192[8] = {
+    -0.1543156657f, -0.0966361419f, -0.0544312518f, -0.0176559645f,
+     0.0176559645f,  0.0544312518f,  0.0966361419f,  0.1543156657f,
+};
+
+constexpr constant static float tq_c4_d32[4] = {
+    -0.2633194113f, -0.0798019295f, 0.0798019295f, 0.2633194113f,
+};
+constexpr constant static float tq_c4_d96[4] = {
+    -0.1534455138f, -0.0461670286f, 0.0461670286f, 0.1534455138f,
+};
+constexpr constant static float tq_c2_d96[2] = {
+    -0.0816460916f, 0.0816460916f,
+};
+
+// Bit unpacking: 3-bit and 4-bit from device memory
+inline int tq_up3(device const uint8_t * q, int j) {
+    int bp = j * 3, bi = bp >> 3, sh = bp & 7;
+    return (sh <= 5) ? (q[bi] >> sh) & 7 : ((q[bi] >> sh) | (q[bi+1] << (8 - sh))) & 7;
+}
+inline int tq_up4(device const uint8_t * q, int j) {
+    return (q[j / 2] >> ((j % 2) * 4)) & 0xF;
+}
+
+// Bit packing: 3-bit and 4-bit to thread memory
+inline void tq_pk3(thread uint8_t * q, int j, int v) {
+    int bp = j * 3, bi = bp >> 3, sh = bp & 7;
+    q[bi] |= (uint8_t)((v << sh) & 0xFF);
+    if (sh > 5) q[bi+1] |= (uint8_t)(v >> (8 - sh));
+}
+inline void tq_pk4(thread uint8_t * q, int j, int v) {
+    q[j / 2] |= (uint8_t)(v << ((j % 2) * 4));
+}
+
+// Bit packing: device memory overloads (for set_rows kernels)
+inline void tq_pk3(device uint8_t * q, int j, int v) {
+    int bp = j * 3, bi = bp >> 3, sh = bp & 7;
+    q[bi] |= (uint8_t)((v << sh) & 0xFF);
+    if (sh > 5) q[bi+1] |= (uint8_t)(v >> (8 - sh));
+}
+inline void tq_pk4(device uint8_t * q, int j, int v) {
+    q[j / 2] |= (uint8_t)(v << ((j % 2) * 4));
+}
+
+// Nearest centroid search
+inline int tq_nearest(float val, constant float * c, int n) {
+    int best = 0;
+    float bd = abs(val - c[0]);
+    for (int i = 1; i < n; i++) {
+        float d = abs(val - c[i]);
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------------------
+
 static inline int best_index_int8(int n, constant float * val, float x) {
     if (x <= val[0]) return 0;
     if (x >= val[n-1]) return n-1;
@@ -941,6 +1086,229 @@ template<> inline float4 elu_approx<float4>(float4 x) {
     res[3] = (x[3] > 0.0f) ? x[3] : (exp(x[3]) - 1.0f);
 
     return res;
+}
+
+// TQ FA dequantize: MSE centroids + optional QJL correction in rotated space.
+// Q must be pre-rotated with FWHT before FA. With Hadamard QJL, the per-element
+// correction is trivial: K_eff[j] = norm*centroid[idx] + (√(π/2)/d)*rnorm*sign[j]
+
+// 4-bit MSE only (had_mse4)
+template <typename type4x4>
+void dequantize_had_mse4(device const block_tqk_had_mse4 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        reg_f[i/4][i%4] = norm * tq_c16_d128[tq_up4(xb->qs, j)];
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_mse4_t4(device const block_tqk_had_mse4 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        reg[i] = norm * tq_c16_d128[tq_up4(xb->qs, j)];
+    }
+}
+
+// 4-bit MSE + 1-bit QJL (had_prod5) — same MSE as had_mse4 plus QJL sign correction
+template <typename type4x4>
+void dequantize_had_prod5(device const block_tqk_had_prod5 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg_f[i/4][i%4] = norm * tq_c16_d128[tq_up4(xb->qs, j)] + qjl * sign;
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_prod5_t4(device const block_tqk_had_prod5 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg[i] = norm * tq_c16_d128[tq_up4(xb->qs, j)] + qjl * sign;
+    }
+}
+
+// 3-bit MSE + 1-bit QJL (had_prod4)
+template <typename type4x4>
+void dequantize_had_prod4(device const block_tqk_had_prod4 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg_f[i/4][i%4] = norm * tq_c8_d128[tq_up3(xb->qs, j)] + qjl * sign;
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_prod4_t4(device const block_tqk_had_prod4 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 128.0f * float(xb->rnorm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg[i] = norm * tq_c8_d128[tq_up3(xb->qs, j)] + qjl * sign;
+    }
+}
+
+// 5hi_3lo_had: FA dequantize — outputs [hi(32), lo(96)] in block order
+// Elements 0-31: 4-bit MSE d32 + QJL (hi/outlier channels)
+// Elements 32-127: 3-bit MSE d32 (lo/regular channels, 3 blocks of 32)
+// Q must be permuted to match: [outlier_ch, regular_ch] then 4×FWHT_32
+template <typename type4x4>
+void dequantize_5hi_3lo_had(device const block_tqk_5hi_3lo * xb, short il, thread type4x4 & reg) {
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        if (j < 32) {
+            // Hi: 4-bit MSE d32 + Gaussian QJL
+            float norm_hi = float(xb->norm_hi);
+            float qjl = 1.2533141f / 32.0f * float(xb->rnorm_hi);
+            float sign = ((xb->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+            reg_f[i/4][i%4] = norm_hi * tq_c16_d32[tq_up4(xb->qs_hi, j)] + qjl * sign;
+        } else {
+            // Lo: 3-bit MSE d32 (3 independent 32-dim blocks)
+            float norm_lo = float(xb->norm_lo);
+            int lo_j = j - 32;
+            reg_f[i/4][i%4] = norm_lo * tq_c8_d32[tq_up3(xb->qs_lo, lo_j)];
+        }
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_5hi_3lo_had_t4(device const block_tqk_5hi_3lo * xb, short il, thread type4 & reg) {
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        if (j < 32) {
+            float norm_hi = float(xb->norm_hi);
+            float qjl = 1.2533141f / 32.0f * float(xb->rnorm_hi);
+            float sign = ((xb->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+            reg[i] = norm_hi * tq_c16_d32[tq_up4(xb->qs_hi, j)] + qjl * sign;
+        } else {
+            float norm_lo = float(xb->norm_lo);
+            int lo_j = j - 32;
+            reg[i] = norm_lo * tq_c8_d32[tq_up3(xb->qs_lo, lo_j)];
+        }
+    }
+}
+
+// ---- d=256 TurboQuant dequantize functions ----
+
+// 4-bit MSE only (had_mse4_d256)
+template <typename type4x4>
+void dequantize_had_mse4_d256(device const block_tqk_had_mse4_d256 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        reg_f[i/4][i%4] = norm * tq_c16_d256[tq_up4(xb->qs, j)];
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_mse4_d256_t4(device const block_tqk_had_mse4_d256 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        reg[i] = norm * tq_c16_d256[tq_up4(xb->qs, j)];
+    }
+}
+
+// 4-bit MSE + 1-bit QJL (had_prod5_d256)
+template <typename type4x4>
+void dequantize_had_prod5_d256(device const block_tqk_had_prod5_d256 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 256.0f * float(xb->rnorm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg_f[i/4][i%4] = norm * tq_c16_d256[tq_up4(xb->qs, j)] + qjl * sign;
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_prod5_d256_t4(device const block_tqk_had_prod5_d256 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 256.0f * float(xb->rnorm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg[i] = norm * tq_c16_d256[tq_up4(xb->qs, j)] + qjl * sign;
+    }
+}
+
+// 3-bit MSE + 1-bit QJL (had_prod4_d256)
+template <typename type4x4>
+void dequantize_had_prod4_d256(device const block_tqk_had_prod4_d256 * xb, short il, thread type4x4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 256.0f * float(xb->rnorm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg_f[i/4][i%4] = norm * tq_c8_d256[tq_up3(xb->qs, j)] + qjl * sign;
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_had_prod4_d256_t4(device const block_tqk_had_prod4_d256 * xb, short il, thread type4 & reg) {
+    float norm = float(xb->norm);
+    float qjl = 1.2533141f / 256.0f * float(xb->rnorm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        reg[i] = norm * tq_c8_d256[tq_up3(xb->qs, j)] + qjl * sign;
+    }
+}
+
+// 5hi_3lo_had_d256: FA dequantize — outputs [hi(64), lo(192)] in block order
+// Elements 0-63: 4-bit MSE d64 + QJL (hi/outlier channels)
+// Elements 64-255: 3-bit MSE d64 (lo/regular channels, 3 blocks of 64)
+template <typename type4x4>
+void dequantize_5hi_3lo_had_d256(device const block_tqk_5hi_3lo_d256 * xb, short il, thread type4x4 & reg) {
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        if (j < 64) {
+            // Hi: 4-bit MSE d64 + Gaussian QJL
+            float norm_hi = float(xb->norm_hi);
+            float qjl = 1.2533141f / 64.0f * float(xb->rnorm_hi);
+            float sign = ((xb->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+            reg_f[i/4][i%4] = norm_hi * tq_c16_d64[tq_up4(xb->qs_hi, j)] + qjl * sign;
+        } else {
+            // Lo: 3-bit MSE d64 (3 independent 64-dim blocks)
+            float norm_lo = float(xb->norm_lo);
+            int lo_j = j - 64;
+            reg_f[i/4][i%4] = norm_lo * tq_c8_d192[tq_up3(xb->qs_lo, lo_j)];
+        }
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_5hi_3lo_had_d256_t4(device const block_tqk_5hi_3lo_d256 * xb, short il, thread type4 & reg) {
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        if (j < 64) {
+            float norm_hi = float(xb->norm_hi);
+            float qjl = 1.2533141f / 64.0f * float(xb->rnorm_hi);
+            float sign = ((xb->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+            reg[i] = norm_hi * tq_c16_d64[tq_up4(xb->qs_hi, j)] + qjl * sign;
+        } else {
+            float norm_lo = float(xb->norm_lo);
+            int lo_j = j - 64;
+            reg[i] = norm_lo * tq_c8_d192[tq_up3(xb->qs_lo, lo_j)];
+        }
+    }
 }
 
 constant short FC_unary_op [[function_constant(FC_UNARY + 0)]];
@@ -5574,7 +5942,10 @@ template<
     short DV,         // V head size
     short Q,          // queries per threadgroup
     short C,          // cache items per threadgroup
-    short NSG>        // number of simd groups
+    short NSG,        // number of simd groups
+    bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
+    bool TQ_SPLIT = false, // permute Q by channel map + 4×FWHT_32 (5hi_3lo_had)
+    bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 void kernel_flash_attn_ext_impl(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -5585,7 +5956,9 @@ void kernel_flash_attn_ext_impl(
         device const char * pad,
         device const char * blk,
         device       char * dst,
+        device const char * tq_chmap, // per-head channel permutation [n_kv_heads][DK] (TQ_SPLIT only)
         threadgroup  half * shmem_f16,
+        threadgroup  uint8_t * tq_perm, // DK-byte scratch for channel permutation (TQ_SPLIT only)
         uint3   tgpig,
         ushort  tiisg,
         ushort  sgitg) {
@@ -5596,36 +5969,27 @@ void kernel_flash_attn_ext_impl(
 #define NS10 (FC_flash_attn_ext_ns10)
 #define NS20 (FC_flash_attn_ext_ns20)
 
-    // note: I had some concerns that using this instead of the ugly macros above was affecting performance
-    //       need to re-check carefully and if no regressions are observerd - remove the macros
-    //       the concerns is that maybe using const variables requires extra registers? but not sure if the compiler
-    //         is clever enough to avoid this. unfortunately, using constexpr is not possible with FC
-    //const short NS10 = FC_flash_attn_ext_ns10;
-    //const short NS20 = FC_flash_attn_ext_ns20;
-
     constexpr short KV   = 8;
 
     constexpr short DK4  = DK/4;
     constexpr short DK8  = DK/8;
     constexpr short DK16 = DK/16;
     constexpr short DV4  = DV/4;
-  //constexpr short DV8  = DV/8;
     constexpr short DV16 = DV/16;
 
     constexpr short PV   = PAD2(DV, 64);
     constexpr short PV4  = PV/4;
     constexpr short PV8  = PV/8;
-  //constexpr short PV16 = PV/16;
 
     constexpr short NW  = N_SIMDWIDTH;
     constexpr short NQ  = Q/NSG;
-    constexpr short SH  = 2*C; // shared memory per simdgroup (s_t == float)
+    constexpr short SH  = 2*C;
 
     constexpr short TS = 2*SH;
-    constexpr short T  = DK + 2*PV; // shared memory size per query in (half)
+    constexpr short T  = DK + 2*PV;
 
-    threadgroup q_t  * sq  = (threadgroup q_t  *) (shmem_f16 + 0*T); // holds the query data
-    threadgroup q4_t * sq4 = (threadgroup q4_t *) (shmem_f16 + 0*T); // same as above but in q4_t
+    threadgroup q_t  * sq  = (threadgroup q_t  *) (shmem_f16 + 0*T);
+    threadgroup q4_t * sq4 = (threadgroup q4_t *) (shmem_f16 + 0*T);
     threadgroup o_t  * so  = (threadgroup o_t  *) (shmem_f16 + 0*T + Q*DK); // the result for all queries in 8x8 matrices (the O matrix from the paper)
     threadgroup o4_t * so4 = (threadgroup o4_t *) (shmem_f16 + 0*T + Q*DK);
     threadgroup s_t  * ss  = (threadgroup s_t  *) (shmem_f16 + Q*T); // scratch buffer for attention, mask and diagonal matrix
@@ -5656,27 +6020,73 @@ void kernel_flash_attn_ext_impl(
         blk += (((iq3%args.ne33)*args.ne32 + (iq2%args.ne32))*nblk1 + iq1/Q)*nblk0;
     }
 
+    short ikv2;
     {
         q += iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03;
 
-        const short ikv2 = iq2/(args.ne02/args.ne_12_2);
+        ikv2 = iq2/(args.ne02/args.ne_12_2);
         const short ikv3 = iq3/(args.ne03/args.ne_12_3);
 
         k += ikv2*args.nb12 + ikv3*args.nb13;
         v += ikv2*args.nb22 + ikv3*args.nb23;
     }
 
+    // TQ_SPLIT: load channel permutation for current KV head
+    if (TQ_SPLIT) {
+        device const uint8_t * perm_src = (device const uint8_t *)tq_chmap + ikv2 * DK;
+        for (short i = tiisg + sgitg*NW; i < DK; i += NW*NSG) {
+            tq_perm[i] = perm_src[i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
     // load heads from Q to shared memory
-    FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
-        const short j = jj*NSG + sgitg;
-
-        device const float4 * q4 = (device const float4 *) ((device const char *) q + j*args.nb01);
-
-        for (short i = tiisg; i < DK4; i += NW) {
+    if (TQ_SPLIT) {
+        // Permuted Q load: rearrange channels to [outlier, regular] order
+        FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+            const short j = jj*NSG + sgitg;
+            device const float * q_head = (device const float *) ((device const char *) q + j*args.nb01);
+            threadgroup half * sq_j = (threadgroup half *)(sq + j*DK);
+            for (short i = tiisg; i < DK; i += NW) {
+                if (iq1 + j < args.ne01) {
+                    sq_j[i] = half(q_head[tq_perm[i]]);
+                } else {
+                    sq_j[i] = 0;
+                }
+            }
+        }
+        // Apply (DK/sub_block_size)×FWHT_sub to permuted Q
+        FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+            const short j = jj*NSG + sgitg;
             if (iq1 + j < args.ne01) {
-                sq4[j*DK4 + i] = (q4_t) q4[i];
-            } else {
-                sq4[j*DK4 + i] = 0;
+                threadgroup half * sq_j = (threadgroup half *)(sq + j*DK);
+                for (short blki = 0; blki < DK; blki += DK/4) {
+                    tq_fwht_shared<DK/4>(sq_j + blki, tiisg);
+                }
+            }
+        }
+    } else {
+        FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+            const short j = jj*NSG + sgitg;
+
+            device const float4 * q4 = (device const float4 *) ((device const char *) q + j*args.nb01);
+
+            for (short i = tiisg; i < DK4; i += NW) {
+                if (iq1 + j < args.ne01) {
+                    sq4[j*DK4 + i] = (q4_t) q4[i];
+                } else {
+                    sq4[j*DK4 + i] = 0;
+                }
+            }
+        }
+
+        // pre-rotate Q with FWHT_128 for had_mse4/prod5/prod4
+        if (TQ_FWHT) {
+            FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+                const short j = jj*NSG + sgitg;
+                if (iq1 + j < args.ne01) {
+                    tq_fwht_shared<DK>((threadgroup half *)(sq + j*DK), tiisg);
+                }
             }
         }
     }
@@ -6168,15 +6578,49 @@ void kernel_flash_attn_ext_impl(
 
         const float scale = S[jj] == 0.0 ? 0.0f : 1.0f/S[jj];
 
+        // Scale output
         if (DV4 % NW == 0) {
             FOR_UNROLL (short ii = 0; ii < DV4/NW; ++ii) {
                 const short i = ii*NW + tiisg;
-
-                dst4[i] = (float4) so4[j*PV4 + i]*scale;
+                so4[j*PV4 + i] = so4[j*PV4 + i]*scale;
             }
         } else {
             for (short i = tiisg; i < DV4; i += NW) {
-                dst4[i] = (float4) so4[j*PV4 + i]*scale;
+                so4[j*PV4 + i] = so4[j*PV4 + i]*scale;
+            }
+        }
+
+        // Inverse FWHT on output: V was stored rotated, O_fa = FWHT(O_correct)
+        if (TQ_FWHT_O) {
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup float * so_f = (threadgroup float *)(so + j*DK);
+            // FWHT in shared memory using all 32 threads
+            for (short step = 1; step < DV; step *= 2) {
+                for (short idx = tiisg; idx < DV/2; idx += NW) {
+                    short ii = (idx / step) * (2 * step) + (idx % step);
+                    float a = so_f[ii];
+                    float b = so_f[ii + step];
+                    so_f[ii]        = a + b;
+                    so_f[ii + step] = a - b;
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            float norm_s = 1.0f / sqrt((float)DV);
+            for (short ii = tiisg; ii < DV; ii += NW) {
+                so_f[ii] *= norm_s;
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        // Write to dst
+        if (DV4 % NW == 0) {
+            FOR_UNROLL (short ii = 0; ii < DV4/NW; ++ii) {
+                const short i = ii*NW + tiisg;
+                dst4[i] = (float4) so4[j*PV4 + i];
+            }
+        } else {
+            for (short i = tiisg; i < DV4; i += NW) {
+                dst4[i] = (float4) so4[j*PV4 + i];
             }
         }
     }
@@ -6212,7 +6656,10 @@ template<
     short DK,         // K head size
     short DV,         // V head size
     short Q  = OP_FLASH_ATTN_EXT_NQPSG, // queries per threadgroup
-    short C  = OP_FLASH_ATTN_EXT_NCPSG> // cache items per threadgroup
+    short C  = OP_FLASH_ATTN_EXT_NCPSG, // cache items per threadgroup
+    bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
+    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_had)
+    bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 kernel void kernel_flash_attn_ext(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -6223,18 +6670,21 @@ kernel void kernel_flash_attn_ext(
         device const char * pad,
         device const char * blk,
         device       char * dst,
+        device const char * tq_chmap,
         threadgroup  half * shmem_f16 [[threadgroup(0)]],
         uint3   tgpig[[threadgroup_position_in_grid]],
         ushort  tiisg[[thread_index_in_simdgroup]],
         ushort  sgitg[[simdgroup_index_in_threadgroup]]) {
+    threadgroup uint8_t tq_perm_buf[DK]; // scratch for TQ_SPLIT channel permutation
+
 #define FWD_TMPL q_t, q4_t, q8x8_t, k_t, k4x4_t, k8x8_t, v_t, v4x4_t, v8x8_t, qk_t, qk8x8_t, s_t, s2_t, s8x8_t, o_t, o4_t, o8x8_t, kd4x4_t, nl_k, deq_k, vd4x4_t, nl_v, deq_v, DK, DV, Q, C
-#define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, shmem_f16, tgpig, tiisg, sgitg
+#define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, tq_chmap, shmem_f16, tq_perm_buf, tgpig, tiisg, sgitg
     switch (FC_flash_attn_ext_nsg) {
       // note: disabled cases to reduce library load time
-      //case 1: kernel_flash_attn_ext_impl<FWD_TMPL, 1>(FWD_ARGS); break;
-      //case 2: kernel_flash_attn_ext_impl<FWD_TMPL, 2>(FWD_ARGS); break;
-        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4>(FWD_ARGS); break;
-        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8>(FWD_ARGS); break;
+      //case 1: kernel_flash_attn_ext_impl<FWD_TMPL, 1, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
+      //case 2: kernel_flash_attn_ext_impl<FWD_TMPL, 2, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
+        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
+        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
     }
 #undef FWD_TMPL
 #undef FWD_ARGS
@@ -6331,6 +6781,37 @@ template [[host_name("kernel_flash_attn_ext_q4_0_dk80_dv80"  )]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_q4_0_dk96_dv96"  )]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 96,  96>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk112_dv112")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 112, 112>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 128, 128>;
+// TurboQuant K (rotated space, Q pre-rotated with fused FWHT) + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_f16_dk128_dv128")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4,  8, dequantize_had_mse4,  half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod5, 8, dequantize_had_prod5, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4, 8, dequantize_had_prod4, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+// 5hi_3lo_had K (split channels, Q permuted + 4×FWHT_32) + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_had_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo, 8, dequantize_5hi_3lo_had, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// TQ K + TQV V (V stored rotated, inverse FWHT on output)
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_tqv_had_mse4_dk128_dv128")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4,  8, dequantize_had_mse4,  block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod5, 8, dequantize_had_prod5, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4, 8, dequantize_had_prod4, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_had_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo, 8, dequantize_5hi_3lo_had, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true,  true>;
+// f16 K + TQV V (V stored rotated, inverse FWHT on output)
+template [[host_name("kernel_flash_attn_ext_f16_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, half4x4, 1, dequantize_f16, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, false, true>;
+// TQ K + q4_0 V
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_q4_0_dk128_dv128")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4,  8, dequantize_had_mse4,  block_q4_0, 2, dequantize_q4_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_q4_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod5, 8, dequantize_had_prod5, block_q4_0, 2, dequantize_q4_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_q4_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4, 8, dequantize_had_prod4, block_q4_0, 2, dequantize_q4_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_had_q4_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo, 8, dequantize_5hi_3lo_had, block_q4_0, 2, dequantize_q4_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// TurboQuant d=256 K + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_d256_f16_dk256_dv256")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4_d256,  16, dequantize_had_mse4_d256,  half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_d256_f16_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod5_d256, 16, dequantize_had_prod5_d256, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_d256_f16_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4_d256, 16, dequantize_had_prod4_d256, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+// 5hi_3lo_had d=256 K + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_had_d256_f16_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo_d256, 16, dequantize_5hi_3lo_had_d256, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// f16 K + TQV d=256 V
+template [[host_name("kernel_flash_attn_ext_f16_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, half4x4, 1, dequantize_f16, block_tqv_had_mse4_d256, 16, dequantize_had_mse4_d256, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, false, true>;
+// TQ d=256 K + TQV d=256 V
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_d256_tqv_had_mse4_d256_dk256_dv256")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4_d256,  16, dequantize_had_mse4_d256,  block_tqv_had_mse4_d256, 16, dequantize_had_mse4_d256, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_d256_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod5_d256, 16, dequantize_had_prod5_d256, block_tqv_had_mse4_d256, 16, dequantize_had_mse4_d256, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_d256_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4_d256, 16, dequantize_had_prod4_d256, block_tqv_had_mse4_d256, 16, dequantize_had_mse4_d256, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_had_d256_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo_d256, 16, dequantize_5hi_3lo_had_d256, block_tqv_had_mse4_d256, 16, dequantize_had_mse4_d256, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true,  true>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv192")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 192>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 128>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 256, 256>;
@@ -6439,7 +6920,10 @@ template<
     short DV,       // V head size
     short NE = 4,   // head elements per thread
     short Q  = OP_FLASH_ATTN_EXT_VEC_NQPSG,  // queries per threadgroup
-    short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG>  // cache items per threadgroup
+    short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG,  // cache items per threadgroup
+    bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
+    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_had)
+    bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 kernel void kernel_flash_attn_ext_vec(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
@@ -6449,6 +6933,7 @@ kernel void kernel_flash_attn_ext_vec(
         device const char * sinks,
         device const char * pad,
         device       char * dst,
+        device const char * tq_chmap,
         threadgroup  half * shmem_f16 [[threadgroup(0)]],
         uint3   tgpig[[threadgroup_position_in_grid]],
         ushort  tiisg[[thread_index_in_simdgroup]],
@@ -6496,10 +6981,11 @@ kernel void kernel_flash_attn_ext_vec(
     // store the result for all queries in shared memory (the O matrix from the paper)
     so4 += tiisg;
 
+    short ikv2;
     {
         q += iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03;
 
-        const short ikv2 = iq2/(args.ne02/args.ne_12_2);
+        ikv2 = iq2/(args.ne02/args.ne_12_2);
         const short ikv3 = iq3/(args.ne03/args.ne_12_3);
 
         k += ikv2*args.nb12 + ikv3*args.nb13;
@@ -6507,14 +6993,44 @@ kernel void kernel_flash_attn_ext_vec(
     }
 
     // load heads from Q to shared memory
-    device const float4 * q4 = (device const float4 *) ((device const char *) q);
+    if (TQ_SPLIT) {
+        // Permuted Q load: rearrange channels to [outlier, regular] order
+        device const uint8_t * perm = (device const uint8_t *)tq_chmap + ikv2 * DK;
+        device const float * q_head = (device const float *) q;
+        threadgroup half * sq_h = (threadgroup half *)sq4;
+        if (iq1 < args.ne01) {
+            for (short i = tiisg; i < DK; i += NW) {
+                sq_h[i] = half(q_head[perm[i]]);
+            }
+            for (short i = DK + tiisg; i < PK; i += NW) {
+                sq_h[i] = 0;
+            }
+        }
+        // Apply (DK/sub_block_size)×FWHT_sub
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0 && iq1 < args.ne01) {
+            for (short blki = 0; blki < DK; blki += DK/4) {
+                tq_fwht_shared<DK/4>(sq_h + blki, tiisg);
+            }
+        }
+    } else {
+        device const float4 * q4 = (device const float4 *) ((device const char *) q);
 
-    if (iq1 < args.ne01) {
-        for (short i = tiisg; i < PK4; i += NW) {
-            if (i < DK4) {
-                sq4[i] = (q4_t) q4[i];
-            } else {
-                sq4[i] = (q4_t) 0.0f;
+        if (iq1 < args.ne01) {
+            for (short i = tiisg; i < PK4; i += NW) {
+                if (i < DK4) {
+                    sq4[i] = (q4_t) q4[i];
+                } else {
+                    sq4[i] = (q4_t) 0.0f;
+                }
+            }
+        }
+
+        // pre-rotate Q with FWHT_128 for had_mse4/prod5/prod4
+        if (TQ_FWHT) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (sgitg == 0 && iq1 < args.ne01) {
+                tq_fwht_shared<DK>((threadgroup half *)sq4, tiisg);
             }
         }
     }
@@ -6852,9 +7368,34 @@ kernel void kernel_flash_attn_ext_vec(
 
         const float S = NWG == 1 ? (ss[0] == 0.0f ? 0.0f : 1.0f/ss[0]) : 1.0f;
 
+        // scale output
+        for (short i = tiisg; i < DV4; i += NW) {
+            so4[i] = so4[i]*S;
+        }
+
+        // inverse FWHT on output if V was stored rotated
+        if (TQ_FWHT_O) {
+            threadgroup float * so_f = (threadgroup float *) so4;
+            for (short step = 1; step < DV; step *= 2) {
+                for (short idx = tiisg; idx < DV/2; idx += NW) {
+                    short ii = (idx / step) * (2 * step) + (idx % step);
+                    float a = so_f[ii];
+                    float b = so_f[ii + step];
+                    so_f[ii]        = a + b;
+                    so_f[ii + step] = a - b;
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            float norm_s = 1.0f / sqrt((float)DV);
+            for (short ii = tiisg; ii < DV; ii += NW) {
+                so_f[ii] *= norm_s;
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
         // interleave the workgroup data
         for (short i = tiisg; i < DV4; i += NW) {
-            dst4[rid*DV4*NWG + NWG*i + iwg] = (float4) so4[i]*S;
+            dst4[rid*DV4*NWG + NWG*i + iwg] = (float4) so4[i];
         }
 
         // store S and M
@@ -6932,6 +7473,23 @@ template [[host_name("kernel_flash_attn_ext_vec_f16_dk128_dv128")]]  kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_bf16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     bfloat4,    1, dequantize_bf16_t4, bfloat4,     1, dequantize_bf16_t4, 128, 128, 1>;
 #endif
 template [[host_name("kernel_flash_attn_ext_vec_q4_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_0, 8, dequantize_q4_0_t4, block_q4_0,  8, dequantize_q4_0_t4, 128, 128, 1>;
+// TurboQuant K (rotated space, Q pre-rotated with fused FWHT) + f16 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4,  32, dequantize_had_mse4_t4,  half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5, 32, dequantize_had_prod5_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4, 32, dequantize_had_prod4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_had_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo, 32, dequantize_5hi_3lo_had_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+// TQ K + TQV V (V stored rotated, inverse FWHT on output)
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_tqv_had_mse4_dk128_dv128")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4,  32, dequantize_had_mse4_t4,  block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5, 32, dequantize_had_prod5_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4, 32, dequantize_had_prod4_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_had_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo, 32, dequantize_5hi_3lo_had_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true,  true>;
+// f16 K + TQV V (V stored rotated, inverse FWHT on output)
+template [[host_name("kernel_flash_attn_ext_vec_f16_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, false, true>;
+// TQ K + q4_0 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_q4_0_dk128_dv128")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4,  32, dequantize_had_mse4_t4,  block_q4_0, 8, dequantize_q4_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_q4_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5, 32, dequantize_had_prod5_t4, block_q4_0, 8, dequantize_q4_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_q4_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4, 32, dequantize_had_prod4_t4, block_q4_0, 8, dequantize_q4_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_had_q4_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo, 32, dequantize_5hi_3lo_had_t4, block_q4_0, 8, dequantize_q4_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
 template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_1, 8, dequantize_q4_1_t4, block_q4_1,  8, dequantize_q4_1_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_0, 8, dequantize_q5_0_t4, block_q5_0,  8, dequantize_q5_0_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 128, 128, 1>;
@@ -6969,6 +7527,19 @@ template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk256_dv256")]] kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_0, 8, dequantize_q5_0_t4, block_q5_0,  8, dequantize_q5_0_t4, 256, 256, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 256, 256, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q8_0_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q8_0, 8, dequantize_q8_0_t4, block_q8_0,  8, dequantize_q8_0_t4, 256, 256, 1>;
+// TurboQuant d=256 K + f16 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_d256_f16_dk256_dv256")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4_d256,  64, dequantize_had_mse4_d256_t4,  half4, 1, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_d256_f16_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5_d256, 64, dequantize_had_prod5_d256_t4, half4, 1, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_d256_f16_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4_d256, 64, dequantize_had_prod4_d256_t4, half4, 1, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+// 5hi_3lo_had d=256 K + f16 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_had_d256_f16_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo_d256, 64, dequantize_5hi_3lo_had_d256_t4, half4, 1, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+// f16 K + TQV d=256 V
+template [[host_name("kernel_flash_attn_ext_vec_f16_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, block_tqv_had_mse4_d256, 64, dequantize_had_mse4_d256_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, false, true>;
+// TQ d=256 K + TQV d=256 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_d256_tqv_had_mse4_d256_dk256_dv256")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4_d256,  64, dequantize_had_mse4_d256_t4,  block_tqv_had_mse4_d256, 64, dequantize_had_mse4_d256_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_d256_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5_d256, 64, dequantize_had_prod5_d256_t4, block_tqv_had_mse4_d256, 64, dequantize_had_mse4_d256_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_d256_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4_d256, 64, dequantize_had_prod4_d256_t4, block_tqv_had_mse4_d256, 64, dequantize_had_mse4_d256_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true,  false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_had_d256_tqv_had_mse4_d256_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo_d256, 64, dequantize_5hi_3lo_had_d256_t4, block_tqv_had_mse4_d256, 64, dequantize_had_mse4_d256_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true,  true>;
 
 template [[host_name("kernel_flash_attn_ext_vec_f32_dk320_dv256")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES_F32, float4,     1, dequantize_f32_t4,  float4,      1, dequantize_f32_t4,  320, 256, 2>;
 template [[host_name("kernel_flash_attn_ext_vec_f16_dk320_dv256")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     half4,      1, dequantize_f16_t4,  half4,       1, dequantize_f16_t4,  320, 256, 2>;
@@ -9055,6 +9626,939 @@ kernel void kernel_set_rows_f(
         dst_row[ind] = (T) src_row[ind];
     }
 }
+
+// Pre-rotate Q with H_128 FWHT for had_mse4 asymmetric attention
+[[host_name("kernel_tq_fwht_q")]]
+kernel void kernel_tq_fwht_q(
+        device float * data [[buffer(0)]],
+        constant int & n_elements [[buffer(1)]],
+        uint tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    // Each threadgroup handles one 128-dim vector
+    // n_elements = total floats in Q tensor
+    const int idx = tgpig * 128;
+    if (idx + 127 >= n_elements) return;
+    if (tiitg != 0) return; // single thread per vector (TODO: SIMD parallelize)
+
+    thread float x[128];
+    for (int i = 0; i < 128; i++) x[i] = data[idx + i];
+    tq_fwht<128>(x);
+    for (int i = 0; i < 128; i++) data[idx + i] = x[i];
+}
+
+// ---------------------------------------------------------------------------
+// had_mse4: get_rows (dequantize) and set_rows (quantize) — H_128 + 4-bit MSE
+// ---------------------------------------------------------------------------
+
+[[host_name("kernel_get_rows_had_mse4")]]
+kernel void kernel_get_rows_had_mse4(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    const int n_blocks = args.ne00 / 128;
+    if (iblk >= n_blocks) return;
+
+    device const block_tqk_had_mse4 * blk = (device const block_tqk_had_mse4 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) {
+        rot[j] = tq_c16_d128[tq_up4(blk->qs, j)];
+    }
+    tq_fwht<128>(rot);
+
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 128; j++) {
+        out[j] = norm * rot[j];
+    }
+}
+
+[[host_name("kernel_set_rows_had_mse4_i32")]]
+kernel void kernel_set_rows_had_mse4(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    const int n_blocks = args.nk0;
+    if (iblk >= n_blocks) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    float sum_sq = 0.0f;
+    thread float vals[128];
+    for (int j = 0; j < 128; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_mse4 * blk = (device block_tqk_had_mse4 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) rot[j] = vals[j] * inv;
+    tq_fwht<128>(rot);
+
+    for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        tq_pk4((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c16_d128, 16));
+    }
+}
+
+// had_prod5: get_rows (full dequant with inverse FWHT + QJL correction)
+[[host_name("kernel_get_rows_had_prod5")]]
+kernel void kernel_get_rows_had_prod5(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+
+    device const block_tqk_had_prod5 * blk = (device const block_tqk_had_prod5 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+    float rnorm = float(blk->rnorm);
+
+    // MSE reconstruction: centroids → inverse FWHT → scale by norm
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) {
+        rot[j] = tq_c16_d128[tq_up4(blk->qs, j)];
+    }
+    tq_fwht<128>(rot);
+
+    // QJL correction: FWHT of sign vector (Hadamard QJL)
+    thread float corr[128];
+    for (int j = 0; j < 128; j++) {
+        corr[j] = ((blk->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    }
+    tq_fwht<128>(corr);
+    float qjl_scale = 1.2533141f / 128.0f * rnorm;
+
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 128; j++) {
+        out[j] = norm * rot[j] + qjl_scale * corr[j];
+    }
+}
+
+// had_prod5: set_rows (quantize with FWHT + MSE + QJL)
+[[host_name("kernel_set_rows_had_prod5_i32")]]
+kernel void kernel_set_rows_had_prod5(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    float sum_sq = 0.0f;
+    thread float vals[128];
+    for (int j = 0; j < 128; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_prod5 * blk = (device block_tqk_had_prod5 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+    blk->rnorm = half(0.0f);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+        for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    // FWHT + 4-bit MSE quantize (same as had_mse4)
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) rot[j] = vals[j] * inv;
+    tq_fwht<128>(rot);
+
+    for (int j = 0; j < 64; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        tq_pk4((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c16_d128, 16));
+    }
+
+    // Compute residual in original space: r = x - norm * FWHT(centroids)
+    thread float recon[128];
+    for (int j = 0; j < 128; j++) recon[j] = tq_c16_d128[tq_up4(blk->qs, j)];
+    tq_fwht<128>(recon);
+
+    thread float resid[128];
+    for (int j = 0; j < 128; j++) resid[j] = vals[j] - norm * recon[j];
+
+    // QJL forward: signs = sign(FWHT(resid)), rnorm = ||resid||
+    tq_fwht<128>(resid);
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 128; j++) rnorm_sq += (vals[j] - norm * recon[j]) * (vals[j] - norm * recon[j]);
+
+    for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        if (resid[j] >= 0.0f) blk->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm = half(sqrt(rnorm_sq));
+}
+
+// had_prod4: get_rows (full dequant with inverse FWHT + QJL correction)
+[[host_name("kernel_get_rows_had_prod4")]]
+kernel void kernel_get_rows_had_prod4(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+
+    device const block_tqk_had_prod4 * blk = (device const block_tqk_had_prod4 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+    float rnorm = float(blk->rnorm);
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) {
+        rot[j] = tq_c8_d128[tq_up3(blk->qs, j)];
+    }
+    tq_fwht<128>(rot);
+
+    thread float corr[128];
+    for (int j = 0; j < 128; j++) {
+        corr[j] = ((blk->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    }
+    tq_fwht<128>(corr);
+    float qjl_scale = 1.2533141f / 128.0f * rnorm;
+
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 128; j++) {
+        out[j] = norm * rot[j] + qjl_scale * corr[j];
+    }
+}
+
+// had_prod4: set_rows (quantize with FWHT + 3-bit MSE + QJL)
+[[host_name("kernel_set_rows_had_prod4_i32")]]
+kernel void kernel_set_rows_had_prod4(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    float sum_sq = 0.0f;
+    thread float vals[128];
+    for (int j = 0; j < 128; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_prod4 * blk = (device block_tqk_had_prod4 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+    blk->rnorm = half(0.0f);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 48; j++) blk->qs[j] = 0;
+        for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    thread float rot[128];
+    for (int j = 0; j < 128; j++) rot[j] = vals[j] * inv;
+    tq_fwht<128>(rot);
+
+    for (int j = 0; j < 48; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        tq_pk3((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c8_d128, 8));
+    }
+
+    // Compute residual
+    thread float recon[128];
+    for (int j = 0; j < 128; j++) recon[j] = tq_c8_d128[tq_up3(blk->qs, j)];
+    tq_fwht<128>(recon);
+
+    thread float resid[128];
+    for (int j = 0; j < 128; j++) resid[j] = vals[j] - norm * recon[j];
+
+    // QJL forward
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 128; j++) rnorm_sq += resid[j] * resid[j];
+    tq_fwht<128>(resid);
+
+    for (int j = 0; j < 16; j++) blk->signs[j] = 0;
+    for (int j = 0; j < 128; j++) {
+        if (resid[j] >= 0.0f) blk->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm = half(sqrt(rnorm_sq));
+}
+
+// 5hi_3lo_had: get_rows (full dequant — uses default channel order, for debug/non-FA path)
+[[host_name("kernel_get_rows_5hi_3lo_had")]]
+kernel void kernel_get_rows_5hi_3lo_had(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+
+    device const block_tqk_5hi_3lo * blk = (device const block_tqk_5hi_3lo *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm_hi = float(blk->norm_hi);
+    float norm_lo = float(blk->norm_lo);
+    float rnorm_hi = float(blk->rnorm_hi);
+
+    thread float hi[32];
+    for (int j = 0; j < 32; j++) hi[j] = tq_c16_d32[tq_up4(blk->qs_hi, j)];
+    tq_fwht<32>(hi);
+    thread float corr[32];
+    for (int j = 0; j < 32; j++) corr[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    tq_fwht<32>(corr);
+    float qjl_s = 1.2533141f / 32.0f * rnorm_hi;
+    for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
+
+    thread float lo[96];
+    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d32[tq_up3(blk->qs_lo, j)];
+    tq_fwht<32>(lo);
+    tq_fwht<32>(lo + 32);
+    tq_fwht<32>(lo + 64);
+    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
+
+    // Merge with default channel order (0-31=hi, 32-127=lo)
+    // NOTE: for correct merge with calibrated channels, would need channel map
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 32; j++)  out[j]      = hi[j];
+    for (int j = 0; j < 96; j++)  out[32 + j]  = lo[j];
+}
+
+// 5hi_3lo_had: set_rows (quantize — uses calibrated channel map if available)
+[[host_name("kernel_set_rows_5hi_3lo_had_i32")]]
+kernel void kernel_set_rows_5hi_3lo_had(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        device const int32_t * tq_chmap, // [n_layers][n_kv_heads][128] channel permutation
+        constant int32_t & tq_layer_idx,
+        constant int32_t & tq_n_kv_heads,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+
+    // Get channel permutation for this head (calibrated or default)
+    // iblk = block within row = KV head index (each 128-elem block = one head)
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + iblk) * 128;
+
+    // Split using calibrated channel order
+    thread float hi_raw[32], lo_raw[96];
+    for (int j = 0; j < 32; j++)  hi_raw[j] = src[perm[j]];
+    for (int j = 0; j < 96; j++)  lo_raw[j] = src[perm[32 + j]];
+
+    // FWHT rotate
+    thread float hi_rot[32], lo_rot[96];
+    for (int j = 0; j < 32; j++) hi_rot[j] = hi_raw[j];
+    tq_fwht<32>(hi_rot);
+    for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j];
+    tq_fwht<32>(lo_rot);
+    tq_fwht<32>(lo_rot + 32);
+    tq_fwht<32>(lo_rot + 64);
+
+    // Norms
+    float sum_hi = 0.0f, sum_lo = 0.0f;
+    for (int j = 0; j < 32; j++) sum_hi += hi_rot[j] * hi_rot[j];
+    for (int j = 0; j < 96; j++) sum_lo += lo_rot[j] * lo_rot[j];
+    float norm_hi = sqrt(sum_hi), norm_lo = sqrt(sum_lo);
+
+    device block_tqk_5hi_3lo * blk = (device block_tqk_5hi_3lo *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm_hi  = half(norm_hi);
+    blk->norm_lo  = half(norm_lo);
+    blk->rnorm_hi = half(0.0f);
+
+    if (norm_hi == 0.0f && norm_lo == 0.0f) {
+        for (int j = 0; j < 16; j++) blk->qs_hi[j] = 0;
+        for (int j = 0; j < 36; j++) blk->qs_lo[j] = 0;
+        for (int j = 0; j < 4; j++)  blk->signs_hi[j] = 0;
+        return;
+    }
+
+    float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
+    float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
+
+    // 4-bit MSE for hi
+    for (int j = 0; j < 16; j++) blk->qs_hi[j] = 0;
+    for (int j = 0; j < 32; j++) {
+        tq_pk4((device uint8_t *)blk->qs_hi, j, tq_nearest(hi_rot[j] * inv_hi, tq_c16_d32, 16));
+    }
+
+    // 3-bit MSE for lo
+    for (int j = 0; j < 36; j++) blk->qs_lo[j] = 0;
+    for (int j = 0; j < 96; j++) {
+        tq_pk3((device uint8_t *)blk->qs_lo, j, tq_nearest(lo_rot[j] * inv_lo, tq_c8_d32, 8));
+    }
+
+    // QJL on hi residual
+    thread float yhi[32];
+    for (int j = 0; j < 32; j++) yhi[j] = tq_c16_d32[tq_up4(blk->qs_hi, j)];
+    thread float hi_rec[32];
+    for (int j = 0; j < 32; j++) hi_rec[j] = yhi[j];
+    tq_fwht<32>(hi_rec);
+    thread float r_hi[32];
+    for (int j = 0; j < 32; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 32; j++) rnorm_sq += r_hi[j] * r_hi[j];
+    tq_fwht<32>(r_hi); // FWHT projection for signs
+    for (int j = 0; j < 4; j++) blk->signs_hi[j] = 0;
+    for (int j = 0; j < 32; j++) {
+        if (r_hi[j] >= 0.0f) blk->signs_hi[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm_hi = half(sqrt(rnorm_sq));
+}
+
+// ---------------------------------------------------------------------------
+// d=256 TurboQuant: get_rows and set_rows kernels
+// ---------------------------------------------------------------------------
+
+// had_mse4_d256: get_rows
+[[host_name("kernel_get_rows_had_mse4_d256")]]
+kernel void kernel_get_rows_had_mse4_d256(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    const int n_blocks = args.ne00 / 256;
+    if (iblk >= n_blocks) return;
+
+    device const block_tqk_had_mse4_d256 * blk = (device const block_tqk_had_mse4_d256 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+
+    thread float rot[256];
+    for (int j = 0; j < 256; j++) {
+        rot[j] = tq_c16_d256[tq_up4(blk->qs, j)];
+    }
+    tq_fwht<256>(rot);
+
+    device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 256; j++) {
+        out[j] = norm * rot[j];
+    }
+}
+
+// had_mse4_d256: set_rows
+[[host_name("kernel_set_rows_had_mse4_d256_i32")]]
+kernel void kernel_set_rows_had_mse4_d256(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    const int n_blocks = args.nk0;
+    if (iblk >= n_blocks) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*256;
+
+    float sum_sq = 0.0f;
+    thread float vals[256];
+    for (int j = 0; j < 256; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_mse4_d256 * blk = (device block_tqk_had_mse4_d256 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 128; j++) blk->qs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    thread float rot[256];
+    for (int j = 0; j < 256; j++) rot[j] = vals[j] * inv;
+    tq_fwht<256>(rot);
+
+    for (int j = 0; j < 128; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 256; j++) {
+        tq_pk4((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c16_d256, 16));
+    }
+}
+
+// had_prod5_d256: get_rows
+[[host_name("kernel_get_rows_had_prod5_d256")]]
+kernel void kernel_get_rows_had_prod5_d256(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 256) return;
+
+    device const block_tqk_had_prod5_d256 * blk = (device const block_tqk_had_prod5_d256 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+    float rnorm = float(blk->rnorm);
+
+    thread float rot[256];
+    for (int j = 0; j < 256; j++) {
+        rot[j] = tq_c16_d256[tq_up4(blk->qs, j)];
+    }
+    tq_fwht<256>(rot);
+
+    thread float corr[256];
+    for (int j = 0; j < 256; j++) {
+        corr[j] = ((blk->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    }
+    tq_fwht<256>(corr);
+    float qjl_scale = 1.2533141f / 256.0f * rnorm;
+
+    device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 256; j++) {
+        out[j] = norm * rot[j] + qjl_scale * corr[j];
+    }
+}
+
+// had_prod5_d256: set_rows
+[[host_name("kernel_set_rows_had_prod5_d256_i32")]]
+kernel void kernel_set_rows_had_prod5_d256(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*256;
+
+    float sum_sq = 0.0f;
+    thread float vals[256];
+    for (int j = 0; j < 256; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_prod5_d256 * blk = (device block_tqk_had_prod5_d256 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+    blk->rnorm = half(0.0f);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 128; j++) blk->qs[j] = 0;
+        for (int j = 0; j < 32; j++) blk->signs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    thread float rot[256];
+    for (int j = 0; j < 256; j++) rot[j] = vals[j] * inv;
+    tq_fwht<256>(rot);
+
+    for (int j = 0; j < 128; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 256; j++) {
+        tq_pk4((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c16_d256, 16));
+    }
+
+    // Compute residual in original space
+    thread float recon[256];
+    for (int j = 0; j < 256; j++) recon[j] = tq_c16_d256[tq_up4(blk->qs, j)];
+    tq_fwht<256>(recon);
+
+    thread float resid[256];
+    for (int j = 0; j < 256; j++) resid[j] = vals[j] - norm * recon[j];
+
+    // QJL forward
+    tq_fwht<256>(resid);
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 256; j++) rnorm_sq += (vals[j] - norm * recon[j]) * (vals[j] - norm * recon[j]);
+
+    for (int j = 0; j < 32; j++) blk->signs[j] = 0;
+    for (int j = 0; j < 256; j++) {
+        if (resid[j] >= 0.0f) blk->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm = half(sqrt(rnorm_sq));
+}
+
+// had_prod4_d256: get_rows
+[[host_name("kernel_get_rows_had_prod4_d256")]]
+kernel void kernel_get_rows_had_prod4_d256(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 256) return;
+
+    device const block_tqk_had_prod4_d256 * blk = (device const block_tqk_had_prod4_d256 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm = float(blk->norm);
+    float rnorm = float(blk->rnorm);
+
+    thread float rot[256];
+    for (int j = 0; j < 256; j++) {
+        rot[j] = tq_c8_d256[tq_up3(blk->qs, j)];
+    }
+    tq_fwht<256>(rot);
+
+    thread float corr[256];
+    for (int j = 0; j < 256; j++) {
+        corr[j] = ((blk->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    }
+    tq_fwht<256>(corr);
+    float qjl_scale = 1.2533141f / 256.0f * rnorm;
+
+    device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 256; j++) {
+        out[j] = norm * rot[j] + qjl_scale * corr[j];
+    }
+}
+
+// had_prod4_d256: set_rows
+[[host_name("kernel_set_rows_had_prod4_d256_i32")]]
+kernel void kernel_set_rows_had_prod4_d256(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*256;
+
+    float sum_sq = 0.0f;
+    thread float vals[256];
+    for (int j = 0; j < 256; j++) {
+        vals[j] = src[j];
+        sum_sq += vals[j] * vals[j];
+    }
+    float norm = sqrt(sum_sq);
+
+    device block_tqk_had_prod4_d256 * blk = (device block_tqk_had_prod4_d256 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm = half(norm);
+    blk->rnorm = half(0.0f);
+
+    if (norm == 0.0f) {
+        for (int j = 0; j < 96; j++) blk->qs[j] = 0;
+        for (int j = 0; j < 32; j++) blk->signs[j] = 0;
+        return;
+    }
+
+    float inv = 1.0f / norm;
+
+    thread float rot[256];
+    for (int j = 0; j < 256; j++) rot[j] = vals[j] * inv;
+    tq_fwht<256>(rot);
+
+    for (int j = 0; j < 96; j++) blk->qs[j] = 0;
+    for (int j = 0; j < 256; j++) {
+        tq_pk3((device uint8_t *)blk->qs, j, tq_nearest(rot[j], tq_c8_d256, 8));
+    }
+
+    // Compute residual
+    thread float recon[256];
+    for (int j = 0; j < 256; j++) recon[j] = tq_c8_d256[tq_up3(blk->qs, j)];
+    tq_fwht<256>(recon);
+
+    thread float resid[256];
+    for (int j = 0; j < 256; j++) resid[j] = vals[j] - norm * recon[j];
+
+    // QJL forward
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 256; j++) rnorm_sq += resid[j] * resid[j];
+    tq_fwht<256>(resid);
+
+    for (int j = 0; j < 32; j++) blk->signs[j] = 0;
+    for (int j = 0; j < 256; j++) {
+        if (resid[j] >= 0.0f) blk->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm = half(sqrt(rnorm_sq));
+}
+
+// 5hi_3lo_had_d256: get_rows
+[[host_name("kernel_get_rows_5hi_3lo_had_d256")]]
+kernel void kernel_get_rows_5hi_3lo_had_d256(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 256) return;
+
+    device const block_tqk_5hi_3lo_d256 * blk = (device const block_tqk_5hi_3lo_d256 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    float norm_hi = float(blk->norm_hi);
+    float norm_lo = float(blk->norm_lo);
+    float rnorm_hi = float(blk->rnorm_hi);
+
+    thread float hi[64];
+    for (int j = 0; j < 64; j++) hi[j] = tq_c16_d64[tq_up4(blk->qs_hi, j)];
+    tq_fwht<64>(hi);
+    thread float corr[64];
+    for (int j = 0; j < 64; j++) corr[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    tq_fwht<64>(corr);
+    float qjl_s = 1.2533141f / 64.0f * rnorm_hi;
+    for (int j = 0; j < 64; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
+
+    thread float lo[192];
+    for (int j = 0; j < 192; j++) lo[j] = tq_c8_d192[tq_up3(blk->qs_lo, j)];
+    tq_fwht<64>(lo);
+    tq_fwht<64>(lo + 64);
+    tq_fwht<64>(lo + 128);
+    for (int j = 0; j < 192; j++) lo[j] *= norm_lo;
+
+    device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 64; j++)   out[j]      = hi[j];
+    for (int j = 0; j < 192; j++)  out[64 + j]  = lo[j];
+}
+
+// 5hi_3lo_had_d256: set_rows
+[[host_name("kernel_set_rows_5hi_3lo_had_d256_i32")]]
+kernel void kernel_set_rows_5hi_3lo_had_d256(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        device const int32_t * tq_chmap,
+        constant int32_t & tq_layer_idx,
+        constant int32_t & tq_n_kv_heads,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*256;
+
+    // Get channel permutation for this head
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + iblk) * 256;
+
+    // Split using calibrated channel order
+    thread float hi_raw[64], lo_raw[192];
+    for (int j = 0; j < 64; j++)   hi_raw[j] = src[perm[j]];
+    for (int j = 0; j < 192; j++)  lo_raw[j] = src[perm[64 + j]];
+
+    // FWHT rotate
+    thread float hi_rot[64], lo_rot[192];
+    for (int j = 0; j < 64; j++) hi_rot[j] = hi_raw[j];
+    tq_fwht<64>(hi_rot);
+    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j];
+    tq_fwht<64>(lo_rot);
+    tq_fwht<64>(lo_rot + 64);
+    tq_fwht<64>(lo_rot + 128);
+
+    // Norms
+    float sum_hi = 0.0f, sum_lo = 0.0f;
+    for (int j = 0; j < 64; j++)  sum_hi += hi_rot[j] * hi_rot[j];
+    for (int j = 0; j < 192; j++) sum_lo += lo_rot[j] * lo_rot[j];
+    float norm_hi = sqrt(sum_hi), norm_lo = sqrt(sum_lo);
+
+    device block_tqk_5hi_3lo_d256 * blk = (device block_tqk_5hi_3lo_d256 *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+
+    blk->norm_hi  = half(norm_hi);
+    blk->norm_lo  = half(norm_lo);
+    blk->rnorm_hi = half(0.0f);
+
+    if (norm_hi == 0.0f && norm_lo == 0.0f) {
+        for (int j = 0; j < 32; j++) blk->qs_hi[j] = 0;
+        for (int j = 0; j < 72; j++) blk->qs_lo[j] = 0;
+        for (int j = 0; j < 8; j++)  blk->signs_hi[j] = 0;
+        return;
+    }
+
+    float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
+    float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
+
+    // 4-bit MSE for hi
+    for (int j = 0; j < 32; j++) blk->qs_hi[j] = 0;
+    for (int j = 0; j < 64; j++) {
+        tq_pk4((device uint8_t *)blk->qs_hi, j, tq_nearest(hi_rot[j] * inv_hi, tq_c16_d64, 16));
+    }
+
+    // 3-bit MSE for lo
+    for (int j = 0; j < 72; j++) blk->qs_lo[j] = 0;
+    for (int j = 0; j < 192; j++) {
+        tq_pk3((device uint8_t *)blk->qs_lo, j, tq_nearest(lo_rot[j] * inv_lo, tq_c8_d192, 8));
+    }
+
+    // QJL on hi residual
+    thread float yhi[64];
+    for (int j = 0; j < 64; j++) yhi[j] = tq_c16_d64[tq_up4(blk->qs_hi, j)];
+    thread float hi_rec[64];
+    for (int j = 0; j < 64; j++) hi_rec[j] = yhi[j];
+    tq_fwht<64>(hi_rec);
+    thread float r_hi[64];
+    for (int j = 0; j < 64; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 64; j++) rnorm_sq += r_hi[j] * r_hi[j];
+    tq_fwht<64>(r_hi); // FWHT projection for signs
+    for (int j = 0; j < 8; j++) blk->signs_hi[j] = 0;
+    for (int j = 0; j < 64; j++) {
+        if (r_hi[j] >= 0.0f) blk->signs_hi[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    blk->rnorm_hi = half(sqrt(rnorm_sq));
+}
+
+// ---------------------------------------------------------------------------
 
 kernel void kernel_diag_f32(
         constant ggml_metal_kargs_diag & args,

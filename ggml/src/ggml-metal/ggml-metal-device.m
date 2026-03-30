@@ -511,6 +511,9 @@ void ggml_metal_encoder_end_encoding(ggml_metal_encoder_t encoder) {
     [encoder->obj endEncoding];
 }
 
+// TurboQuant rotation/QJL buffer count
+#define TQ_METAL_BUF_COUNT 8
+
 struct ggml_metal_device {
     id<MTLDevice> mtl_device;
 
@@ -527,6 +530,17 @@ struct ggml_metal_device {
 
     // virtual address for GPU memory allocations
     atomic_uintptr_t addr_virt;
+
+    // TurboQuant constant buffers (lazily initialized)
+    // 0=rot_v_fwd, 1=rot_v_inv, 2=rot_hi_fwd, 3=rot_hi_inv,
+    // 4=rot_lo_fwd, 5=rot_lo_inv, 6=qjl_32, 7=qjl_96
+    id<MTLBuffer> tq_bufs[TQ_METAL_BUF_COUNT];
+    bool tq_bufs_init;
+
+    // TurboQuant per-layer-per-head channel map (K cache outlier indices)
+    id<MTLBuffer> tq_channel_map;
+    int tq_chmap_n_layers;
+    int tq_chmap_n_heads;
 };
 
 //
@@ -1156,8 +1170,25 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 op->src[0]->ne[0] != 576) {
                 return false;
             }
-            if (op->src[1]->type != op->src[2]->type) {
-                return false;
+            {
+                // Allow mixed K/V types for TQ K + fp16 V
+                if (op->src[1]->type != op->src[2]->type) {
+                    bool is_tq_k = (op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4_D256 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4_D256 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256);
+                    bool is_ok_v = (op->src[2]->type == GGML_TYPE_F16 ||
+                                    op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4 ||
+                                    op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4_D256 ||
+                                    op->src[2]->type == GGML_TYPE_Q4_0);
+                    if (!(is_tq_k && is_ok_v)) {
+                        return false;
+                    }
+                }
             }
             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
         case GGML_OP_SSM_CONV:
@@ -1171,6 +1202,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
+            // TurboQuant K types only work via Flash Attention (asymmetric dot product)
+            if (op->src[0]->type == GGML_TYPE_TQK_HAD_MSE4 ||
+                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD5 ||
+                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD4 ||
+                op->src[0]->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                op->src[0]->type == GGML_TYPE_TQV_HAD_MSE4 ||
+                op->src[0]->type == GGML_TYPE_TQK_HAD_MSE4_D256 ||
+                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
+                op->src[0]->type == GGML_TYPE_TQK_HAD_PROD4_D256 ||
+                op->src[0]->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
+                op->src[0]->type == GGML_TYPE_TQV_HAD_MSE4_D256) {
+                return false;
+            }
             return has_simdgroup_reduction && op->src[0]->type != GGML_TYPE_NVFP4;
         case GGML_OP_SET:
         case GGML_OP_CPY:
@@ -1246,6 +1290,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_IQ4_NL:
+                    case GGML_TYPE_TQK_HAD_MSE4:
+                    case GGML_TYPE_TQK_HAD_PROD5:
+                    case GGML_TYPE_TQK_HAD_PROD4:
+                    case GGML_TYPE_TQK_5HI_3LO_HAD:
+                    case GGML_TYPE_TQV_HAD_MSE4:
+                    case GGML_TYPE_TQK_HAD_MSE4_D256:
+                    case GGML_TYPE_TQK_HAD_PROD5_D256:
+                    case GGML_TYPE_TQK_HAD_PROD4_D256:
+                    case GGML_TYPE_TQK_5HI_3LO_HAD_D256:
+                    case GGML_TYPE_TQV_HAD_MSE4_D256:
                         return true;
                     default:
                         return false;
@@ -1263,6 +1317,62 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
 
 const struct ggml_metal_device_props * ggml_metal_device_get_props(ggml_metal_device_t dev) {
     return &dev->props;
+}
+
+struct ggml_metal_buffer_id ggml_metal_device_get_tq_channel_map(ggml_metal_device_t dev) {
+    if (dev->tq_channel_map == nil) {
+        // Create default channel map: 256 layers * 128 heads * 128 channels
+        // Default: channels 0-31 = outlier, 32-127 = regular
+        const int max_layers = 256;
+        const int max_heads  = 128;
+        const int n_ch       = 128;
+        size_t sz = (size_t)max_layers * max_heads * n_ch * sizeof(int32_t);
+        int32_t * data = (int32_t *)malloc(sz);
+        for (int l = 0; l < max_layers; l++) {
+            for (int h = 0; h < max_heads; h++) {
+                int32_t * row = data + ((int64_t)l * max_heads + h) * n_ch;
+                for (int i = 0; i < 32;  i++) { row[i] = i; }       // outlier = 0..31
+                for (int i = 0; i < 96;  i++) { row[32 + i] = 32 + i; } // regular = 32..127
+            }
+        }
+        dev->tq_channel_map = [dev->mtl_device newBufferWithBytes:data
+                                                           length:sz
+                                                          options:MTLResourceStorageModeShared];
+        dev->tq_chmap_n_layers = max_layers;
+        dev->tq_chmap_n_heads  = max_heads;
+        free(data);
+        GGML_LOG_INFO("%s: initialized default TQ channel map (%zu KB)\n", __func__, sz / 1024);
+    }
+
+    struct ggml_metal_buffer_id bid;
+    bid.metal = dev->tq_channel_map;
+    bid.offs  = 0;
+    return bid;
+}
+
+void ggml_metal_device_set_tq_channel_map(ggml_metal_device_t dev, const int * data, int n_layers, int n_kv_heads) {
+    const int n_ch = 128;
+    size_t sz = (size_t)n_layers * n_kv_heads * n_ch * sizeof(int32_t);
+    fprintf(stderr, "DEBUG set_tq_channel_map: dev=%p sz=%zu existing=%p\n", (void*)dev, sz, (void*)dev->tq_channel_map);
+
+    if (dev->tq_channel_map != nil) {
+        // Update existing buffer if it fits, else recreate
+        if ((size_t)dev->tq_chmap_n_layers * dev->tq_chmap_n_heads * n_ch * sizeof(int32_t) >= sz) {
+            memcpy([dev->tq_channel_map contents], data, sz);
+            dev->tq_chmap_n_layers = n_layers;
+            dev->tq_chmap_n_heads  = n_kv_heads;
+            return;
+        }
+        dev->tq_channel_map = nil;
+    }
+
+    dev->tq_channel_map = [dev->mtl_device newBufferWithBytes:data
+                                                       length:sz
+                                                      options:MTLResourceStorageModeShared];
+    dev->tq_chmap_n_layers = n_layers;
+    dev->tq_chmap_n_heads  = n_kv_heads;
+    GGML_LOG_INFO("%s: uploaded TQ channel map (%d layers, %d heads, %zu KB)\n",
+                  __func__, n_layers, n_kv_heads, sz / 1024);
 }
 
 //
