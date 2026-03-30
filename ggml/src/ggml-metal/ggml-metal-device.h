@@ -263,11 +263,6 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
 
 const struct ggml_metal_device_props * ggml_metal_device_get_props(ggml_metal_device_t dev);
 
-// TurboQuant rotation matrix buffers (lazily initialized on first access)
-// index: 0=rot_v_fwd, 1=rot_v_inv, 2=rot_hi_fwd, 3=rot_hi_inv, 4=rot_lo_fwd, 5=rot_lo_inv
-//        6=qjl_32 (32x32 Gaussian), 7=qjl_96 (96x96 Gaussian)
-struct ggml_metal_buffer_id ggml_metal_device_get_tq_buf(ggml_metal_device_t dev, int index);
-
 // TurboQuant per-layer-per-head channel map buffer
 // Default: channels 0-31 = outlier, 32-127 = regular (no calibration)
 // Update via ggml_metal_device_set_tq_channel_map after calibration

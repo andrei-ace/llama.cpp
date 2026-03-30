@@ -1171,13 +1171,6 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 return false;
             }
             {
-                // TQ types allow different K and V types (TQK + TQV)
-                bool is_tq_k = (op->src[1]->type == GGML_TYPE_TURBO3_0_PROD || op->src[1]->type == GGML_TYPE_TURBO4_0_PROD);
-                bool is_tq_v = (op->src[2]->type == GGML_TYPE_TURBO3_0_MSE  || op->src[2]->type == GGML_TYPE_TURBO4_0_MSE);
-                bool v_is_q4_0 = (op->src[2]->type == GGML_TYPE_Q4_0);
-                if (is_tq_k && (is_tq_v || v_is_q4_0)) {
-                    return op->src[0]->ne[0] == 128; // TQ only supports d=128
-                }
                 if (op->src[1]->type != op->src[2]->type) {
                     return false;
                 }
@@ -1269,10 +1262,6 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_IQ4_NL:
-                    case GGML_TYPE_TURBO3_0_PROD:
-                    case GGML_TYPE_TURBO4_0_PROD:
-                    case GGML_TYPE_TURBO3_0_MSE:
-                    case GGML_TYPE_TURBO4_0_MSE:
                     case GGML_TYPE_TQK_HAD_MSE4:
                         return true;
                     default:
@@ -1291,63 +1280,6 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
 
 const struct ggml_metal_device_props * ggml_metal_device_get_props(ggml_metal_device_t dev) {
     return &dev->props;
-}
-
-//
-// TurboQuant constant buffers
-//
-
-#include "ggml-turbo-quant.h"
-
-static void ggml_metal_device_tq_init(ggml_metal_device_t dev) {
-    if (dev->tq_bufs_init) {
-        return;
-    }
-
-    // Helper to create a shared Metal buffer from float data
-    #define TQ_MAKE_BUF(idx, data, n_floats) do { \
-        size_t sz = (n_floats) * sizeof(float); \
-        dev->tq_bufs[(idx)] = [dev->mtl_device newBufferWithBytes:(data) \
-                                                           length:sz \
-                                                          options:MTLResourceStorageModeShared]; \
-        GGML_ASSERT(dev->tq_bufs[(idx)] != nil); \
-    } while (0)
-
-    // Rotation matrices (deterministic, generated from fixed seeds)
-    TQ_MAKE_BUF(0, tq_get_rot_v_fwd(),  tq_get_rot_v_size());
-    TQ_MAKE_BUF(1, tq_get_rot_v_inv(),  tq_get_rot_v_size());
-    TQ_MAKE_BUF(2, tq_get_rot_hi_fwd(), tq_get_rot_hi_size());
-    TQ_MAKE_BUF(3, tq_get_rot_hi_inv(), tq_get_rot_hi_size());
-    TQ_MAKE_BUF(4, tq_get_rot_lo_fwd(), tq_get_rot_lo_size());
-    TQ_MAKE_BUF(5, tq_get_rot_lo_inv(), tq_get_rot_lo_size());
-
-    // QJL Gaussian matrices (precomputed from deterministic PRNG)
-    {
-        float * qjl_32 = (float *)malloc(32 * 32 * sizeof(float));
-        float * qjl_96 = (float *)malloc(96 * 96 * sizeof(float));
-        tq_get_qjl_matrix(qjl_32, 32, 0x514A4C20ULL); // QJL_SEED_32
-        tq_get_qjl_matrix(qjl_96, 96, 0x514A4C60ULL); // QJL_SEED_96
-        TQ_MAKE_BUF(6, qjl_32, 32 * 32);
-        TQ_MAKE_BUF(7, qjl_96, 96 * 96);
-        free(qjl_32);
-        free(qjl_96);
-    }
-
-    #undef TQ_MAKE_BUF
-
-    dev->tq_bufs_init = true;
-    GGML_LOG_INFO("%s: initialized TurboQuant Metal buffers (~248 KB)\n", __func__);
-}
-
-struct ggml_metal_buffer_id ggml_metal_device_get_tq_buf(ggml_metal_device_t dev, int index) {
-    GGML_ASSERT(index >= 0 && index < TQ_METAL_BUF_COUNT);
-
-    ggml_metal_device_tq_init(dev);
-
-    struct ggml_metal_buffer_id bid;
-    bid.metal = dev->tq_bufs[index];
-    bid.offs  = 0;
-    return bid;
 }
 
 struct ggml_metal_buffer_id ggml_metal_device_get_tq_channel_map(ggml_metal_device_t dev) {
