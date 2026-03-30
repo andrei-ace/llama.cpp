@@ -71,6 +71,26 @@ inline void tq_fwht(thread float * x) {
     for (int i = 0; i < N; i++) x[i] *= s;
 }
 
+// FWHT in threadgroup memory using SIMD parallelism (32 threads per vector)
+template<short N, typename T>
+inline void tq_fwht_shared(threadgroup T * x, ushort tiisg) {
+    for (short step = 1; step < N; step *= 2) {
+        for (short idx = tiisg; idx < N/2; idx += N_SIMDWIDTH) {
+            short i = (idx / step) * (2 * step) + (idx % step);
+            float a = float(x[i]);
+            float b = float(x[i + step]);
+            x[i]        = T(a + b);
+            x[i + step] = T(a - b);
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const T s = T(1.0f / sqrt(float(N)));
+    for (short i = tiisg; i < N; i += N_SIMDWIDTH) {
+        x[i] *= s;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
 // d=128 centroids — 16 (4-bit) and 8 (3-bit)
 constexpr constant static float tq_c16_d128[16] = {
     -0.2376271868f, -0.1807937296f, -0.1417616544f, -0.1102470655f,
@@ -5699,7 +5719,8 @@ template<
     short DV,         // V head size
     short Q,          // queries per threadgroup
     short C,          // cache items per threadgroup
-    short NSG>        // number of simd groups
+    short NSG,        // number of simd groups
+    bool TQ_FWHT = false> // apply FWHT to Q for TurboQuant asymmetric attention
 void kernel_flash_attn_ext_impl(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -5802,6 +5823,17 @@ void kernel_flash_attn_ext_impl(
                 sq4[j*DK4 + i] = (q4_t) q4[i];
             } else {
                 sq4[j*DK4 + i] = 0;
+            }
+        }
+    }
+
+    // pre-rotate Q with FWHT for TurboQuant asymmetric attention
+    // cast to half* — safe because TQ_FWHT is only true for half Q instantiations
+    if (TQ_FWHT) {
+        FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+            const short j = jj*NSG + sgitg;
+            if (iq1 + j < args.ne01) {
+                tq_fwht_shared<DK>((threadgroup half *)(sq + j*DK), tiisg);
             }
         }
     }
@@ -6337,7 +6369,8 @@ template<
     short DK,         // K head size
     short DV,         // V head size
     short Q  = OP_FLASH_ATTN_EXT_NQPSG, // queries per threadgroup
-    short C  = OP_FLASH_ATTN_EXT_NCPSG> // cache items per threadgroup
+    short C  = OP_FLASH_ATTN_EXT_NCPSG, // cache items per threadgroup
+    bool TQ_FWHT = false> // apply FWHT to Q for TurboQuant asymmetric attention
 kernel void kernel_flash_attn_ext(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -6356,10 +6389,10 @@ kernel void kernel_flash_attn_ext(
 #define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, shmem_f16, tgpig, tiisg, sgitg
     switch (FC_flash_attn_ext_nsg) {
       // note: disabled cases to reduce library load time
-      //case 1: kernel_flash_attn_ext_impl<FWD_TMPL, 1>(FWD_ARGS); break;
-      //case 2: kernel_flash_attn_ext_impl<FWD_TMPL, 2>(FWD_ARGS); break;
-        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4>(FWD_ARGS); break;
-        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8>(FWD_ARGS); break;
+      //case 1: kernel_flash_attn_ext_impl<FWD_TMPL, 1, TQ_FWHT>(FWD_ARGS); break;
+      //case 2: kernel_flash_attn_ext_impl<FWD_TMPL, 2, TQ_FWHT>(FWD_ARGS); break;
+        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT>(FWD_ARGS); break;
+        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT>(FWD_ARGS); break;
     }
 #undef FWD_TMPL
 #undef FWD_ARGS
@@ -6456,8 +6489,8 @@ template [[host_name("kernel_flash_attn_ext_q4_0_dk80_dv80"  )]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_q4_0_dk96_dv96"  )]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 96,  96>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk112_dv112")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 112, 112>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 128, 128>;
-// had_mse4 K (rotated space, Q must be pre-rotated) + f16 V
-template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4, 8, dequantize_had_mse4, half4x4, 1, dequantize_f16, 128, 128>;
+// had_mse4 K (rotated space, Q pre-rotated with fused FWHT) + f16 V
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4, 8, dequantize_had_mse4, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv192")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 192>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 128>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 256, 256>;
@@ -6566,7 +6599,8 @@ template<
     short DV,       // V head size
     short NE = 4,   // head elements per thread
     short Q  = OP_FLASH_ATTN_EXT_VEC_NQPSG,  // queries per threadgroup
-    short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG>  // cache items per threadgroup
+    short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG,  // cache items per threadgroup
+    bool TQ_FWHT = false> // apply FWHT to Q for TurboQuant asymmetric attention
 kernel void kernel_flash_attn_ext_vec(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
@@ -6643,6 +6677,14 @@ kernel void kernel_flash_attn_ext_vec(
             } else {
                 sq4[i] = (q4_t) 0.0f;
             }
+        }
+    }
+
+    // pre-rotate Q with FWHT for TurboQuant asymmetric attention
+    if (TQ_FWHT) {
+        threadgroup_barrier(mem_flags::mem_threadgroup); // ensure all Q loads complete
+        if (sgitg == 0 && iq1 < args.ne01) {
+            tq_fwht_shared<DK>((threadgroup half *)sq4, tiisg);
         }
     }
 
@@ -7060,7 +7102,7 @@ template [[host_name("kernel_flash_attn_ext_vec_bf16_dk128_dv128")]] kernel flas
 #endif
 template [[host_name("kernel_flash_attn_ext_vec_q4_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_0, 8, dequantize_q4_0_t4, block_q4_0,  8, dequantize_q4_0_t4, 128, 128, 1>;
 // had_mse4 K (rotated space) + f16 V
-template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4, 32, dequantize_had_mse4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4, 32, dequantize_had_mse4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_1, 8, dequantize_q4_1_t4, block_q4_1,  8, dequantize_q4_1_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_0, 8, dequantize_q5_0_t4, block_q5_0,  8, dequantize_q5_0_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 128, 128, 1>;
