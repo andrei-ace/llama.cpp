@@ -74,6 +74,24 @@ void dequantize_row_tqk_had_prod4   (const block_tqk_had_prod4 * GGML_RESTRICT x
 void quantize_row_tqv_had_mse4_ref  (const float * GGML_RESTRICT x, block_tqv_had_mse4 * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqv_had_mse4    (const block_tqv_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 
+// d=256 TurboQuant CPU reference functions
+void quantize_row_tqk_had_mse4_d256_ref     (const float * GGML_RESTRICT x, block_tqk_had_mse4_d256  * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_had_prod5_d256_ref    (const float * GGML_RESTRICT x, block_tqk_had_prod5_d256 * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_had_prod4_d256_ref    (const float * GGML_RESTRICT x, block_tqk_had_prod4_d256 * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_5hi_3lo_had_d256_ref  (const float * GGML_RESTRICT x, block_tqk_5hi_3lo_d256   * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqv_had_mse4_d256_ref     (const float * GGML_RESTRICT x, block_tqv_had_mse4_d256  * GGML_RESTRICT y, int64_t k);
+
+void dequantize_row_tqk_had_mse4_d256       (const block_tqk_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_had_prod5_d256      (const block_tqk_had_prod5_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_had_prod4_d256      (const block_tqk_had_prod4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_5hi_3lo_had_d256    (const block_tqk_5hi_3lo_d256   * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqv_had_mse4_d256       (const block_tqv_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+
+void ggml_vec_dot_tqk_had_mse4_d256_f32     (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_had_prod5_d256_f32    (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_had_prod4_d256_f32    (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_5hi_3lo_had_d256_f32  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+
 // TurboQuant per-layer-per-head outlier calibration API
 void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride, int64_t kv_size);
 void tq_clear_sink_state(void);
@@ -85,6 +103,11 @@ void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm128);
 int  tq_is_calibrating(void);
 int  tq_min_accum_count(int n_layers); // returns min accumulated vector count across layers
 void tq_reset_calibration(void);
+void tq_set_head_dim(int dim);
+int  tq_get_head_dim(void);
+void tq_init_calibration(int n_layers, int n_heads, int head_dim);
+void tq_free_accum(void);
+void tq_free_calibration(void);
 
 void ggml_vec_dot_iq2_xxs_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void ggml_vec_dot_iq2_xs_q8_K (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);

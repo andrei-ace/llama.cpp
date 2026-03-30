@@ -905,14 +905,7 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .is_quantized             = false,
     },
     // 41-44: old TurboQuant types removed
-    [GGML_TYPE_TQK_5HI_3LO_QR] = {
-        .type_name                = "tqk_5hi_3lo_qr",
-        .blck_size                = TQK_BLOCK_SIZE,
-        .type_size                = sizeof(block_tqk_5hi_3lo),
-        .is_quantized             = true,
-        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_5hi_3lo_qr,
-        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_qr_ref,
-    },
+    // 45: reserved (TQK_5HI_3LO_QR removed)
     [GGML_TYPE_TQK_5HI_3LO_HAD] = {
         .type_name                = "tqk_5hi_3lo_had",
         .blck_size                = TQK_BLOCK_SIZE,
@@ -952,6 +945,46 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .is_quantized             = true,
         .to_float                 = (ggml_to_float_t) dequantize_row_tqv_had_mse4,
         .from_float_ref           = (ggml_from_float_t) quantize_row_tqv_had_mse4_ref,
+    },
+    [GGML_TYPE_TQK_HAD_MSE4_D256] = {
+        .type_name                = "tqk_had_mse4_d256",
+        .blck_size                = TQK_BLOCK_SIZE_D256,
+        .type_size                = sizeof(block_tqk_had_mse4_d256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_had_mse4_d256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_had_mse4_d256_ref,
+    },
+    [GGML_TYPE_TQK_HAD_PROD5_D256] = {
+        .type_name                = "tqk_had_prod5_d256",
+        .blck_size                = TQK_BLOCK_SIZE_D256,
+        .type_size                = sizeof(block_tqk_had_prod5_d256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_had_prod5_d256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_had_prod5_d256_ref,
+    },
+    [GGML_TYPE_TQK_HAD_PROD4_D256] = {
+        .type_name                = "tqk_had_prod4_d256",
+        .blck_size                = TQK_BLOCK_SIZE_D256,
+        .type_size                = sizeof(block_tqk_had_prod4_d256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_had_prod4_d256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_had_prod4_d256_ref,
+    },
+    [GGML_TYPE_TQK_5HI_3LO_HAD_D256] = {
+        .type_name                = "tqk_5hi_3lo_had_d256",
+        .blck_size                = TQK_BLOCK_SIZE_D256,
+        .type_size                = sizeof(block_tqk_5hi_3lo_d256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_5hi_3lo_had_d256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_had_d256_ref,
+    },
+    [GGML_TYPE_TQV_HAD_MSE4_D256] = {
+        .type_name                = "tqv_had_mse4_d256",
+        .blck_size                = TQK_BLOCK_SIZE_D256,
+        .type_size                = sizeof(block_tqv_had_mse4_d256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqv_had_mse4_d256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqv_had_mse4_d256_ref,
     },
 };
 

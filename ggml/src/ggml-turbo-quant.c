@@ -69,6 +69,35 @@ static const float centroids_2[2] = {
     -0.0706615727f, 0.0706615727f,
 };
 
+// d=256: exact Lloyd-Max for Beta(127.5, 127.5) on [-1, 1]
+static const float centroids_16_d256[16] = {
+    -0.1694104365f, -0.1285881998f, -0.1006980067f, -0.0782493129f,
+    -0.0587321071f, -0.0409491965f, -0.0242008774f, -0.0080083741f,
+     0.0080083741f,  0.0242008774f,  0.0409491965f,  0.0587321071f,
+     0.0782493129f,  0.1006980067f,  0.1285881998f,  0.1694104365f,
+};
+
+static const float centroids_8_d256[8] = {
+    -0.1338542901f, -0.0837654569f, -0.0471667103f, -0.0152974877f,
+     0.0152974877f,  0.0471667103f,  0.0837654569f,  0.1338542901f,
+};
+
+// d=64: exact Lloyd-Max for Beta(31.5, 31.5) on [-1, 1]
+// Used by 5hi_3lo d=256 outlier subset (64 channels)
+static const float centroids_16_d64[16] = {
+    -0.3389919281f, -0.2586479166f, -0.2033218447f, -0.1583036541f,
+    -0.1191039932f, -0.0831167296f, -0.0491520456f, -0.0162627764f,
+     0.0162627764f,  0.0491520456f,  0.0831167296f,  0.1191039932f,
+     0.1583036541f,  0.2033218447f,  0.2586479166f,  0.3389919281f,
+};
+
+// d=192: exact Lloyd-Max for Beta(95.5, 95.5) on [-1, 1]
+// Used by 5hi_3lo d=256 regular subset (192 channels)
+static const float centroids_8_d192[8] = {
+    -0.1543156657f, -0.0966361419f, -0.0544312518f, -0.0176559645f,
+     0.0176559645f,  0.0544312518f,  0.0966361419f,  0.1543156657f,
+};
+
 // ---------------------------------------------------------------------------
 // Two independent rotation matrices: Π_hi (32×32) and Π_lo (96×96)
 // Per the paper: split channels into outlier/regular sets, apply independent
@@ -78,6 +107,14 @@ static const float centroids_2[2] = {
 #define TQ_DIM     128
 #define TQ_DIM_HI  32
 #define TQ_DIM_LO  96
+
+// Maximum sizes for d=256 support (arrays sized to largest possible dimension)
+#define TQ_DIM_MAX     256
+#define TQ_DIM_HI_MAX   64   // max outliers (d=256 case: 256/4 = 64)
+#define TQ_DIM_LO_MAX  192   // max regular  (d=256 case: 256 - 64 = 192)
+
+// Runtime head dimension — set during calibration init, defaults to 128
+static int tq_head_dim = 128;
 
 static float tq_rot_hi_fwd[TQ_DIM_HI * TQ_DIM_HI];  // Π_hi (row-major) — K cache outlier subset
 static float tq_rot_hi_inv[TQ_DIM_HI * TQ_DIM_HI];
@@ -89,24 +126,43 @@ static float tq_rot_v_inv[TQ_DIM * TQ_DIM];
 // ---------------------------------------------------------------------------
 // Per-layer-per-head outlier channel registry (populated during calibration)
 // With GQA, different KV heads may have different outlier patterns.
+// Dynamically allocated by tq_init_calibration() based on actual model dims.
 // ---------------------------------------------------------------------------
 
-#define TQ_MAX_LAYERS 256
-#define TQ_MAX_HEADS   128
+// Maximum sizes for sink arrays (kept static — small and always needed)
+#define TQ_MAX_LAYERS_SINK 256
 
-// Per-layer-per-head outlier/regular channel indices (K and V may differ)
-static int   tq_k_outlier_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_HI];
-static int   tq_k_regular_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_LO];
-static int   tq_v_outlier_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_HI];
-static int   tq_v_regular_reg[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM_LO];
-static int   tq_layer_calibrated[TQ_MAX_LAYERS];
+static int tq_n_layers = 0;
+static int tq_n_heads  = 0;
 
-// Calibration accumulators — per layer, per head
-static float tq_k_accum[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM];
-static float tq_v_accum[TQ_MAX_LAYERS][TQ_MAX_HEADS][TQ_DIM];
-static int   tq_k_accum_n[TQ_MAX_LAYERS]; // count of tokens (not blocks)
-static int   tq_v_accum_n[TQ_MAX_LAYERS];
+// Per-layer-per-head outlier channel bitmask (K and V may differ)
+// Bit i set = channel i is outlier. words_per_head = head_dim / 32
+static uint32_t * tq_k_outlier_mask = NULL;  // [n_layers * n_heads * words_per_head]
+static uint32_t * tq_v_outlier_mask = NULL;
+static int   * tq_layer_calibrated = NULL; // [n_layers]
+
+// Calibration accumulators — per layer, per head (freed after calibration)
+static float * tq_k_accum   = NULL;  // [n_layers][n_heads][head_dim]
+static float * tq_v_accum   = NULL;
+static int   * tq_k_accum_n = NULL;  // [n_layers]
+static int   * tq_v_accum_n = NULL;
 static int   tq_calibration_active = 1;
+
+// Accessor macros for flat dynamic arrays
+#define TQ_ACCUM_K(l, h)    (tq_k_accum + ((l) * tq_n_heads + (h)) * tq_head_dim)
+#define TQ_ACCUM_V(l, h)    (tq_v_accum + ((l) * tq_n_heads + (h)) * tq_head_dim)
+#define TQ_MASK_K(l, h)     (tq_k_outlier_mask + ((l) * tq_n_heads + (h)) * (tq_head_dim / 32))
+#define TQ_MASK_V(l, h)     (tq_v_outlier_mask + ((l) * tq_n_heads + (h)) * (tq_head_dim / 32))
+
+// Helper: check if channel i is outlier
+static inline int tq_is_outlier(const uint32_t * mask, int i) {
+    return (mask[i / 32] >> (i % 32)) & 1;
+}
+
+// Helper: set channel i as outlier
+static inline void tq_set_outlier(uint32_t * mask, int i) {
+    mask[i / 32] |= (1u << (i % 32));
+}
 
 // Thread-local current context (set by CPU backend before quantize/dequantize/vec_dot)
 static _Thread_local int tq_cur_layer = 0;
@@ -114,16 +170,16 @@ static _Thread_local int tq_cur_head  = 0;  // block index within row = KV head 
 static _Thread_local int tq_cur_is_k  = 1;  // 1 = K cache, 0 = V cache
 
 // Per-layer fp16 sink registry (set once after calibration, read by vec_dot)
-static const void * tq_sink_k_base[TQ_MAX_LAYERS];      // start of TQ K tensor data per layer
-static const void * tq_sink_fp16_base[TQ_MAX_LAYERS];    // start of fp16 sink tensor data per layer
-static int64_t      tq_sink_k_stride[TQ_MAX_LAYERS];     // bytes per KV position in TQ tensor (all heads)
-static int64_t      tq_sink_fp16_stride[TQ_MAX_LAYERS];  // bytes per KV position in fp16 tensor (all heads)
-static int64_t      tq_sink_kv_size[TQ_MAX_LAYERS];     // kv_size per stream (for multi-stream position calc)
+static const void * tq_sink_k_base[TQ_MAX_LAYERS_SINK];      // start of TQ K tensor data per layer
+static const void * tq_sink_fp16_base[TQ_MAX_LAYERS_SINK];    // start of fp16 sink tensor data per layer
+static int64_t      tq_sink_k_stride[TQ_MAX_LAYERS_SINK];     // bytes per KV position in TQ tensor (all heads)
+static int64_t      tq_sink_fp16_stride[TQ_MAX_LAYERS_SINK];  // bytes per KV position in fp16 tensor (all heads)
+static int64_t      tq_sink_kv_size[TQ_MAX_LAYERS_SINK];     // kv_size per stream (for multi-stream position calc)
 static int          tq_sink_n_global = 0;                 // number of sink positions (same for all layers)
 
 // Legacy single-layer state (kept for fallback first-vector detection)
-static int   tq_outlier_ch[TQ_DIM_HI];
-static int   tq_regular_ch[TQ_DIM_LO];
+static int   tq_outlier_ch[TQ_DIM_HI_MAX];
+static int   tq_regular_ch[TQ_DIM_LO_MAX];
 static int   tq_initialized = 0;
 static int   tq_outliers_detected = 0;
 
@@ -164,23 +220,23 @@ static void tq_init_rotations(void) {
     tq_gen_orthogonal(tq_rot_hi_fwd, tq_rot_hi_inv, TQ_DIM_HI, 0x5475524230484932ULL); // "TuRB0HI2"
     tq_gen_orthogonal(tq_rot_lo_fwd, tq_rot_lo_inv, TQ_DIM_LO, 0x54755242304C4F36ULL); // "TuRB0LO6"
     tq_gen_orthogonal(tq_rot_v_fwd, tq_rot_v_inv, TQ_DIM, 0x5475524230564131ULL);      // "TuRB0VA1"
-    // Default outlier channels: first 32 (will be overridden by calibration)
-    for (int i = 0; i < TQ_DIM_HI; i++) tq_outlier_ch[i] = i;
-    for (int i = 0; i < TQ_DIM_LO; i++) tq_regular_ch[i] = TQ_DIM_HI + i;
-    // Initialize per-layer-per-head registries to default (channels 0-31 = outlier)
-    for (int l = 0; l < TQ_MAX_LAYERS; l++) {
-        for (int h = 0; h < TQ_MAX_HEADS; h++) {
-            for (int i = 0; i < TQ_DIM_HI; i++) {
-                tq_k_outlier_reg[l][h][i] = i;
-                tq_v_outlier_reg[l][h][i] = i;
-            }
-            for (int i = 0; i < TQ_DIM_LO; i++) {
-                tq_k_regular_reg[l][h][i] = TQ_DIM_HI + i;
-                tq_v_regular_reg[l][h][i] = TQ_DIM_HI + i;
-            }
-        }
+    // Default outlier channels: first n_hi (will be overridden by calibration)
+    {
+        const int n_hi = tq_head_dim / 4;
+        const int n_lo = tq_head_dim - n_hi;
+        for (int i = 0; i < n_hi; i++) tq_outlier_ch[i] = i;
+        for (int i = 0; i < n_lo; i++) tq_regular_ch[i] = n_hi + i;
+        // Per-layer-per-head registries are initialized by tq_init_calibration()
     }
     tq_initialized = 1;
+}
+
+void tq_set_head_dim(int dim) {
+    tq_head_dim = dim;
+}
+
+int tq_get_head_dim(void) {
+    return tq_head_dim;
 }
 
 // Detect outlier channels from a 128-dim vector (by absolute magnitude)
@@ -218,21 +274,25 @@ static void tq_detect_outliers(const float * x) {
 }
 
 // Extract hi/lo channel subsets from a 128-dim vector
-// K cache: uses calibrated per-layer-per-head outlier channels
+// K cache: uses calibrated per-layer-per-head outlier bitmask
 // V cache: uses default fixed split (0-31 / 32-127) — V has no outliers (per RotateKV paper)
 static void tq_split_channels(const float * x, float * hi, float * lo) {
-    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[0][0];
-    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[0][0];
-    for (int i = 0; i < TQ_DIM_HI; i++) hi[i] = x[outlier[i]];
-    for (int i = 0; i < TQ_DIM_LO; i++) lo[i] = x[regular[i]];
+    const uint32_t * mask = tq_cur_is_k ? TQ_MASK_K(tq_cur_layer, tq_cur_head) : TQ_MASK_V(0, 0);
+    int oi = 0, ri = 0;
+    for (int i = 0; i < TQ_DIM; i++) {
+        if (tq_is_outlier(mask, i)) hi[oi++] = x[i];
+        else                        lo[ri++] = x[i];
+    }
 }
 
 // Merge hi/lo channel subsets back into 128-dim vector
 static void tq_merge_channels(const float * hi, const float * lo, float * x) {
-    const int * outlier = tq_cur_is_k ? tq_k_outlier_reg[tq_cur_layer][tq_cur_head] : tq_v_outlier_reg[0][0];
-    const int * regular = tq_cur_is_k ? tq_k_regular_reg[tq_cur_layer][tq_cur_head] : tq_v_regular_reg[0][0];
-    for (int i = 0; i < TQ_DIM_HI; i++) x[outlier[i]] = hi[i];
-    for (int i = 0; i < TQ_DIM_LO; i++) x[regular[i]] = lo[i];
+    const uint32_t * mask = tq_cur_is_k ? TQ_MASK_K(tq_cur_layer, tq_cur_head) : TQ_MASK_V(0, 0);
+    int oi = 0, ri = 0;
+    for (int i = 0; i < TQ_DIM; i++) {
+        if (tq_is_outlier(mask, i)) x[i] = hi[oi++];
+        else                        x[i] = lo[ri++];
+    }
 }
 
 // Rotate hi subset: out = Π_hi * in
@@ -317,8 +377,10 @@ static float tq_gaussian(void) {
 // ---------------------------------------------------------------------------
 
 #define QJL_SEED_32   0x514A4C20ULL
+#define QJL_SEED_64   0x514A4C40ULL
 #define QJL_SEED_96   0x514A4C60ULL
 #define QJL_SEED_128  0x514A4C80ULL
+#define QJL_SEED_256  0x514A4D00ULL
 
 // Forward declaration — defined later, needed by QJL Hadamard path
 static void tq_fwht(float * x, int n);
@@ -337,9 +399,9 @@ static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed)
 
     memset(signs, 0, (m + 7) / 8);
 
-    if (m == TQ_DIM || m == TQ_DIM_HI) {
+    if ((m & (m - 1)) == 0) {
         // Power-of-2: FWHT projection
-        float proj[TQ_DIM]; // max dim
+        float proj[TQK_BLOCK_SIZE_D256]; // max dim (256)
         for (int j = 0; j < m; j++) proj[j] = r[j];
         tq_fwht(proj, m);
         for (int i = 0; i < m; i++) {
@@ -358,7 +420,7 @@ static float qjl_forward(const float * r, uint8_t * signs, int m, uint64_t seed)
 }
 
 static void qjl_inverse(const uint8_t * signs, float rnorm, float * corr, int m, uint64_t seed) {
-    if (m == TQ_DIM || m == TQ_DIM_HI) {
+    if ((m & (m - 1)) == 0) {
         // Power-of-2: corr = scale * FWHT(sign_vector)
         for (int i = 0; i < m; i++) {
             corr[i] = ((signs[i / 8] >> (i % 8)) & 1) ? 1.0f : -1.0f;
@@ -383,8 +445,8 @@ static float qjl_asymmetric_dot(const float * q, int m, uint64_t seed,
     if (rnorm == 0.0f) return 0.0f;
     float sum = 0.0f;
 
-    if (m == TQ_DIM || m == TQ_DIM_HI) {
-        float q_proj[TQ_DIM];
+    if ((m & (m - 1)) == 0) {
+        float q_proj[TQK_BLOCK_SIZE_D256]; // max dim (256)
         for (int j = 0; j < m; j++) q_proj[j] = q[j];
         tq_fwht(q_proj, m);
         for (int i = 0; i < m; i++) {
@@ -421,7 +483,7 @@ static float qjl_asymmetric_dot_rotated(const float * q_rot, int m,
 // Only writes for positions < n_sinks; skips everything else.
 void tq_sink_write_fp16(const float * x, const void * tq_dst, int64_t k, int64_t tq_block_bytes) {
     (void)tq_block_bytes;
-    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return;
+    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS_SINK) return;
     const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
     char       * fp16_base = (char *)tq_sink_fp16_base[tq_cur_layer];
     int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
@@ -457,7 +519,7 @@ void tq_sink_write_fp16(const float * x, const void * tq_dst, int64_t k, int64_t
 // Try sink dot product: if this block is a sink, compute fp16 dot and return 1.
 // Otherwise return 0 (caller should do normal TQ dot).
 static int tq_try_sink_dot(const void * tq_ptr, const float * q, int64_t k, float * result) {
-    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return 0;
+    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS_SINK) return 0;
     const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
     const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
     int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
@@ -500,7 +562,7 @@ static int tq_try_sink_dot(const void * tq_ptr, const float * q, int64_t k, floa
 // Try sink dequant: if this block is a sink, read fp16 from k_sink and convert to f32.
 // Returns 1 if handled (caller should skip TQ dequant), 0 otherwise.
 static int tq_try_sink_dequant(const void * tq_ptr, float * out, int64_t k) {
-    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS) return 0;
+    if (tq_sink_n_global <= 0 || tq_cur_layer < 0 || tq_cur_layer >= TQ_MAX_LAYERS_SINK) return 0;
     const char * k_base    = (const char *)tq_sink_k_base[tq_cur_layer];
     const char * fp16_base = (const char *)tq_sink_fp16_base[tq_cur_layer];
     int64_t k_stride       = tq_sink_k_stride[tq_cur_layer];
@@ -688,7 +750,7 @@ static void dequant_lo_mse(const uint8_t * qs, const float * c, int bits, int n_
 
 void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base,
                             int n_sinks, int64_t k_stride, int64_t fp16_stride, int64_t kv_size) {
-    if (layer < 0 || layer >= TQ_MAX_LAYERS) return;
+    if (layer < 0 || layer >= TQ_MAX_LAYERS_SINK) return;
     tq_sink_k_base[layer]      = k_base;
     tq_sink_fp16_base[layer]   = fp16_base;
     tq_sink_k_stride[layer]    = k_stride;
@@ -698,7 +760,7 @@ void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_ba
 }
 
 void tq_clear_sink_state(void) {
-    for (int i = 0; i < TQ_MAX_LAYERS; i++) {
+    for (int i = 0; i < TQ_MAX_LAYERS_SINK; i++) {
         tq_sink_k_base[i]      = NULL;
         tq_sink_fp16_base[i]   = NULL;
         tq_sink_k_stride[i]    = 0;
@@ -709,12 +771,12 @@ void tq_clear_sink_state(void) {
 }
 
 void tq_set_current_layer(int layer, int is_k) {
-    tq_cur_layer = (layer >= 0 && layer < TQ_MAX_LAYERS) ? layer : 0;
+    tq_cur_layer = (layer >= 0 && layer < TQ_MAX_LAYERS_SINK) ? layer : 0;
     tq_cur_is_k  = is_k;
 }
 
 void tq_set_current_head(int head) {
-    tq_cur_head = (head >= 0 && head < TQ_MAX_HEADS) ? head : 0;
+    tq_cur_head = (head >= 0 && (tq_n_heads == 0 || head < tq_n_heads)) ? head : 0;
 }
 
 int tq_is_calibrating(void) {
@@ -722,13 +784,14 @@ int tq_is_calibrating(void) {
 }
 
 void tq_accumulate_channels(int layer, int is_k, const float * x, int64_t k) {
-    if (layer < 0 || layer >= TQ_MAX_LAYERS) return;
-    const int64_t nb = k / TQ_DIM;
+    if (layer < 0 || layer >= tq_n_layers || !tq_k_accum) return;
+    const int dim = tq_head_dim;
+    const int64_t nb = k / dim;
     int * count = is_k ? &tq_k_accum_n[layer] : &tq_v_accum_n[layer];
-    for (int64_t b = 0; b < nb && b < TQ_MAX_HEADS; b++) {
-        float * accum = is_k ? tq_k_accum[layer][b] : tq_v_accum[layer][b];
-        const float * xb = x + b * TQ_DIM;
-        for (int i = 0; i < TQ_DIM; i++) {
+    for (int64_t b = 0; b < nb && b < tq_n_heads; b++) {
+        float * accum = is_k ? TQ_ACCUM_K(layer, b) : TQ_ACCUM_V(layer, b);
+        const float * xb = x + b * dim;
+        for (int i = 0; i < dim; i++) {
             accum[i] += fabsf(xb[i]);
         }
     }
@@ -737,45 +800,38 @@ void tq_accumulate_channels(int layer, int is_k, const float * x, int64_t k) {
 
 // Detect outlier channels from accumulated magnitudes for one (layer, head, is_k)
 static void tq_detect_outliers_for_head(int layer, int head, int is_k) {
-    float * accum   = is_k ? tq_k_accum[layer][head]       : tq_v_accum[layer][head];
-    int   * outlier = is_k ? tq_k_outlier_reg[layer][head]  : tq_v_outlier_reg[layer][head];
-    int   * regular = is_k ? tq_k_regular_reg[layer][head]  : tq_v_regular_reg[layer][head];
+    const int dim  = tq_head_dim;
+    const int n_hi = dim / 4;      // 32 for d=128, 64 for d=256
+
+    float * accum   = is_k ? TQ_ACCUM_K(layer, head) : TQ_ACCUM_V(layer, head);
+    uint32_t * mask = is_k ? TQ_MASK_K(layer, head)  : TQ_MASK_V(layer, head);
 
     // Check if any data accumulated for this head
     float total = 0.0f;
-    for (int i = 0; i < TQ_DIM; i++) total += accum[i];
+    for (int i = 0; i < dim; i++) total += accum[i];
     if (total == 0.0f) return; // no data — keep defaults
 
     // Sort channels by accumulated magnitude (descending)
-    int order[TQ_DIM];
-    for (int i = 0; i < TQ_DIM; i++) order[i] = i;
-    for (int i = 1; i < TQ_DIM; i++) {
+    int order[TQ_DIM_MAX];
+    for (int i = 0; i < dim; i++) order[i] = i;
+    for (int i = 1; i < dim; i++) {
         int key_idx = order[i]; float key_mag = accum[key_idx];
         int j = i - 1;
         while (j >= 0 && accum[order[j]] < key_mag) { order[j+1] = order[j]; j--; }
         order[j+1] = key_idx;
     }
 
-    // Top 32 by magnitude = outliers
-    for (int i = 0; i < TQ_DIM_HI; i++) outlier[i] = order[i];
-    // Sort outlier indices ascending for consistent ordering
-    for (int i = 1; i < TQ_DIM_HI; i++) {
-        int key = outlier[i]; int j = i - 1;
-        while (j >= 0 && outlier[j] > key) { outlier[j+1] = outlier[j]; j--; }
-        outlier[j+1] = key;
-    }
-    // Remaining = regular channels
-    int ri = 0;
-    for (int i = 0; i < TQ_DIM; i++) {
-        int is_outlier_ch = 0;
-        for (int j = 0; j < TQ_DIM_HI; j++) { if (outlier[j] == i) { is_outlier_ch = 1; break; } }
-        if (!is_outlier_ch) regular[ri++] = i;
+    // Clear mask, then set top n_hi channels as outliers
+    memset(mask, 0, (dim / 32) * sizeof(uint32_t));
+    for (int i = 0; i < n_hi; i++) {
+        tq_set_outlier(mask, order[i]);
     }
 }
 
 int tq_min_accum_count(int n_layers) {
+    if (!tq_k_accum_n) return 0;
     int min_count = 0x7FFFFFFF;
-    for (int l = 0; l < n_layers && l < TQ_MAX_LAYERS; l++) {
+    for (int l = 0; l < n_layers && l < tq_n_layers; l++) {
         // Skip layers with no data (filtered/unused layers, or MLA with no V cache)
         if (tq_k_accum_n[l] == 0 && tq_v_accum_n[l] == 0) continue;
         // Only include K/V counts if that cache actually has data (MLA has no V)
@@ -787,8 +843,8 @@ int tq_min_accum_count(int n_layers) {
 
 void tq_lock_outliers_from_accum(int n_layers) {
     tq_init_rotations();
-    for (int l = 0; l < n_layers && l < TQ_MAX_LAYERS; l++) {
-        for (int h = 0; h < TQ_MAX_HEADS; h++) {
+    for (int l = 0; l < n_layers && l < tq_n_layers; l++) {
+        for (int h = 0; h < tq_n_heads; h++) {
             tq_detect_outliers_for_head(l, h, 1); // K
             tq_detect_outliers_for_head(l, h, 0); // V
         }
@@ -797,47 +853,93 @@ void tq_lock_outliers_from_accum(int n_layers) {
     tq_calibration_active = 0;
 
     // Debug: print outlier channels for first 2 layers, all active heads
-    fprintf(stderr, "tq_lock: %d layers, %d tokens accumulated (K layer0)\n",
-            n_layers, tq_k_accum_n[0]);
+    fprintf(stderr, "tq_lock: %d layers, %d tokens accumulated (K layer0), head_dim=%d\n",
+            n_layers, tq_k_accum_n[0], tq_head_dim);
     for (int l = 0; l < 2 && l < n_layers; l++) {
-        for (int h = 0; h < 8; h++) {
+        for (int h = 0; h < 8 && h < tq_n_heads; h++) {
             // Check if this head has data
             float total = 0.0f;
-            for (int i = 0; i < TQ_DIM; i++) total += tq_k_accum[l][h][i];
+            float * acc = TQ_ACCUM_K(l, h);
+            for (int i = 0; i < tq_head_dim; i++) total += acc[i];
             if (total == 0.0f) break;
             fprintf(stderr, "  K layer=%d head=%d outliers: [", l, h);
-            for (int i = 0; i < 8; i++) fprintf(stderr, "%d ", tq_k_outlier_reg[l][h][i]);
+            const uint32_t * mask = TQ_MASK_K(l, h);
+            int printed = 0;
+            for (int i = 0; i < tq_head_dim && printed < 8; i++) {
+                if (tq_is_outlier(mask, i)) { fprintf(stderr, "%d ", i); printed++; }
+            }
             fprintf(stderr, "...]\n");
         }
     }
+
+    // Free accumulators — no longer needed after locking
+    tq_free_accum();
+}
+
+void tq_free_accum(void) {
+    free(tq_k_accum);   tq_k_accum   = NULL;
+    free(tq_v_accum);   tq_v_accum   = NULL;
+    free(tq_k_accum_n); tq_k_accum_n = NULL;
+    free(tq_v_accum_n); tq_v_accum_n = NULL;
+}
+
+void tq_free_calibration(void) {
+    tq_free_accum();
+    free(tq_k_outlier_mask);   tq_k_outlier_mask   = NULL;
+    free(tq_v_outlier_mask);   tq_v_outlier_mask   = NULL;
+    free(tq_layer_calibrated); tq_layer_calibrated = NULL;
+    tq_n_layers = 0;
+    tq_n_heads  = 0;
+}
+
+void tq_init_calibration(int n_layers, int n_heads, int head_dim) {
+    // Free any previous allocation
+    tq_free_calibration();
+
+    tq_n_layers = n_layers;
+    tq_n_heads  = n_heads;
+    tq_head_dim = head_dim;
+    const int words_per_head = head_dim / 32;
+
+    tq_k_outlier_mask   = (uint32_t *)calloc(n_layers * n_heads * words_per_head, sizeof(uint32_t));
+    tq_v_outlier_mask   = (uint32_t *)calloc(n_layers * n_heads * words_per_head, sizeof(uint32_t));
+    tq_k_accum          = (float *)calloc(n_layers * n_heads * head_dim,  sizeof(float));
+    tq_v_accum          = (float *)calloc(n_layers * n_heads * head_dim,  sizeof(float));
+    tq_k_accum_n        = (int *)  calloc(n_layers,                       sizeof(int));
+    tq_v_accum_n        = (int *)  calloc(n_layers,                       sizeof(int));
+    tq_layer_calibrated = (int *)  calloc(n_layers,                       sizeof(int));
+
+    // Default: first n_hi channels are outliers (identity permutation)
+    const int n_hi = head_dim / 4;
+    for (int l = 0; l < n_layers; l++) {
+        for (int h = 0; h < n_heads; h++) {
+            uint32_t * mk = TQ_MASK_K(l, h);
+            uint32_t * mv = TQ_MASK_V(l, h);
+            for (int i = 0; i < n_hi; i++) {
+                tq_set_outlier(mk, i);
+                tq_set_outlier(mv, i);
+            }
+        }
+    }
+    tq_calibration_active = 1;
 }
 
 void tq_reset_calibration(void) {
-    memset(tq_k_accum, 0, sizeof(tq_k_accum));
-    memset(tq_v_accum, 0, sizeof(tq_v_accum));
-    memset(tq_k_accum_n, 0, sizeof(tq_k_accum_n));
-    memset(tq_v_accum_n, 0, sizeof(tq_v_accum_n));
-    memset(tq_layer_calibrated, 0, sizeof(tq_layer_calibrated));
-    tq_calibration_active = 1;
-    for (int l = 0; l < TQ_MAX_LAYERS; l++) {
-        for (int h = 0; h < TQ_MAX_HEADS; h++) {
-            for (int i = 0; i < TQ_DIM_HI; i++) {
-                tq_k_outlier_reg[l][h][i] = i;
-                tq_v_outlier_reg[l][h][i] = i;
-            }
-            for (int i = 0; i < TQ_DIM_LO; i++) {
-                tq_k_regular_reg[l][h][i] = TQ_DIM_HI + i;
-                tq_v_regular_reg[l][h][i] = TQ_DIM_HI + i;
-            }
-        }
+    // Legacy wrapper — just re-init with current dimensions
+    if (tq_n_layers > 0 && tq_n_heads > 0) {
+        tq_init_calibration(tq_n_layers, tq_n_heads, tq_head_dim);
     }
 }
 
 void tq_reset_accumulators(void) {
-    memset(tq_k_accum, 0, sizeof(tq_k_accum));
-    memset(tq_v_accum, 0, sizeof(tq_v_accum));
-    memset(tq_k_accum_n, 0, sizeof(tq_k_accum_n));
-    memset(tq_v_accum_n, 0, sizeof(tq_v_accum_n));
+    if (tq_k_accum && tq_n_layers > 0 && tq_n_heads > 0)
+        memset(tq_k_accum, 0, (size_t)tq_n_layers * tq_n_heads * tq_head_dim * sizeof(float));
+    if (tq_v_accum && tq_n_layers > 0 && tq_n_heads > 0)
+        memset(tq_v_accum, 0, (size_t)tq_n_layers * tq_n_heads * tq_head_dim * sizeof(float));
+    if (tq_k_accum_n && tq_n_layers > 0)
+        memset(tq_k_accum_n, 0, (size_t)tq_n_layers * sizeof(int));
+    if (tq_v_accum_n && tq_n_layers > 0)
+        memset(tq_v_accum_n, 0, (size_t)tq_n_layers * sizeof(int));
 }
 
 // ---------------------------------------------------------------------------
@@ -857,19 +959,35 @@ int tq_get_rot_lo_size(void) { return TQ_DIM_LO * TQ_DIM_LO; }
 
 void tq_get_channel_map(int layer, int head, int is_k, int * outlier, int * regular) {
     tq_init_rotations();
-    if (layer < 0 || layer >= TQ_MAX_LAYERS || head < 0 || head >= TQ_MAX_HEADS) return;
-    const int * src_out = is_k ? tq_k_outlier_reg[layer][head] : tq_v_outlier_reg[layer][head];
-    const int * src_reg = is_k ? tq_k_regular_reg[layer][head] : tq_v_regular_reg[layer][head];
-    memcpy(outlier, src_out, TQ_DIM_HI * sizeof(int));
-    memcpy(regular, src_reg, TQ_DIM_LO * sizeof(int));
+    if (layer < 0 || layer >= tq_n_layers || head < 0 || head >= tq_n_heads) return;
+    if (!tq_k_outlier_mask) return;
+    const uint32_t * mask = is_k ? TQ_MASK_K(layer, head) : TQ_MASK_V(layer, head);
+    int oi = 0, ri = 0;
+    for (int i = 0; i < tq_head_dim; i++) {
+        if (tq_is_outlier(mask, i)) {
+            outlier[oi++] = i;
+        } else {
+            regular[ri++] = i;
+        }
+    }
 }
 
-// Build compact channel permutation [outlier_ch(32), regular_ch(96)] as uint8_t for Metal FA
-void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm128) {
-    int outlier[32], regular[96];
-    tq_get_channel_map(layer, head, is_k, outlier, regular);
-    for (int i = 0; i < 32;  i++) perm128[i]      = (uint8_t)outlier[i];
-    for (int i = 0; i < 96;  i++) perm128[32 + i]  = (uint8_t)regular[i];
+// Build compact channel permutation [outlier_ch(n_hi), regular_ch(n_lo)] as uint8_t for Metal FA
+void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm) {
+    if (!tq_k_outlier_mask) {
+        for (int i = 0; i < tq_head_dim; i++) perm[i] = (uint8_t)i;
+        return;
+    }
+    const uint32_t * mask = is_k ? TQ_MASK_K(layer, head) : TQ_MASK_V(layer, head);
+    int n_hi = tq_head_dim / 4;
+    int oi = 0, ri = n_hi;
+    for (int i = 0; i < tq_head_dim; i++) {
+        if (tq_is_outlier(mask, i)) {
+            perm[oi++] = (uint8_t)i;
+        } else {
+            perm[ri++] = (uint8_t)i;
+        }
+    }
 }
 
 void tq_get_qjl_matrix(float * out, int dim, uint64_t seed) {
@@ -1284,7 +1402,7 @@ void quantize_row_tqk_5hi_3lo_qr_ref(const float * GGML_RESTRICT x, block_tqk_5h
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
         const float * xb = x + i * TQK_BLOCK_SIZE;
 
         // Split into outlier/regular
@@ -1355,7 +1473,7 @@ void dequantize_row_tqk_5hi_3lo_qr(const block_tqk_5hi_3lo * GGML_RESTRICT x, fl
         // Check if this block is a sink — read fp16 from k_sink tensor instead
         if (tq_try_sink_dequant(&x[i], y + i * TQK_BLOCK_SIZE, TQK_BLOCK_SIZE)) continue;
 
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
@@ -1405,7 +1523,7 @@ void ggml_vec_dot_tqk_5hi_3lo_qr_f32(
             continue;
         }
 
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
@@ -1448,7 +1566,7 @@ void quantize_row_tqk_5hi_3lo_had_ref(const float * GGML_RESTRICT x, block_tqk_5
     tq_init_rotations();
 
     for (int64_t i = 0; i < nb; i++) {
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
         const float * xb = x + i * TQK_BLOCK_SIZE;
 
         // Split into outlier/regular
@@ -1525,7 +1643,7 @@ void dequantize_row_tqk_5hi_3lo_had(const block_tqk_5hi_3lo * GGML_RESTRICT x, f
         // Check if this block is a sink — read fp16 from k_sink tensor instead
         if (tq_try_sink_dequant(&x[i], y + i * TQK_BLOCK_SIZE, TQK_BLOCK_SIZE)) continue;
 
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
@@ -1582,7 +1700,7 @@ void ggml_vec_dot_tqk_5hi_3lo_had_f32(
             continue;
         }
 
-        if (nb > 1) tq_cur_head = (int)(i % TQ_MAX_HEADS);
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
         float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
 
@@ -1610,6 +1728,581 @@ void ggml_vec_dot_tqk_5hi_3lo_had_f32(
 
         // QJL correction on hi (raw query, not rotated)
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32,
+                                           x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
+
+        sumf += mse_dot + qjl_hi;
+    }
+
+    *s = sumf;
+}
+
+// ===========================================================================
+// d=256 TurboQuant CPU reference functions
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// TQK had_mse4_d256: H_256 Hadamard + 4-bit MSE, no split, no calibration
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqk_had_mse4_d256_ref(const float * GGML_RESTRICT x, block_tqk_had_mse4_d256 * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * TQK_BLOCK_SIZE_D256;
+
+        float sum_sq = 0.0f;
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+
+        if (norm == 0.0f) { memset(y[i].qs, 0, sizeof(y[i].qs)); continue; }
+        float inv = 1.0f / norm;
+
+        float rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) rot[j] = xb[j] * inv;
+        tq_fwht(rot, TQK_BLOCK_SIZE_D256);
+
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            int idx = nearest(rot[j], centroids_16_d256, 16);
+            pk4(y[i].qs, j, idx);
+        }
+    }
+
+    // Write fp16 copy to k_sink tensor (only for sink positions)
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_had_mse4_d256));
+}
+
+void dequantize_row_tqk_had_mse4_d256(const block_tqk_had_mse4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+
+    for (int64_t i = 0; i < nb; i++) {
+        // Check if this block is a sink -- read fp16 from k_sink tensor instead
+        if (tq_try_sink_dequant(&x[i], y + i * TQK_BLOCK_SIZE_D256, TQK_BLOCK_SIZE_D256)) continue;
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+        float rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            rot[j] = centroids_16_d256[up4(x[i].qs, j)];
+        }
+        tq_fwht(rot, TQK_BLOCK_SIZE_D256);
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) y[i * TQK_BLOCK_SIZE_D256 + j] = norm * rot[j];
+    }
+}
+
+// Asymmetric vec_dot: rotate Q with H_256, dot with stored centroids
+void ggml_vec_dot_tqk_had_mse4_d256_f32(
+        int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx,
+        const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE_D256 == 0);
+    assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+
+    const block_tqk_had_mse4_d256 * GGML_RESTRICT x = (const block_tqk_had_mse4_d256 *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE_D256;
+
+    float sumf = 0.0f;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i * TQK_BLOCK_SIZE_D256;
+
+        // Check if this block is a sink -- do fp16 dot from k_sink tensor
+        float sink_dot;
+        if (tq_try_sink_dot(&x[i], q, TQK_BLOCK_SIZE_D256, &sink_dot)) {
+            sumf += sink_dot;
+            continue;
+        }
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        // Rotate Q with H_256
+        float q_rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) q_rot[j] = q[j];
+        tq_fwht(q_rot, TQK_BLOCK_SIZE_D256);
+
+        // Dot with stored centroids
+        float dot = 0.0f;
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            dot += q_rot[j] * centroids_16_d256[up4(x[i].qs, j)];
+        }
+
+        sumf += norm * dot;
+    }
+
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// TQV had_mse4_d256: V cache 4-bit MSE, per-block norm, d=256
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqv_had_mse4_d256_ref(const float * GGML_RESTRICT x, block_tqv_had_mse4_d256 * GGML_RESTRICT y, int64_t k) {
+    quantize_row_tqk_had_mse4_d256_ref(x, (block_tqk_had_mse4_d256 *)y, k);
+}
+
+void dequantize_row_tqv_had_mse4_d256(const block_tqv_had_mse4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+
+    for (int64_t i = 0; i < nb; i++) {
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+        float rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            rot[j] = centroids_16_d256[up4(x[i].qs, j)];
+        }
+        tq_fwht(rot, TQK_BLOCK_SIZE_D256); // inverse FWHT = FWHT (self-inverse)
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) y[i * TQK_BLOCK_SIZE_D256 + j] = norm * rot[j];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TQK had_prod5_d256: H_256 Hadamard + 4-bit MSE + 1-bit QJL (unbiased)
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqk_had_prod5_d256_ref(const float * GGML_RESTRICT x, block_tqk_had_prod5_d256 * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * TQK_BLOCK_SIZE_D256;
+
+        // L2 norm
+        float sum_sq = 0.0f;
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+        y[i].rnorm = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].signs, 0, sizeof(y[i].signs));
+
+        if (norm == 0.0f) { memset(y[i].qs, 0, sizeof(y[i].qs)); continue; }
+        float inv = 1.0f / norm;
+
+        // Normalize and apply H_256 via FWHT
+        float rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) rot[j] = xb[j] * inv;
+        tq_fwht(rot, TQK_BLOCK_SIZE_D256);
+
+        // 4-bit MSE quantize (16 centroids, d=256)
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            int idx = nearest(rot[j], centroids_16_d256, 16);
+            pk4(y[i].qs, j, idx);
+        }
+
+        // Compute residual in ORIGINAL space: r = x - norm * H^{-1} * centroids
+        float recon[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) recon[j] = centroids_16_d256[up4(y[i].qs, j)];
+        tq_fwht(recon, TQK_BLOCK_SIZE_D256);  // inverse FWHT = FWHT (self-inverse)
+        float resid[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) resid[j] = xb[j] - norm * recon[j];
+
+        // QJL forward on residual
+        y[i].rnorm = GGML_FP32_TO_FP16(qjl_forward(resid, y[i].signs, TQK_BLOCK_SIZE_D256, QJL_SEED_256));
+    }
+
+    // Write fp16 copy to k_sink tensor (only for sink positions)
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_had_prod5_d256));
+}
+
+void dequantize_row_tqk_had_prod5_d256(const block_tqk_had_prod5_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+
+    for (int64_t i = 0; i < nb; i++) {
+        // Check if this block is a sink -- read fp16 from k_sink tensor instead
+        if (tq_try_sink_dequant(&x[i], y + i * TQK_BLOCK_SIZE_D256, TQK_BLOCK_SIZE_D256)) continue;
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        // MSE reconstruction: centroids -> inverse FWHT -> scale by norm
+        float rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            rot[j] = centroids_16_d256[up4(x[i].qs, j)];
+        }
+        tq_fwht(rot, TQK_BLOCK_SIZE_D256);
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) y[i * TQK_BLOCK_SIZE_D256 + j] = norm * rot[j];
+
+        // QJL correction on residual
+        float corr[TQK_BLOCK_SIZE_D256];
+        qjl_inverse(x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm), corr, TQK_BLOCK_SIZE_D256, QJL_SEED_256);
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) y[i * TQK_BLOCK_SIZE_D256 + j] += corr[j];
+    }
+}
+
+// Asymmetric vec_dot: rotate Q with H_256, dot with stored centroids + QJL correction
+void ggml_vec_dot_tqk_had_prod5_d256_f32(
+        int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx,
+        const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE_D256 == 0);
+    assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+
+    const block_tqk_had_prod5_d256 * GGML_RESTRICT x = (const block_tqk_had_prod5_d256 *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE_D256;
+
+    float sumf = 0.0f;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i * TQK_BLOCK_SIZE_D256;
+
+        // Check if this block is a sink -- do fp16 dot from k_sink tensor
+        float sink_dot;
+        if (tq_try_sink_dot(&x[i], q, TQK_BLOCK_SIZE_D256, &sink_dot)) {
+            sumf += sink_dot;
+            continue;
+        }
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        // Rotate Q with H_256
+        float q_rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) q_rot[j] = q[j];
+        tq_fwht(q_rot, TQK_BLOCK_SIZE_D256);
+
+        // MSE centroid dot
+        float dot = 0.0f;
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            dot += q_rot[j] * centroids_16_d256[up4(x[i].qs, j)];
+        }
+        float mse_dot = norm * dot;
+
+        // QJL correction: q_rot is already FWHT(q), which is H*q
+        float qjl_dot = qjl_asymmetric_dot_rotated(q_rot, TQK_BLOCK_SIZE_D256,
+                                            x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm));
+
+        sumf += mse_dot + qjl_dot;
+    }
+
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// TQK had_prod4_d256: H_256 Hadamard + 3-bit MSE + 1-bit QJL (4.13 bpv)
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqk_had_prod4_d256_ref(const float * GGML_RESTRICT x, block_tqk_had_prod4_d256 * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * TQK_BLOCK_SIZE_D256;
+
+        // L2 norm
+        float sum_sq = 0.0f;
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+        y[i].rnorm = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].signs, 0, sizeof(y[i].signs));
+
+        if (norm == 0.0f) { memset(y[i].qs, 0, sizeof(y[i].qs)); continue; }
+        float inv = 1.0f / norm;
+
+        // Normalize and apply H_256 via FWHT
+        float rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) rot[j] = xb[j] * inv;
+        tq_fwht(rot, TQK_BLOCK_SIZE_D256);
+
+        // 3-bit MSE quantize (8 centroids, d=256)
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            int idx = nearest(rot[j], centroids_8_d256, 8);
+            pk3(y[i].qs, j, idx);
+        }
+
+        // Compute residual in ORIGINAL space: r = x - norm * H^{-1} * centroids
+        float recon[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) recon[j] = centroids_8_d256[up3(y[i].qs, j)];
+        tq_fwht(recon, TQK_BLOCK_SIZE_D256);  // inverse FWHT = FWHT (self-inverse)
+        float resid[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) resid[j] = xb[j] - norm * recon[j];
+
+        // QJL forward on residual
+        y[i].rnorm = GGML_FP32_TO_FP16(qjl_forward(resid, y[i].signs, TQK_BLOCK_SIZE_D256, QJL_SEED_256));
+    }
+
+    // Write fp16 copy to k_sink tensor (only for sink positions)
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_had_prod4_d256));
+}
+
+void dequantize_row_tqk_had_prod4_d256(const block_tqk_had_prod4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+
+    for (int64_t i = 0; i < nb; i++) {
+        // Check if this block is a sink -- read fp16 from k_sink tensor instead
+        if (tq_try_sink_dequant(&x[i], y + i * TQK_BLOCK_SIZE_D256, TQK_BLOCK_SIZE_D256)) continue;
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        // MSE reconstruction: centroids -> inverse FWHT -> scale by norm
+        float rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            rot[j] = centroids_8_d256[up3(x[i].qs, j)];
+        }
+        tq_fwht(rot, TQK_BLOCK_SIZE_D256);
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) y[i * TQK_BLOCK_SIZE_D256 + j] = norm * rot[j];
+
+        // QJL correction on residual
+        float corr[TQK_BLOCK_SIZE_D256];
+        qjl_inverse(x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm), corr, TQK_BLOCK_SIZE_D256, QJL_SEED_256);
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) y[i * TQK_BLOCK_SIZE_D256 + j] += corr[j];
+    }
+}
+
+// Asymmetric vec_dot: rotate Q with H_256, dot with stored centroids + QJL correction
+void ggml_vec_dot_tqk_had_prod4_d256_f32(
+        int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx,
+        const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE_D256 == 0);
+    assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+
+    const block_tqk_had_prod4_d256 * GGML_RESTRICT x = (const block_tqk_had_prod4_d256 *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE_D256;
+
+    float sumf = 0.0f;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i * TQK_BLOCK_SIZE_D256;
+
+        // Check if this block is a sink -- do fp16 dot from k_sink tensor
+        float sink_dot;
+        if (tq_try_sink_dot(&x[i], q, TQK_BLOCK_SIZE_D256, &sink_dot)) {
+            sumf += sink_dot;
+            continue;
+        }
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        // Rotate Q with H_256
+        float q_rot[TQK_BLOCK_SIZE_D256];
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) q_rot[j] = q[j];
+        tq_fwht(q_rot, TQK_BLOCK_SIZE_D256);
+
+        // MSE centroid dot (3-bit, 8 centroids)
+        float dot = 0.0f;
+        for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+            dot += q_rot[j] * centroids_8_d256[up3(x[i].qs, j)];
+        }
+        float mse_dot = norm * dot;
+
+        // QJL correction: q_rot is already FWHT(q), which is H*q
+        float qjl_dot = qjl_asymmetric_dot_rotated(q_rot, TQK_BLOCK_SIZE_D256,
+                                            x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm));
+
+        sumf += mse_dot + qjl_dot;
+    }
+
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// TQK 5hi_3lo_had_d256: 64/192 split, FWHT rotation, 4-bit MSE + QJL hi,
+// 3-bit MSE lo. Hi uses H_64 FWHT. Lo uses 3 x H_64 FWHT (block-diagonal
+// on 192 = 3 x 64). Lo centroids use d=64 (each 64-dim block is independent).
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqk_5hi_3lo_had_d256_ref(const float * GGML_RESTRICT x, block_tqk_5hi_3lo_d256 * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+    tq_init_rotations();
+
+    for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        const float * xb = x + i * TQK_BLOCK_SIZE_D256;
+
+        // Split into outlier/regular using per-head bitmask
+        float hi_raw[TQK_N_OUTLIER_D256], lo_raw[TQK_N_REGULAR_D256];
+        const uint32_t * mask = TQ_MASK_K(tq_cur_layer, tq_cur_head);
+        {
+            int oi = 0, ri = 0;
+            for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+                if (tq_is_outlier(mask, j)) hi_raw[oi++] = xb[j];
+                else                        lo_raw[ri++] = xb[j];
+            }
+        }
+
+        // FWHT rotation: H_64 on hi, 3 x H_64 on lo
+        float hi_rot[TQK_N_OUTLIER_D256], lo_rot[TQK_N_REGULAR_D256];
+        memcpy(hi_rot, hi_raw, sizeof(hi_rot));
+        tq_fwht(hi_rot, TQK_N_OUTLIER_D256);
+        memcpy(lo_rot, lo_raw, sizeof(lo_rot));
+        tq_fwht(lo_rot,       TQK_N_OUTLIER_D256);  // lo[0:64]
+        tq_fwht(lo_rot + 64,  TQK_N_OUTLIER_D256);  // lo[64:128]
+        tq_fwht(lo_rot + 128, TQK_N_OUTLIER_D256);  // lo[128:192]
+
+        // Per-subset norms
+        float sum_hi = 0.0f, sum_lo = 0.0f;
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) sum_hi += hi_rot[j] * hi_rot[j];
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) sum_lo += lo_rot[j] * lo_rot[j];
+        float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
+
+        y[i].norm_hi  = GGML_FP32_TO_FP16(norm_hi);
+        y[i].norm_lo  = GGML_FP32_TO_FP16(norm_lo);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+
+        if (norm_hi == 0.0f && norm_lo == 0.0f) {
+            memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+            memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+            continue;
+        }
+
+        float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
+        float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
+
+        // 4-bit MSE for hi (16 centroids, d=64)
+        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) {
+            float xn = hi_rot[j] * inv_hi;
+            int idx = nearest(xn, centroids_16_d64, 16);
+            pk4(y[i].qs_hi, j, idx);
+        }
+
+        // 3-bit MSE for lo (8 centroids, d=192 -- each 64-dim block uses d=64 centroids)
+        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) {
+            float xn = lo_rot[j] * inv_lo;
+            int idx = nearest(xn, centroids_8_d192, 8);
+            pk3(y[i].qs_lo, j, idx);
+        }
+
+        // QJL on hi residual (in original subset space)
+        // Reconstruct: unrotate centroids via inverse FWHT
+        float yhi[TQK_N_OUTLIER_D256];
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) yhi[j] = centroids_16_d64[up4(y[i].qs_hi, j)];
+        float hi_rec[TQK_N_OUTLIER_D256];
+        memcpy(hi_rec, yhi, sizeof(hi_rec));
+        tq_fwht(hi_rec, TQK_N_OUTLIER_D256); // inverse = forward for normalized FWHT
+        float r_hi[TQK_N_OUTLIER_D256];
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) r_hi[j] = hi_raw[j] - norm_hi * hi_rec[j];
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQK_N_OUTLIER_D256, QJL_SEED_64));
+    }
+
+    // Write fp16 copy to k_sink tensor (only for sink positions)
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_5hi_3lo_d256));
+}
+
+void dequantize_row_tqk_5hi_3lo_had_d256(const block_tqk_5hi_3lo_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE_D256 == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE_D256;
+    tq_init_rotations();
+
+    for (int64_t i = 0; i < nb; i++) {
+        // Check if this block is a sink -- read fp16 from k_sink tensor instead
+        if (tq_try_sink_dequant(&x[i], y + i * TQK_BLOCK_SIZE_D256, TQK_BLOCK_SIZE_D256)) continue;
+
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
+        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+
+        // MSE recon: centroids -> inverse FWHT -> scale
+        float yhi[TQK_N_OUTLIER_D256], ylo[TQK_N_REGULAR_D256];
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) yhi[j] = centroids_16_d64[up4(x[i].qs_hi, j)];
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) ylo[j] = centroids_8_d192[up3(x[i].qs_lo, j)];
+
+        // Inverse FWHT
+        float hi_orig[TQK_N_OUTLIER_D256], lo_orig[TQK_N_REGULAR_D256];
+        memcpy(hi_orig, yhi, sizeof(hi_orig));
+        tq_fwht(hi_orig, TQK_N_OUTLIER_D256);
+        memcpy(lo_orig, ylo, sizeof(lo_orig));
+        tq_fwht(lo_orig,       TQK_N_OUTLIER_D256);
+        tq_fwht(lo_orig + 64,  TQK_N_OUTLIER_D256);
+        tq_fwht(lo_orig + 128, TQK_N_OUTLIER_D256);
+
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) hi_orig[j] *= norm_hi;
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] *= norm_lo;
+
+        // QJL correction on hi
+        float corr_hi[TQK_N_OUTLIER_D256];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQK_N_OUTLIER_D256, QJL_SEED_64);
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) hi_orig[j] += corr_hi[j];
+
+        // Merge back using per-head bitmask
+        float * out = y + i * TQK_BLOCK_SIZE_D256;
+        const uint32_t * mask = TQ_MASK_K(tq_cur_layer, tq_cur_head);
+        {
+            int oi = 0, ri = 0;
+            for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+                if (tq_is_outlier(mask, j)) out[j] = hi_orig[oi++];
+                else                        out[j] = lo_orig[ri++];
+            }
+        }
+    }
+}
+
+// Asymmetric vec_dot for 5hi_3lo_had_d256
+void ggml_vec_dot_tqk_5hi_3lo_had_d256_f32(
+        int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx,
+        const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE_D256 == 0);
+    assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+
+    tq_init_rotations();
+
+    const block_tqk_5hi_3lo_d256 * GGML_RESTRICT x = (const block_tqk_5hi_3lo_d256 *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE_D256;
+
+    float sumf = 0.0f;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i * TQK_BLOCK_SIZE_D256;
+
+        // Check if this block is a sink -- do fp16 dot from k_sink tensor
+        float sink_dot;
+        if (tq_try_sink_dot(&x[i], q, TQK_BLOCK_SIZE_D256, &sink_dot)) {
+            sumf += sink_dot;
+            continue;
+        }
+
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi);
+        float norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+
+        // Split query using per-head bitmask
+        float hi_raw[TQK_N_OUTLIER_D256], lo_raw[TQK_N_REGULAR_D256];
+        const uint32_t * mask = TQ_MASK_K(tq_cur_layer, tq_cur_head);
+        {
+            int oi = 0, ri = 0;
+            for (int j = 0; j < TQK_BLOCK_SIZE_D256; j++) {
+                if (tq_is_outlier(mask, j)) hi_raw[oi++] = q[j];
+                else                        lo_raw[ri++] = q[j];
+            }
+        }
+
+        // FWHT-rotate
+        float q_rot_hi[TQK_N_OUTLIER_D256], q_rot_lo[TQK_N_REGULAR_D256];
+        memcpy(q_rot_hi, hi_raw, sizeof(q_rot_hi));
+        tq_fwht(q_rot_hi, TQK_N_OUTLIER_D256);
+        memcpy(q_rot_lo, lo_raw, sizeof(q_rot_lo));
+        tq_fwht(q_rot_lo,       TQK_N_OUTLIER_D256);
+        tq_fwht(q_rot_lo + 64,  TQK_N_OUTLIER_D256);
+        tq_fwht(q_rot_lo + 128, TQK_N_OUTLIER_D256);
+
+        // MSE centroid dot per subset
+        float mse_dot_hi = 0.0f, mse_dot_lo = 0.0f;
+        for (int j = 0; j < TQK_N_OUTLIER_D256; j++) {
+            mse_dot_hi += q_rot_hi[j] * centroids_16_d64[up4(x[i].qs_hi, j)];
+        }
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) {
+            mse_dot_lo += q_rot_lo[j] * centroids_8_d192[up3(x[i].qs_lo, j)];
+        }
+        float mse_dot = mse_dot_hi * norm_hi + mse_dot_lo * norm_lo;
+
+        // QJL correction on hi (raw query, not rotated)
+        float qjl_hi = qjl_asymmetric_dot(hi_raw, TQK_N_OUTLIER_D256, QJL_SEED_64,
                                            x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
 
         sumf += mse_dot + qjl_hi;

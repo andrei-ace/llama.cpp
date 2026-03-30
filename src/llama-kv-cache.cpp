@@ -18,6 +18,11 @@ extern "C" {
     void tq_get_channel_map(int layer, int head, int is_k, int * outlier, int * regular);
     void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride, int64_t kv_size);
     void tq_clear_sink_state(void);
+    void tq_set_head_dim(int dim);
+    int  tq_get_head_dim(void);
+    void tq_init_calibration(int n_layers, int n_heads, int head_dim);
+    void tq_free_accum(void);
+    void tq_free_calibration(void);
 }
 
 #ifdef GGML_USE_METAL
@@ -137,7 +142,21 @@ llama_kv_cache::llama_kv_cache(
     // had_mse4 also goes through fp16 calibration to support sink capture
     // Types needing calibration (channel splitting): start as fp16, re-quantize after prompt
     // had_mse4 needs no calibration — allocated directly. Sinks handled in set_tq_n_sinks().
-    const bool uses_turbo_k = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_HAD);
+    // Auto-detect head_dim and remap to d=256 internal types if needed
+    const uint32_t head_dim = hparams.n_embd_head_k(0);
+    {
+        tq_set_head_dim((int)head_dim);
+        if (head_dim == 256) {
+            if (type_k == GGML_TYPE_TQK_HAD_MSE4)     type_k = GGML_TYPE_TQK_HAD_MSE4_D256;
+            if (type_k == GGML_TYPE_TQK_HAD_PROD5)    type_k = GGML_TYPE_TQK_HAD_PROD5_D256;
+            if (type_k == GGML_TYPE_TQK_HAD_PROD4)    type_k = GGML_TYPE_TQK_HAD_PROD4_D256;
+            if (type_k == GGML_TYPE_TQK_5HI_3LO_HAD)  type_k = GGML_TYPE_TQK_5HI_3LO_HAD_D256;
+            if (type_v == GGML_TYPE_TQV_HAD_MSE4)     type_v = GGML_TYPE_TQV_HAD_MSE4_D256;
+        }
+    }
+
+    const bool uses_turbo_k = (type_k == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                               type_k == GGML_TYPE_TQK_5HI_3LO_HAD_D256);
     const bool uses_turbo_v = false; // V types (tqv_had_mse4) don't need calibration
     ggml_type alloc_type_k = type_k;
     ggml_type alloc_type_v = type_v;
@@ -154,7 +173,7 @@ llama_kv_cache::llama_kv_cache(
             alloc_type_k = GGML_TYPE_F16;
             // V stays at target type — no calibration needed for V
             tq_calibrating_ = true;
-            tq_reset_calibration();
+            tq_init_calibration((int)n_layer_kv, (int)hparams.n_head_kv(0), (int)head_dim);
             LLAMA_LOG_INFO("%s: TurboQuant calibration enabled — K+V start as fp16\n", __func__);
         } else {
             LLAMA_LOG_INFO("%s: TurboQuant V-only — no calibration needed\n", __func__);
@@ -346,12 +365,15 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
     // TurboQuant: allocate and initialize rotation matrix for quantization quality
-    const bool uses_turbo = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_HAD ||
+    const bool uses_turbo = (type_k == GGML_TYPE_TQK_5HI_3LO_HAD ||
                              type_k == GGML_TYPE_TQK_HAD_MSE4 || type_k == GGML_TYPE_TQK_HAD_PROD5 ||
-                             type_k == GGML_TYPE_TQK_HAD_PROD4 || type_v == GGML_TYPE_TQV_HAD_MSE4);
+                             type_k == GGML_TYPE_TQK_HAD_PROD4 || type_v == GGML_TYPE_TQV_HAD_MSE4 ||
+                             type_k == GGML_TYPE_TQK_HAD_MSE4_D256 || type_k == GGML_TYPE_TQK_HAD_PROD5_D256 ||
+                             type_k == GGML_TYPE_TQK_HAD_PROD4_D256 || type_k == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
+                             type_v == GGML_TYPE_TQV_HAD_MSE4_D256);
     if (uses_turbo) {
         const uint32_t head_dim = hparams.n_embd_head_k(0);
-        GGML_ASSERT(head_dim == 128 && "TurboQuant currently only supports head_dim=128");
+        GGML_ASSERT((head_dim == 128 || head_dim == 256) && "TurboQuant supports head_dim=128 or 256");
 
         // Use the first layer's buffer type for the rotation matrix
         ggml_backend_buffer_type_t rot_buft = offload
@@ -560,15 +582,17 @@ void llama_kv_cache::tq_finish_calibration() {
 
     // 1b. Upload calibrated channel maps to Metal device
     {
-        int n_kv_heads = (!layers.empty() && layers[0].k) ? (int)(layers[0].k->ne[0] / 128) : 0;
+        const int head_dim = (int)hparams.n_embd_head_k(0);
+        int n_kv_heads = (!layers.empty() && layers[0].k) ? (int)(layers[0].k->ne[0] / head_dim) : 0;
         if (n_kv_heads < 1) n_kv_heads = 1;
         int n_layers_actual = max_layer_id + 1;
+        const int n_outlier = (head_dim == 256) ? 64 : 32;
 
-        std::vector<int32_t> chmap(n_layers_actual * n_kv_heads * 128);
+        std::vector<int32_t> chmap(n_layers_actual * n_kv_heads * head_dim);
         for (int l = 0; l < n_layers_actual; l++) {
             for (int h = 0; h < n_kv_heads; h++) {
-                int * row = chmap.data() + (l * n_kv_heads + h) * 128;
-                tq_get_channel_map(l, h, 1, row, row + 32);
+                int * row = chmap.data() + (l * n_kv_heads + h) * head_dim;
+                tq_get_channel_map(l, h, 1, row, row + n_outlier);
             }
         }
 

@@ -41,6 +41,12 @@ GGML_API void quantize_row_tqk_had_prod5_ref   (const float * GGML_RESTRICT x, b
 GGML_API void quantize_row_tqk_had_prod4_ref   (const float * GGML_RESTRICT x, block_tqk_had_prod4 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_tqv_had_mse4_ref    (const float * GGML_RESTRICT x, block_tqv_had_mse4 * GGML_RESTRICT y, int64_t k);
 
+GGML_API void quantize_row_tqk_had_mse4_d256_ref    (const float * GGML_RESTRICT x, block_tqk_had_mse4_d256  * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_had_prod5_d256_ref   (const float * GGML_RESTRICT x, block_tqk_had_prod5_d256 * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_had_prod4_d256_ref   (const float * GGML_RESTRICT x, block_tqk_had_prod4_d256 * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqk_5hi_3lo_had_d256_ref (const float * GGML_RESTRICT x, block_tqk_5hi_3lo_d256   * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_tqv_had_mse4_d256_ref    (const float * GGML_RESTRICT x, block_tqv_had_mse4_d256  * GGML_RESTRICT y, int64_t k);
+
 GGML_API void quantize_row_iq3_xxs_ref(const float * GGML_RESTRICT x, block_iq3_xxs * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_iq4_nl_ref (const float * GGML_RESTRICT x, block_iq4_nl  * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_iq4_xs_ref (const float * GGML_RESTRICT x, block_iq4_xs  * GGML_RESTRICT y, int64_t k);
@@ -75,12 +81,23 @@ GGML_API void dequantize_row_tqk_had_prod5   (const block_tqk_had_prod5 * GGML_R
 GGML_API void dequantize_row_tqk_had_prod4   (const block_tqk_had_prod4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_tqv_had_mse4    (const block_tqv_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 
+GGML_API void dequantize_row_tqk_had_mse4_d256    (const block_tqk_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_had_prod5_d256   (const block_tqk_had_prod5_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_had_prod4_d256   (const block_tqk_had_prod4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqk_5hi_3lo_had_d256 (const block_tqk_5hi_3lo_d256   * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_tqv_had_mse4_d256    (const block_tqv_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+
 // TurboQuant asymmetric inner product estimators
 GGML_API void ggml_vec_dot_tqk_5hi_3lo_qr_f32  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 GGML_API void ggml_vec_dot_tqk_5hi_3lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 GGML_API void ggml_vec_dot_tqk_had_mse4_f32    (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 GGML_API void ggml_vec_dot_tqk_had_prod5_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 GGML_API void ggml_vec_dot_tqk_had_prod4_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+
+GGML_API void ggml_vec_dot_tqk_had_mse4_d256_f32    (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+GGML_API void ggml_vec_dot_tqk_had_prod5_d256_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+GGML_API void ggml_vec_dot_tqk_had_prod4_d256_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+GGML_API void ggml_vec_dot_tqk_5hi_3lo_had_d256_f32 (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 
 GGML_API void dequantize_row_iq2_xxs(const block_iq2_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_iq2_xs (const block_iq2_xs  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);

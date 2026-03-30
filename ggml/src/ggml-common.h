@@ -330,6 +330,45 @@ static_assert(sizeof(block_tqk_5hi_3lo) == 3*sizeof(ggml_half) + TQK_N_OUTLIER*4
 // No rotation in dequant — rotation benefit is minimal for V.
 typedef block_tqk_had_mse4 block_tqv_had_mse4;
 
+// ---- d=256 TurboQuant block types ----
+#define TQK_BLOCK_SIZE_D256  256
+#define TQK_N_OUTLIER_D256    64   // 25% outlier split for d=256
+#define TQK_N_REGULAR_D256   192   // 75% regular split for d=256
+
+typedef struct {
+    ggml_half norm;                          // 2 bytes: L2 norm
+    uint8_t   qs[256 * 4 / 8];              // 128 bytes: 4-bit MSE indices
+} block_tqk_had_mse4_d256;
+static_assert(sizeof(block_tqk_had_mse4_d256) == 130, "wrong block_tqk_had_mse4_d256 size");
+
+typedef struct {
+    ggml_half norm;                          // 2 bytes: L2 norm
+    ggml_half rnorm;                         // 2 bytes: QJL residual norm
+    uint8_t   qs[256 * 4 / 8];              // 128 bytes: 4-bit MSE indices
+    uint8_t   signs[256 / 8];               // 32 bytes: 1-bit QJL signs
+} block_tqk_had_prod5_d256;
+static_assert(sizeof(block_tqk_had_prod5_d256) == 164, "wrong block_tqk_had_prod5_d256 size");
+
+typedef struct {
+    ggml_half norm;                          // 2 bytes: L2 norm
+    ggml_half rnorm;                         // 2 bytes: QJL residual norm
+    uint8_t   qs[256 * 3 / 8];              // 96 bytes: 3-bit MSE indices
+    uint8_t   signs[256 / 8];               // 32 bytes: 1-bit QJL signs
+} block_tqk_had_prod4_d256;
+static_assert(sizeof(block_tqk_had_prod4_d256) == 132, "wrong block_tqk_had_prod4_d256 size");
+
+typedef struct {
+    ggml_half norm_hi;                       // 2 bytes: outlier subset L2 norm
+    ggml_half norm_lo;                       // 2 bytes: regular subset L2 norm
+    ggml_half rnorm_hi;                      // 2 bytes: outlier QJL residual norm
+    uint8_t   qs_hi[64 * 4 / 8];            // 32 bytes: 4-bit indices (outliers)
+    uint8_t   qs_lo[192 * 3 / 8];           // 72 bytes: 3-bit indices (regulars)
+    uint8_t   signs_hi[64 / 8];             // 8 bytes: 1-bit signs (outliers)
+} block_tqk_5hi_3lo_d256;
+static_assert(sizeof(block_tqk_5hi_3lo_d256) == 118, "wrong block_tqk_5hi_3lo_d256 size");
+
+typedef block_tqk_had_mse4_d256 block_tqv_had_mse4_d256;
+
 //
 // Super-block quantization structures
 //

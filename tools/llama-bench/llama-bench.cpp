@@ -492,9 +492,6 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "tqk_had_prod4") {
         return GGML_TYPE_TQK_HAD_PROD4;
     }
-    if (s == "tqk_5hi_3lo_qr") {
-        return GGML_TYPE_TQK_5HI_3LO_QR;
-    }
     if (s == "tqk_5hi_3lo_had") {
         return GGML_TYPE_TQK_5HI_3LO_HAD;
     }
@@ -1200,7 +1197,14 @@ struct cmd_params_instance {
         cparams.type_k          = type_k;
         cparams.type_v          = type_v;
         cparams.offload_kqv     = !no_kv_offload;
-        cparams.flash_attn_type = flash_attn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        // TurboQuant types require flash attention
+        bool fa = flash_attn;
+        if (!fa) {
+            const bool tq_k = (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQV_HAD_MSE4_D256);
+            const bool tq_v = (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQV_HAD_MSE4_D256);
+            if (tq_k || tq_v) { fa = true; }
+        }
+        cparams.flash_attn_type = fa ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
         cparams.embeddings      = embeddings;
         cparams.op_offload      = !no_op_offload;
         cparams.swa_full        = false;

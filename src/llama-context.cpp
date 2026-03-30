@@ -2988,6 +2988,22 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
+    // TurboQuant types require Flash Attention — force it on if auto, reject if disabled
+    {
+        const bool tq_k = (params.type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_k <= GGML_TYPE_TQV_HAD_MSE4_D256);
+        const bool tq_v = (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQV_HAD_MSE4_D256);
+        if (tq_k || tq_v) {
+            if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+                LLAMA_LOG_ERROR("%s: TurboQuant KV cache types require flash_attn\n", __func__);
+                return nullptr;
+            }
+            if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
+                params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+                LLAMA_LOG_INFO("%s: TurboQuant detected — forcing flash_attn on\n", __func__);
+            }
+        }
+    }
+
     if (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED &&
         params.pooling_type != model->hparams.pooling_type) {
         //user-specified pooling-type is different from the model default
