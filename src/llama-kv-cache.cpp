@@ -631,20 +631,14 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    // Free fp16 calibration buffers — TQ tensors are in sink_bufs, fp16 in ctxs_bufs
-    if (tq_calib_buf_idx_ >= 0) {
-        size_t freed = 0;
-        for (auto & [ctx, buf] : ctxs_bufs) {
-            if (buf) freed += ggml_backend_buffer_get_size(buf.get());
-        }
-        // Move TQ buffer from sink_bufs to ctxs_bufs, drop fp16
-        ctxs_bufs.clear();
-        if (!sink_bufs.empty()) {
-            ctxs_bufs.push_back(std::move(sink_bufs[0]));
-            sink_bufs.erase(sink_bufs.begin());
-        }
+    // Move TQ buffer from sink_bufs into ctxs_bufs.
+    // Note: cannot free fp16 buffer because V cache tensors are still in it.
+    // The fp16 K data is unused but the buffer must stay for V.
+    // TODO: separate K and V into independent buffers to free fp16 K after calibration.
+    if (tq_calib_buf_idx_ >= 0 && !sink_bufs.empty()) {
+        ctxs_bufs.push_back(std::move(sink_bufs[0]));
+        sink_bufs.erase(sink_bufs.begin());
         tq_calib_buf_idx_ = -1;
-        LLAMA_LOG_INFO("%s: freed fp16 calibration buffers (%.2f MiB)\n", __func__, freed / 1024.0 / 1024.0);
     }
 
     for (int ikv = 0; ikv < (int)layers.size(); ikv++) {
