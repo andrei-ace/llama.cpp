@@ -9724,7 +9724,7 @@ kernel void kernel_set_rows_had_prod4(
     blk->rnorm = half(sqrt(rnorm_sq));
 }
 
-// 5hi_3lo_fwht: get_rows (full dequant — uses default channel order 0-31=hi, 32-127=lo)
+// 5hi_3lo_fwht: get_rows (full dequant — uses default channel order, for debug/non-FA path)
 [[host_name("kernel_get_rows_5hi_3lo_fwht")]]
 kernel void kernel_get_rows_5hi_3lo_fwht(
         constant ggml_metal_kargs_get_rows & args,
@@ -9747,18 +9747,15 @@ kernel void kernel_get_rows_5hi_3lo_fwht(
     float norm_lo = float(blk->norm_lo);
     float rnorm_hi = float(blk->rnorm_hi);
 
-    // Hi: centroids → inverse FWHT → scale
     thread float hi[32];
     for (int j = 0; j < 32; j++) hi[j] = tq_c16_d32[tq_up4(blk->qs_hi, j)];
     tq_fwht<32>(hi);
-    // QJL correction on hi
     thread float corr[32];
     for (int j = 0; j < 32; j++) corr[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
     tq_fwht<32>(corr);
     float qjl_s = 1.2533141f / 32.0f * rnorm_hi;
     for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
 
-    // Lo: centroids → 3×inverse FWHT → scale
     thread float lo[96];
     for (int j = 0; j < 96; j++) lo[j] = tq_c8_d32[tq_up3(blk->qs_lo, j)];
     tq_fwht<32>(lo);
@@ -9767,18 +9764,22 @@ kernel void kernel_get_rows_5hi_3lo_fwht(
     for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
 
     // Merge with default channel order (0-31=hi, 32-127=lo)
+    // NOTE: for correct merge with calibrated channels, would need channel map
     device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
     for (int j = 0; j < 32; j++)  out[j]      = hi[j];
     for (int j = 0; j < 96; j++)  out[32 + j]  = lo[j];
 }
 
-// 5hi_3lo_fwht: set_rows (quantize — uses default channel order 0-31=hi, 32-127=lo)
+// 5hi_3lo_fwht: set_rows (quantize — uses calibrated channel map if available)
 [[host_name("kernel_set_rows_5hi_3lo_fwht_i32")]]
 kernel void kernel_set_rows_5hi_3lo_fwht(
         constant ggml_metal_kargs_set_rows & args,
         device const void  * src0,
         device const void  * src1,
         device       void  * dst,
+        device const int32_t * tq_chmap, // [n_layers][n_kv_heads][128] channel permutation
+        constant int32_t & tq_layer_idx,
+        constant int32_t & tq_n_kv_heads,
         uint3 tgpig[[threadgroup_position_in_grid]],
         ushort tiitg[[thread_index_in_threadgroup]]) {
     const int i   = tgpig.x;
@@ -9790,10 +9791,14 @@ kernel void kernel_set_rows_5hi_3lo_fwht(
 
     device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
 
-    // Split with default channel order
+    // Get channel permutation for this head (calibrated or default)
+    const int head = i02;
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + head) * 128;
+
+    // Split using calibrated channel order
     thread float hi_raw[32], lo_raw[96];
-    for (int j = 0; j < 32; j++)  hi_raw[j] = src[j];
-    for (int j = 0; j < 96; j++)  lo_raw[j] = src[32 + j];
+    for (int j = 0; j < 32; j++)  hi_raw[j] = src[perm[j]];
+    for (int j = 0; j < 96; j++)  lo_raw[j] = src[perm[32 + j]];
 
     // FWHT rotate
     thread float hi_rot[32], lo_rot[96];

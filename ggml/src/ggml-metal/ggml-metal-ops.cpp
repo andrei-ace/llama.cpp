@@ -1254,6 +1254,20 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
         ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op),         3);
 
+        // 5hi_3lo: pass channel map buffer and layer index for calibrated channel ordering
+        if (dst_type == GGML_TYPE_TQK_5HI_3LO_FWHT) {
+            // get_tq_channel_map auto-creates default map if none exists yet
+            ggml_metal_buffer_id bid_chmap = ggml_metal_device_get_tq_channel_map(ctx->dev);
+            ggml_metal_encoder_set_buffer(enc, bid_chmap, 4);
+            // Extract layer index from tensor name "cache_k_l<N>"
+            int32_t layer_idx = 0;
+            const char * lp = strstr(op->name, "_l");
+            if (lp) layer_idx = atoi(lp + 2);
+            int32_t n_kv_heads = (int32_t)ne02;
+            ggml_metal_encoder_set_bytes(enc, &layer_idx,  sizeof(layer_idx),  5);
+            ggml_metal_encoder_set_bytes(enc, &n_kv_heads, sizeof(n_kv_heads), 6);
+        }
+
         ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, n_blocks, 1, 1);
 
         return 1;
