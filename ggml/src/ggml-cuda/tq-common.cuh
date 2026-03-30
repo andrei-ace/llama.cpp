@@ -47,6 +47,12 @@ static __device__ __constant__ float tq_c8_d96[8] = {
 #define QJL_SCALE_128 (1.2533141f / 128.0f)
 #define QJL_SCALE_32  (1.2533141f / 32.0f)
 
+// Device-side pointer to channel map for 5hi_3lo FA kernels.
+// Set by host before launching FA kernels that use 5hi_3lo K types.
+// Layout: [n_layers][n_kv_heads][128] int32_t — first 32 are outlier indices, next 96 regular.
+extern __device__ const int32_t * tq_fa_channel_map_ptr;
+extern __device__ int             tq_fa_chmap_n_heads;
+
 // ---------------------------------------------------------------------------
 // Bit pack/unpack helpers
 // ---------------------------------------------------------------------------

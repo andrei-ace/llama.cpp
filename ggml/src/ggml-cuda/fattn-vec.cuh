@@ -243,37 +243,62 @@ static __global__ void flash_attn_ext_vec(
     }
 
     // TurboQuant: pre-rotate Q with FWHT in shared memory.
-    // Reload Q from global memory → shared → FWHT → Q_reg.
-    // Q_reg must use the same interleaved layout as the standard f16 loading path.
+    // For had_* types: full H_128 FWHT on Q.
+    // For 5hi_3lo_had: permute Q via channel map into [hi(32), lo(96)], then four H_32 FWHTs.
     if constexpr (type_K_is_tq && !Q_q8_1) {
         constexpr int cpy_nb_tq = ggml_cuda_get_max_cpy_bytes();
         constexpr int cpy_ne_tq = cpy_nb_tq / 4;
+        constexpr bool is_5hi_3lo = (type_K == GGML_TYPE_TQK_5HI_3LO_HAD);
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
             float * shmem = (float *) KQ;
 
-            // Load Q into shared memory as D floats
-            for (int i = tid; i < D; i += nthreads) {
-                if (ncols == 1 || ic0 + j < int(ne01.z)) {
-                    shmem[i] = scale * ((const float *)(Q + j*nb01))[i];
-                } else {
-                    shmem[i] = 0.0f;
+            if constexpr (!is_5hi_3lo) {
+                // had_* types: load Q → FWHT-128
+                for (int i = tid; i < D; i += nthreads) {
+                    if (ncols == 1 || ic0 + j < int(ne01.z)) {
+                        shmem[i] = scale * ((const float *)(Q + j*nb01))[i];
+                    } else {
+                        shmem[i] = 0.0f;
+                    }
                 }
+                __syncthreads();
+                tq_fwht_shared<D>(shmem, tid, nthreads);
+            } else {
+                // 5hi_3lo_had: permute Q via channel map, then four FWHT-32
+                // Channel map for this head: perm[0..31] = outlier indices, perm[32..127] = regular
+                const int kv_head = head / gqa_ratio;
+                // Use layer 0 channel map for FA (the permutation is per-head, not per-layer for FA)
+                // TODO: per-layer channel maps in FA require passing layer info
+                const int32_t * perm = tq_fa_channel_map_ptr + (int64_t)kv_head * 128;
+
+                // Load Q permuted: shmem[0..31] = Q[perm[0..31]], shmem[32..127] = Q[perm[32..127]]
+                const float * Q_src = (ncols == 1 || ic0 + j < int(ne01.z))
+                    ? (const float *)(Q + j*nb01) : nullptr;
+                for (int i = tid; i < D; i += nthreads) {
+                    if (Q_src) {
+                        shmem[i] = scale * Q_src[perm[i]];
+                    } else {
+                        shmem[i] = 0.0f;
+                    }
+                }
+                __syncthreads();
+
+                // Four independent FWHT-32: hi[0..31], lo[32..63], lo[64..95], lo[96..127]
+                tq_fwht_shared<32>(shmem,      tid, nthreads);
+                tq_fwht_shared<32>(shmem + 32, tid, nthreads);
+                tq_fwht_shared<32>(shmem + 64, tid, nthreads);
+                tq_fwht_shared<32>(shmem + 96, tid, nthreads);
             }
-            __syncthreads();
 
-            // Apply FWHT in shared memory (normalized, self-inverse)
-            tq_fwht_shared<D>(shmem, tid, nthreads);
-
-            // Reload into Q_reg using the same interleaved pattern as the f16 path:
-            // Q_reg[j][i0/nthreads_KQ + k] ← shmem float2 at index (i0 + lane*cpy_ne + k)
+            // Reload into Q_reg using the same interleaved pattern as the f16 path
             const int lane_kq = (nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ);
 #pragma unroll
             for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ * cpy_ne_tq) {
                 const int base = i0 + lane_kq * cpy_ne_tq;
 #pragma unroll
                 for (int k = 0; k < cpy_ne_tq; ++k) {
-                    const int si = (base + k) * 2; // scalar index into shmem
+                    const int si = (base + k) * 2;
 #ifdef V_DOT2_F32_F16_AVAILABLE
                     Q_reg[j][i0/nthreads_KQ + k] = make_half2(__float2half(shmem[si]), __float2half(shmem[si + 1]));
 #else
