@@ -162,8 +162,13 @@ public:
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
+    // get fp16 sink tensor for first n_sinks K positions (nullptr if no sinks)
+    uint32_t get_tq_n_sinks() const { return tq_n_sinks_; }
+    void set_tq_n_sinks(uint32_t n);
+
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
+    ggml_tensor * cpy_k_sink(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
 
     //
@@ -199,6 +204,16 @@ public:
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
+    // TurboQuant rotation matrices
+    ggml_tensor * get_turbo_rot_forward() const { return turbo_rotation; }
+    ggml_tensor * get_turbo_rot_inverse() const { return turbo_rotation_inv; }
+
+    // TurboQuant outlier calibration
+    bool is_tq_calibrating() const { return tq_calibrating_; }
+    void tq_try_finish_calibration(); // checks min accumulation threshold
+    void tq_finish_calibration();     // unconditionally locks and re-quantizes
+    void tq_expire_sinks();           // re-quantize fp16 sink blocks → TQ, clear sink state
+
 private:
     const llama_model & model;
     const llama_hparams & hparams;
@@ -213,6 +228,13 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        // Pre-allocated TQ tensors for GPU calibration (avoids Metal allocation deadlock)
+        ggml_tensor * k_tq = nullptr;
+        ggml_tensor * v_tq = nullptr;
+
+        // fp16 sink tensor — first N tokens kept as fp16 for attention quality
+        ggml_tensor * k_sink = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -248,6 +270,23 @@ private:
     stream_copy_info sc_info;
 
     std::vector<kv_layer> layers;
+
+    // TurboQuant rotation matrices (nullptr if not using turbo types)
+    ggml_tensor * turbo_rotation     = nullptr;
+    ggml_tensor * turbo_rotation_inv = nullptr;
+
+    // TurboQuant outlier calibration state
+    ggml_type target_type_k = GGML_TYPE_F16;  // user-requested TQ type (cache starts as fp16)
+    ggml_type target_type_v = GGML_TYPE_F16;
+    bool tq_calibrating_ = false;             // true during prompt (cache is fp16, accumulating)
+    uint32_t tq_n_sinks_ = 0;                 // number of initial tokens to keep as fp16
+
+    // Named calibration buffers (not indexed, explicit ownership)
+    std::pair<ggml_context_ptr, ggml_backend_buffer_ptr> tq_calib_k_buf_;  // fp16 K during calibration
+    std::pair<ggml_context_ptr, ggml_backend_buffer_ptr> tq_buf_;          // pre-allocated TQ tensors
+
+    // Sink buffer storage (k_sink fp16 tensors, separate from ctxs_bufs)
+    std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> sink_bufs;
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
@@ -332,6 +371,10 @@ public:
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
 
+    // TurboQuant rotation matrices (nullptr if not using turbo types)
+    ggml_tensor * get_turbo_rot() const;
+    ggml_tensor * get_turbo_rot_inv() const;
+
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be layed out contiguously in memory
     //   - k_cur  [n_embd_head_k, n_head_k, n_tokens]
@@ -339,6 +382,7 @@ public:
     //   - v_cur  [n_embd_head_v, n_head_v, n_tokens]
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
+    ggml_tensor * cpy_k_sink(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
@@ -353,6 +397,10 @@ public:
     void set_input_k_shift   (ggml_tensor * dst) const;
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+
+    // TurboQuant rotation matrices (delegated to parent KV cache)
+    ggml_tensor * get_turbo_rot_forward() const override;
+    ggml_tensor * get_turbo_rot_inverse() const override;
 
 private:
     llama_memory_status status;

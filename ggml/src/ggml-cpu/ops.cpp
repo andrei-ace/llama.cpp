@@ -7,10 +7,12 @@
 #include "ggml.h"
 #include "unary-ops.h"
 #include "vec.h"
+#include "quants.h"
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 
 // ggml_compute_forward_dup
 
@@ -566,6 +568,40 @@ void ggml_compute_forward_dup(
             {
                 if (ggml_is_quantized(src0->type) && dst->type == GGML_TYPE_F32) {
                     ggml_compute_forward_dup_from_q(params, dst);
+                    break;
+                }
+                if (ggml_is_quantized(src0->type) && dst->type == GGML_TYPE_F16) {
+                    // quantized → fp16: dequantize to f32 then convert
+                    ggml_compute_forward_dup_from_q(params, dst);
+                    // dst was filled as f32 by dup_from_q — reinterpret and convert in-place
+                    // Actually, dup_from_q writes to dst which is fp16 — that won't work.
+                    // Instead, use a two-pass approach per row.
+                    const int64_t ne00 = src0->ne[0];
+                    const int64_t ne01 = src0->ne[1];
+                    const int64_t ne02 = src0->ne[2];
+                    const int64_t ne03 = src0->ne[3];
+                    const int64_t nr = ggml_nrows(src0);
+                    const int ith = params->ith;
+                    const int nth = params->nth;
+                    const int64_t ir0 = (int64_t)ith * nr / nth;
+                    const int64_t ir1 = (int64_t)(ith + 1) * nr / nth;
+
+                    ggml_to_float_t const to_float = ggml_get_type_traits(src0->type)->to_float;
+                    const size_t src_row_size = ggml_row_size(src0->type, ne00);
+                    float tmp[4096];
+                    GGML_ASSERT(ne00 <= 4096);
+
+                    for (int64_t ir = ir0; ir < ir1; ir++) {
+                        const int64_t i3 = ir / (ne02 * ne01);
+                        const int64_t i2 = (ir - i3 * ne02 * ne01) / ne01;
+                        const int64_t i1 = ir - i3 * ne02 * ne01 - i2 * ne01;
+                        const char * src_row = (const char *)src0->data + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
+                        ggml_fp16_t * dst_row = (ggml_fp16_t *)((char *)dst->data + i1*dst->nb[1] + i2*dst->nb[2] + i3*dst->nb[3]);
+                        to_float(src_row, tmp, ne00);
+                        for (int64_t j = 0; j < ne00; j++) {
+                            dst_row[j] = GGML_FP32_TO_FP16(tmp[j]);
+                        }
+                    }
                     break;
                 }
                 GGML_ABORT("fatal error");
@@ -4662,6 +4698,16 @@ static void ggml_compute_forward_get_rows_q(
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
+    // TurboQuant: set per-layer context for dequantize
+    {
+        const struct ggml_tensor * root = src0;
+        while (root->view_src) root = root->view_src;
+        int layer = -1; int is_k = 1;
+        if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
+        else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
+        if (layer >= 0) { tq_set_current_layer(layer, is_k); }
+    }
+
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int64_t nc = ne00;
@@ -4913,6 +4959,29 @@ static void ggml_compute_forward_set_rows_f32(
     assert(src0->type == GGML_TYPE_F32);
     assert(ne02 % ne11 == 0);
     assert(ne03 % ne12 == 0);
+
+    // TurboQuant: detect layer from cache tensor name, set for quantize functions
+    // Also accumulate channel magnitudes during calibration phase
+    {
+        const struct ggml_tensor * root = dst->view_src ? dst->view_src : dst;
+        int layer = -1; int is_k = 1;
+        if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
+        else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
+        if (layer >= 0) {
+            tq_set_current_layer(layer, is_k);
+            // Accumulate K only (V has no outliers per RotateKV paper)
+            if (params->ith == 0 && is_k && tq_is_calibrating()) {
+                for (int64_t i03 = 0; i03 < ne03; ++i03) {
+                    for (int64_t i02 = 0; i02 < ne02; ++i02) {
+                        for (int64_t i = 0; i < nr; ++i) {
+                            const float * row = (const float *)((char *)src0->data + i*nb01 + i02*nb02 + i03*nb03);
+                            tq_accumulate_channels(layer, is_k, row, nc);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     const int ith = params->ith;
     const int nth = params->nth;
@@ -5579,6 +5648,12 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_IQ3_S:
         case GGML_TYPE_IQ2_S:
         case GGML_TYPE_Q8_K:
+        case GGML_TYPE_TQK_5HI_3LO_QR:
+        case GGML_TYPE_TQK_5HI_3LO_HAD:
+        case GGML_TYPE_TQK_HAD_MSE4:
+        case GGML_TYPE_TQK_HAD_PROD5:
+        case GGML_TYPE_TQK_HAD_PROD4:
+        case GGML_TYPE_TQV_HAD_MSE4:
         case GGML_TYPE_I8:
         case GGML_TYPE_I16:
         case GGML_TYPE_I32:
@@ -8172,6 +8247,20 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
+    // TurboQuant: parse layer indices from K/V cache tensor names
+    int tq_k_layer = -1, tq_v_layer = -1;
+    {
+        const struct ggml_tensor * k_root = k;
+        while (k_root->view_src) k_root = k_root->view_src;
+        sscanf(k_root->name, "cache_k_l%d", &tq_k_layer);
+
+        const struct ggml_tensor * v_root = v;
+        while (v_root->view_src) v_root = v_root->view_src;
+        sscanf(v_root->name, "cache_v_l%d", &tq_v_layer);
+
+        if (tq_k_layer >= 0) { tq_set_current_layer(tq_k_layer, 1); }
+    }
+
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
     GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
     GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
@@ -8291,6 +8380,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             float s; // KQ value
 
             const char * k_data = (const char *) k->data + ( ic*nbk1 + ik2*nbk2 + ik3*nbk3);
+            if (tq_k_layer >= 0) { tq_set_current_head(ik2); } // FA: one head at a time
             kq_vec_dot(DK, &s, 0, k_data, 0, Q_q, 0, 1);
 
             s = s*scale; // scale KQ value
@@ -8338,7 +8428,9 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
                 // V += v*expf(s - M)
                 if (v_to_float) {
+                    if (tq_v_layer >= 0) { tq_set_current_layer(tq_v_layer, 0); tq_set_current_head(iv2); }
                     v_to_float(v_data, V32, DV);
+                    if (tq_k_layer >= 0) { tq_set_current_layer(tq_k_layer, 1); }
                     ggml_vec_mad_f32(DV, VKQ32, V32, vs);
                 } else {
                     // V is F32

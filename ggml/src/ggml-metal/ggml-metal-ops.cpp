@@ -10,6 +10,8 @@
 
 #include <cassert>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <cmath>
 
@@ -1132,10 +1134,54 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
     GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
 
-    auto pipeline = ggml_metal_library_get_pipeline_get_rows(lib, op->src[0]->type);
+    const ggml_type src_type = op->src[0]->type;
+
+    // TurboQuant get_rows — MSE (+ QJL for prod types) + rotation
+    if (src_type == GGML_TYPE_TQK_HAD_MSE4 ||
+        src_type == GGML_TYPE_TQK_HAD_PROD5 ||
+        src_type == GGML_TYPE_TQK_HAD_PROD4 ||
+        src_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+        src_type == GGML_TYPE_TQV_HAD_MSE4) {
+        if (src_type == GGML_TYPE_TQK_5HI_3LO_HAD) return 0; // falls back to CPU (needs channel map)
+
+        const char * name = src_type == GGML_TYPE_TQK_HAD_MSE4     ? "kernel_get_rows_had_mse4" :
+                            src_type == GGML_TYPE_TQK_HAD_PROD5    ? "kernel_get_rows_had_prod5" :
+                            src_type == GGML_TYPE_TQK_HAD_PROD4    ? "kernel_get_rows_had_prod4" :
+                                                                      "kernel_get_rows_had_mse4";
+        auto pipeline = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+
+        ggml_metal_kargs_get_rows args = {
+            /*.ne00t =*/ ne00 / 128,
+            /*.ne00  =*/ ne00,
+            /*.nb01  =*/ nb01,
+            /*.nb02  =*/ nb02,
+            /*.nb03  =*/ nb03,
+            /*.ne10  =*/ ne10,
+            /*.nb10  =*/ nb10,
+            /*.nb11  =*/ nb11,
+            /*.nb12  =*/ nb12,
+            /*.nb1   =*/ nb1,
+            /*.nb2   =*/ nb2,
+            /*.nb3   =*/ nb3,
+        };
+
+        const int n_blocks = ne00 / 128;
+
+        ggml_metal_encoder_set_pipeline(enc, pipeline);
+        ggml_metal_encoder_set_bytes  (enc, &args, sizeof(args), 0);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op),         3);
+
+        ggml_metal_encoder_dispatch_threadgroups(enc, ne10, ne11 < ne12 ? ne12 : ne11, ne12 < ne13 ? ne13 : 1, n_blocks, 1, 1);
+
+        return 1;
+    }
+
+    auto pipeline = ggml_metal_library_get_pipeline_get_rows(lib, src_type);
 
     ggml_metal_kargs_get_rows args = {
-        /*.ne00t =*/ ggml_is_quantized(op->src[0]->type) ? ne00/16 : ne00,
+        /*.ne00t =*/ ggml_is_quantized(src_type) ? ne00/16 : ne00,
         /*.ne00  =*/ ne00,
         /*.nb01  =*/ nb01,
         /*.nb02  =*/ nb02,
@@ -1177,9 +1223,66 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
     GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
 
-    auto pipeline = ggml_metal_library_get_pipeline_set_rows(lib, op->src[1]->type, op->type);
+    const ggml_type dst_type = op->type;
 
-    const int32_t nk0 = ne0/ggml_blck_size(op->type);
+    // TurboQuant set_rows — MSE quantize (+ QJL for prod types) + rotation
+    if (dst_type == GGML_TYPE_TQK_HAD_MSE4 ||
+        dst_type == GGML_TYPE_TQK_HAD_PROD5 ||
+        dst_type == GGML_TYPE_TQK_HAD_PROD4 ||
+        dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+        dst_type == GGML_TYPE_TQV_HAD_MSE4) {
+        const char * name = dst_type == GGML_TYPE_TQK_HAD_MSE4     ? "kernel_set_rows_had_mse4_i32" :
+                            dst_type == GGML_TYPE_TQK_HAD_PROD5    ? "kernel_set_rows_had_prod5_i32" :
+                            dst_type == GGML_TYPE_TQK_HAD_PROD4    ? "kernel_set_rows_had_prod4_i32" :
+                            dst_type == GGML_TYPE_TQV_HAD_MSE4     ? "kernel_set_rows_had_mse4_i32" :
+                                                                      "kernel_set_rows_5hi_3lo_had_i32";
+        auto pipeline = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+
+        const int n_blocks = ne00 / 128;
+        ggml_metal_kargs_set_rows args = {
+            /*.nk0   =*/ n_blocks,
+            /*.ne01  =*/ ne01,
+            /*.nb01  =*/ nb01,
+            /*.nb02  =*/ nb02,
+            /*.nb03  =*/ nb03,
+            /*.ne11  =*/ ne11,
+            /*.ne12  =*/ ne12,
+            /*.nb10  =*/ nb10,
+            /*.nb11  =*/ nb11,
+            /*.nb12  =*/ nb12,
+            /*.nb1   =*/ nb1,
+            /*.nb2   =*/ nb2,
+            /*.nb3   =*/ nb3,
+        };
+
+        ggml_metal_encoder_set_pipeline(enc, pipeline);
+        ggml_metal_encoder_set_bytes  (enc, &args, sizeof(args), 0);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+        ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op),         3);
+
+        if (dst_type == GGML_TYPE_TQK_5HI_3LO_HAD) {
+            ggml_metal_buffer_id bid_chmap = ggml_metal_device_get_tq_channel_map(ctx->dev);
+            ggml_metal_encoder_set_buffer(enc, bid_chmap, 4);
+
+            int32_t layer_idx = 0;
+            const char * lp = strstr(op->name, "_l");
+            if (lp) {
+                layer_idx = atoi(lp + 2);
+            }
+            int32_t n_kv_heads = ne00 / 128;
+            ggml_metal_encoder_set_bytes(enc, &layer_idx,  sizeof(layer_idx),  5);
+            ggml_metal_encoder_set_bytes(enc, &n_kv_heads, sizeof(n_kv_heads), 6);
+        }
+
+        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, n_blocks, 1, 1);
+
+        return 1;
+    }
+
+    auto pipeline = ggml_metal_library_get_pipeline_set_rows(lib, op->src[1]->type, dst_type);
+
+    const int32_t nk0 = ne0/ggml_blck_size(dst_type);
 
     int nth = 32; // SIMD width
 
@@ -2625,15 +2728,22 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
     GGML_TENSOR_LOCALS(uint64_t, nb1, op->src[1], nb);
     GGML_TENSOR_LOCALS( int32_t, ne2, op->src[2], ne);
     GGML_TENSOR_LOCALS(uint64_t, nb2, op->src[2], nb);
-    GGML_TENSOR_LOCALS( int32_t, ne3, op->src[3], ne);
-    GGML_TENSOR_LOCALS(uint64_t, nb3, op->src[3], nb);
+
+    int32_t  ne30 = 0, ne31 = 0, ne32 = 0, ne33 = 0;
+    uint64_t nb30 = 0, nb31 = 0, nb32 = 0, nb33 = 0;
+    if (op->src[3]) {
+        ne30 = op->src[3]->ne[0]; ne31 = op->src[3]->ne[1]; ne32 = op->src[3]->ne[2]; ne33 = op->src[3]->ne[3];
+        nb30 = op->src[3]->nb[0]; nb31 = op->src[3]->nb[1]; nb32 = op->src[3]->nb[2]; nb33 = op->src[3]->nb[3];
+    }
+
     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
     GGML_TENSOR_LOCALS( int32_t, nb,  op,         nb);
 
     GGML_ASSERT(ne00 % 4 == 0);
 
     GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
-    GGML_ASSERT(op->src[1]->type == op->src[2]->type);
+    // K and V can have different types (e.g., TQK had_mse4 K + fp16 V)
+    // GGML_ASSERT(op->src[1]->type == op->src[2]->type);
 
     //GGML_ASSERT(ggml_are_same_shape (src1, src2));
     GGML_ASSERT(ne11 == ne21);
@@ -2655,8 +2765,9 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         scale /= logit_softcap;
     }
 
-    const bool has_mask  = op->src[3] != NULL;
+    bool has_mask  = op->src[3] != NULL;
     const bool has_sinks = op->src[4] != NULL;
+    const bool has_chmap = op->src[5] != NULL;
     const bool has_bias  = max_bias != 0.0f;
     const bool has_scap  = logit_softcap != 0.0f;
 
@@ -2671,8 +2782,9 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
     ggml_metal_buffer_id bid_src0 = ggml_metal_get_buffer_id(op->src[0]);
     ggml_metal_buffer_id bid_src1 = ggml_metal_get_buffer_id(op->src[1]);
     ggml_metal_buffer_id bid_src2 = ggml_metal_get_buffer_id(op->src[2]);
-    ggml_metal_buffer_id bid_src3 = has_mask  ? ggml_metal_get_buffer_id(op->src[3]) : bid_src0;
+    ggml_metal_buffer_id bid_src3 = has_mask ? ggml_metal_get_buffer_id(op->src[3]) : bid_src0;
     ggml_metal_buffer_id bid_src4 = has_sinks ? ggml_metal_get_buffer_id(op->src[4]) : bid_src0;
+    ggml_metal_buffer_id bid_src5 = has_chmap ? ggml_metal_get_buffer_id(op->src[5]) : bid_src0;
 
     ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(op);
 
@@ -2847,6 +2959,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
         ggml_metal_encoder_set_buffer  (enc, bid_blk,  7);
         ggml_metal_encoder_set_buffer  (enc, bid_dst,  8);
+        ggml_metal_encoder_set_buffer  (enc, bid_src5, 9);
 
         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
@@ -2996,6 +3109,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             // using 1 workgroup -> write the result directly into dst
             ggml_metal_encoder_set_buffer(enc, bid_pad, 6);
             ggml_metal_encoder_set_buffer(enc, bid_dst, 7);
+            ggml_metal_encoder_set_buffer(enc, bid_src5, 8);
 
             ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
@@ -3010,6 +3124,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             // write the results from each workgroup into a temp buffer
             ggml_metal_encoder_set_buffer(enc, bid_pad, 6);
             ggml_metal_encoder_set_buffer(enc, bid_tmp, 7);
+            ggml_metal_encoder_set_buffer(enc, bid_src5, 8);
 
             ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
             ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nqptg - 1)/nqptg, (ne02 + nhptg - 1)/nhptg, ne03*nwg, 32, nsg, 1);

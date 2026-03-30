@@ -5,6 +5,7 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-kv-cache.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
@@ -1821,6 +1822,22 @@ int llama_context::decode(const llama_batch & batch_inp) {
         n_outputs_prev += n_outputs;
     } while (mctx->next());
 
+    // TurboQuant: after decode, check if enough calibration data accumulated
+    // Per RotateKV paper (Algorithm 1): calibration needs substantial data
+    // (they use WikiText-2 seq_len=4096). We require >= 64 tokens per layer.
+    {
+        auto * kv = dynamic_cast<llama_kv_cache *>(memory.get());
+        if (kv && kv->is_tq_calibrating()) {
+            kv->tq_try_finish_calibration();
+            // If calibration just completed (K type changed), invalidate cached graph
+            if (!kv->is_tq_calibrating()) {
+                gf_res_prev->reset();
+            }
+        }
+        // TODO: sink expiry — tq_expire_sinks() is available but auto-trigger
+        // needs a proper token counter, not cache size. Keep sinks permanent for now.
+    }
+
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
 
@@ -2904,6 +2921,7 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
+        /*.tq_n_sinks                  =*/ 0,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,

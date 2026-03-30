@@ -343,6 +343,7 @@ struct common_params_speculative {
 
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
+    uint32_t tq_n_sinks = 0;                // keep the first N K-cache positions as fp16 for TurboQuant sinks
 
     struct cpu_params cpuparams;
     struct cpu_params cpuparams_batch;
@@ -548,6 +549,7 @@ struct common_params {
 
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
+    uint32_t tq_n_sinks = 0;                // keep the first N K-cache positions as fp16 for TurboQuant sinks
 
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 

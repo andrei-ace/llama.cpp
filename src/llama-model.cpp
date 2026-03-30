@@ -8194,7 +8194,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         // Use hybrid-iswa for hybrid models with SWA
-                        res = new llama_memory_hybrid_iswa(
+                        auto * mem = new llama_memory_hybrid_iswa(
                             /* model             */ *this,
                             /* attn_type_k       */ params.type_k,
                             /* attn_type_v       */ params.type_v,
@@ -8211,8 +8211,13 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr));
+                        if (cparams.tq_n_sinks > 0) {
+                            mem->get_mem_attn()->get_base()->set_tq_n_sinks(cparams.tq_n_sinks);
+                            mem->get_mem_attn()->get_swa ()->set_tq_n_sinks(cparams.tq_n_sinks);
+                        }
+                        res = mem;
                     } else {
-                        res = new llama_memory_hybrid(
+                        auto * mem = new llama_memory_hybrid(
                             /* model             */ *this,
                             /* attn_type_k       */ params.type_k,
                             /* attn_type_v       */ params.type_v,
@@ -8229,6 +8234,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr));
+                        if (cparams.tq_n_sinks > 0) {
+                            mem->get_mem_attn()->set_tq_n_sinks(cparams.tq_n_sinks);
+                        }
+                        res = mem;
                     }
                 } else {
                     llama_memory_i::layer_reuse_cb reuse = nullptr;
@@ -8246,7 +8255,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         GGML_ASSERT(hparams.is_swa_any());
 
-                        res = new llama_kv_cache_iswa(
+                        auto * kv = new llama_kv_cache_iswa(
                                 *this,
                                 params.type_k,
                                 params.type_v,
@@ -8260,10 +8269,15 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 1,
                                 nullptr,
                                 reuse);
+                        if (cparams.tq_n_sinks > 0) {
+                            kv->get_base()->set_tq_n_sinks(cparams.tq_n_sinks);
+                            kv->get_swa ()->set_tq_n_sinks(cparams.tq_n_sinks);
+                        }
+                        res = kv;
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
-                        res = new llama_kv_cache(
+                        auto * kv = new llama_kv_cache(
                                 *this,
                                 params.type_k,
                                 params.type_v,
@@ -8277,6 +8291,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 hparams.swa_type,
                                 nullptr,
                                 nullptr);
+                        if (cparams.tq_n_sinks > 0) {
+                            kv->set_tq_n_sinks(cparams.tq_n_sinks);
+                        }
+                        res = kv;
                     }
                 }
             }

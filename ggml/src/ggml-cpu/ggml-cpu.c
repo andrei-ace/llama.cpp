@@ -393,6 +393,36 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_I32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_i32,
     },
+    [GGML_TYPE_TQK_5HI_3LO_QR] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_qr_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_5hi_3lo_qr_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_5HI_3LO_HAD] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_5hi_3lo_had_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_5hi_3lo_had_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_MSE4] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_mse4_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_mse4_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_PROD5] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_prod5_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_prod5_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_TQK_HAD_PROD4] = {
+        .from_float               = (ggml_from_float_t) quantize_row_tqk_had_prod4_ref,
+        .vec_dot                  = ggml_vec_dot_tqk_had_prod4_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
 };
 
 const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type) {
@@ -1154,6 +1184,16 @@ static void ggml_compute_forward_mul_mat_one_chunk(
 
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
+
+    // TurboQuant: set per-layer context for vec_dot on K/V cache tensors
+    {
+        const struct ggml_tensor * root = src0;
+        while (root->view_src) root = root->view_src;
+        int layer = -1; int is_k = 1;
+        if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
+        else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
+        if (layer >= 0) { tq_set_current_layer(layer, is_k); }
+    }
 
     GGML_TENSOR_BINARY_OP_LOCALS
 

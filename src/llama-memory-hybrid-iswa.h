@@ -127,6 +127,10 @@ public:
     const llama_kv_cache_iswa_context * get_attn() const;
     const llama_memory_recurrent_context * get_recr() const;
 
+    // TurboQuant rotation matrices (delegated to KV cache context)
+    ggml_tensor * get_turbo_rot_forward() const override;
+    ggml_tensor * get_turbo_rot_inverse() const override;
+
 private:
     // the index of the next ubatch to process
     size_t i_next = 0;

@@ -387,6 +387,12 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
+    GGML_TYPE_TQK_5HI_3LO_QR,
+    GGML_TYPE_TQK_5HI_3LO_HAD,
+    GGML_TYPE_TQK_HAD_MSE4,
+    GGML_TYPE_TQK_HAD_PROD5,
+    GGML_TYPE_TQK_HAD_PROD4,
+    GGML_TYPE_TQV_HAD_MSE4,
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {
@@ -2019,6 +2025,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"--tq-sinks"}, "N",
+        string_format(
+            "TurboQuant: keep first N tokens as fp16 in K cache (attention sinks)\n"
+            "(default: %u)", params.tq_n_sinks
+        ),
+        [](common_params & params, int value) {
+            params.tq_n_sinks = value;
+        }
+    ));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {
@@ -2807,13 +2823,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.port = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PORT"));
-    add_opt(common_arg(
-        {"--reuse-port"},
-        string_format("allow multiple sockets to bind to the same port (default: %s)", params.reuse_port ? "enabled" : "disabled"),
-        [](common_params & params) {
-            params.reuse_port = true;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_REUSE_PORT"));
     add_opt(common_arg(
         {"--path"}, "PATH",
         string_format("path to serve static files from (default: %s)", params.public_path.c_str()),

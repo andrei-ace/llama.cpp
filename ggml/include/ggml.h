@@ -428,7 +428,14 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
-        GGML_TYPE_COUNT   = 41,
+        // 41-44: reserved (old TurboQuant types removed)
+        GGML_TYPE_TQK_5HI_3LO_QR   = 45, // TQK 3.88 bpv: 32/96 split, QR rotation, 4b+QJL hi / 3b lo
+        GGML_TYPE_TQK_5HI_3LO_HAD = 46, // TQK 3.88 bpv: 32/96 split, FWHT rotation, 4b+QJL hi / 3b lo
+        GGML_TYPE_TQK_HAD_MSE4    = 47, // TQK 4.13 bpv: H_128 Hadamard, 4-bit MSE, no split
+        GGML_TYPE_TQK_HAD_PROD5   = 48, // TQK 5.25 bpv: H_128 Hadamard, 4-bit MSE + 1-bit QJL (unbiased)
+        GGML_TYPE_TQK_HAD_PROD4   = 49, // TQK 4.25 bpv: H_128 Hadamard, 3-bit MSE + 1-bit QJL (unbiased)
+        GGML_TYPE_TQV_HAD_MSE4    = 50, // TQV 4.13 bpv: H_128 Hadamard, 4-bit MSE
+        GGML_TYPE_COUNT           = 51,
     };
 
     // precision
@@ -2346,6 +2353,10 @@ extern "C" {
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
+
+    GGML_API void ggml_flash_attn_ext_add_chmap(
+            struct ggml_tensor * a,
+            struct ggml_tensor * chmap);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(

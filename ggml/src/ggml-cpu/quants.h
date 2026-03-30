@@ -32,6 +32,12 @@ void quantize_row_q8_K(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
 void quantize_row_tq1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_tq2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 
+void quantize_row_tqk_5hi_3lo_qr_ref  (const float * GGML_RESTRICT x, block_tqk_5hi_3lo   * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_5hi_3lo_had_ref(const float * GGML_RESTRICT x, block_tqk_5hi_3lo   * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_had_mse4_ref    (const float * GGML_RESTRICT x, block_tqk_had_mse4  * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_had_prod5_ref   (const float * GGML_RESTRICT x, block_tqk_had_prod5 * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_had_prod4_ref   (const float * GGML_RESTRICT x, block_tqk_had_prod4 * GGML_RESTRICT y, int64_t k);
+
 void quantize_row_iq4_nl (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_iq4_xs (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 
@@ -53,6 +59,33 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
 void ggml_vec_dot_tq1_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void ggml_vec_dot_tq2_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+
+void ggml_vec_dot_tqk_5hi_3lo_qr_f32  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_5hi_3lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_had_mse4_f32    (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_had_prod5_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_had_prod4_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+
+void dequantize_row_tqk_5hi_3lo_qr  (const block_tqk_5hi_3lo  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_5hi_3lo_had(const block_tqk_5hi_3lo  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_had_mse4    (const block_tqk_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_had_prod5   (const block_tqk_had_prod5 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_had_prod4   (const block_tqk_had_prod4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqv_had_mse4_ref  (const float * GGML_RESTRICT x, block_tqv_had_mse4 * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqv_had_mse4    (const block_tqv_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+
+// TurboQuant per-layer-per-head outlier calibration API
+void tq_register_sink_layer(int layer, const void * k_base, const void * fp16_base, int n_sinks, int64_t k_stride, int64_t fp16_stride, int64_t kv_size);
+void tq_clear_sink_state(void);
+void tq_set_current_layer(int layer, int is_k);
+void tq_set_current_head(int head);
+void tq_accumulate_channels(int layer, int is_k, const float * x, int64_t k);
+void tq_lock_outliers_from_accum(int n_layers);
+void tq_get_channel_map(int layer, int head, int is_k, int * outlier, int * regular);
+void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm128);
+int  tq_is_calibrating(void);
+int  tq_min_accum_count(int n_layers); // returns min accumulated vector count across layers
+void tq_reset_calibration(void);
 
 void ggml_vec_dot_iq2_xxs_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void ggml_vec_dot_iq2_xs_q8_K (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);

@@ -10,6 +10,10 @@
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
 
+extern "C" {
+    void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm128);
+}
+
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -75,6 +79,15 @@ bool llm_graph_input_embd::can_reuse(const llm_graph_params & params) {
     res &= (!params.ubatch.embd)  || (embd   &&   embd->ne[1] == params.ubatch.n_tokens);
 
     return res;
+}
+
+void llm_graph_input_tq_chmap::set_input(const llama_ubatch *) {
+    if (chmap && chmap->data) {
+        uint8_t * data = (uint8_t *) chmap->data;
+        for (int h = 0; h < n_kv_head; h++) {
+            tq_get_channel_perm(il, h, 1, data + h*128);
+        }
+    }
 }
 
 void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
@@ -1824,6 +1837,15 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
+        if (k->type == GGML_TYPE_TQK_5HI_3LO_HAD) {
+            const int n_kv_head = k->ne[2];
+            auto inp_chmap = std::make_unique<llm_graph_input_tq_chmap>(il, n_kv_head);
+            inp_chmap->chmap = ggml_new_tensor_1d(ctx0, GGML_TYPE_I8, n_kv_head*128);
+            ggml_set_input(inp_chmap->chmap);
+            ggml_set_name(inp_chmap->chmap, "tq_chmap");
+            ggml_flash_attn_ext_add_chmap(cur, inp_chmap->chmap);
+            res->add_input(std::move(inp_chmap));
+        }
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
         if (v_mla) {

@@ -266,6 +266,68 @@ typedef struct {
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
+// TurboQuant — exact paper algorithm (arXiv 2504.19874)
+//
+// Two operating points, each using TurboQuant_prod independently on channel subsets.
+// TurboQuant_prod(b) = (b-1)-bit MSE quantizer + 1-bit QJL on residual.
+// Each subset has its OWN QJL matrix S and residual norm.
+// Norms stored separately, not counted in the paper's bit budget.
+//
+// TurboQuant (arXiv 2504.19874) — outlier-aware channel splitting
+// Channels split into outlier (32) and regular (96) subsets, each with
+// independent rotation, MSE quantization, and QJL correction.
+
+#define TQK_BLOCK_SIZE  128
+#define TQK_N_OUTLIER    32
+#define TQK_N_REGULAR    96
+
+// TQK had_mse4: full H_128 Hadamard + 4-bit MSE, no split, no calibration
+// Sink positions are stored in a separate fp16 tensor (k_sink), not in-block.
+typedef struct {
+    ggml_half norm;                                    // 2 bytes: L2 norm
+    uint8_t   qs[TQK_BLOCK_SIZE * 4 / 8];             // 64 bytes: 4-bit MSE indices
+} block_tqk_had_mse4;
+static_assert(sizeof(block_tqk_had_mse4) == sizeof(ggml_half) + TQK_BLOCK_SIZE * 4 / 8, "wrong tqk_had_mse4 block size");
+// Total: 66 bytes for 128 elements = 4.125 bpv
+
+// TQK had_prod5: H_128 Hadamard + 4-bit MSE + 1-bit QJL on residual (unbiased estimator)
+// No split, no calibration. QJL corrects MSE bias → works with partial sinks.
+typedef struct {
+    ggml_half norm;                                    // 2 bytes: L2 norm
+    ggml_half rnorm;                                   // 2 bytes: QJL residual norm
+    uint8_t   qs[TQK_BLOCK_SIZE * 4 / 8];             // 64 bytes: 4-bit MSE indices (128 channels)
+    uint8_t   signs[TQK_BLOCK_SIZE / 8];               // 16 bytes: 1-bit QJL signs (128 channels)
+} block_tqk_had_prod5;
+static_assert(sizeof(block_tqk_had_prod5) == 2*sizeof(ggml_half) + TQK_BLOCK_SIZE*4/8 + TQK_BLOCK_SIZE/8, "wrong tqk_had_prod5 block size");
+// Total: 84 bytes for 128 elements = 5.25 bpv
+
+// TQK had_prod4: H_128 Hadamard + 3-bit MSE + 1-bit QJL (4.25 bpv, unbiased)
+typedef struct {
+    ggml_half norm;                                    // 2 bytes: L2 norm
+    ggml_half rnorm;                                   // 2 bytes: QJL residual norm
+    uint8_t   qs[TQK_BLOCK_SIZE * 3 / 8];             // 48 bytes: 3-bit MSE indices (128 channels)
+    uint8_t   signs[TQK_BLOCK_SIZE / 8];               // 16 bytes: 1-bit QJL signs
+} block_tqk_had_prod4;
+static_assert(sizeof(block_tqk_had_prod4) == 2*sizeof(ggml_half) + TQK_BLOCK_SIZE*3/8 + TQK_BLOCK_SIZE/8, "wrong tqk_had_prod4 block size");
+// Total: 68 bytes for 128 elements = 4.25 bpv
+
+// TQK 5hi_3lo: 32/96 split, 4-bit MSE + 1-bit QJL on outliers, 3-bit MSE on regulars
+// Used by both QR and FWHT variants (different rotation, same storage)
+// Sink positions are stored in a separate fp16 tensor (k_sink), not in-block.
+typedef struct {
+    ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
+    ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
+    ggml_half rnorm_hi;                                // 2 bytes: outlier QJL residual norm
+    uint8_t   qs_hi[TQK_N_OUTLIER * 4 / 8];           // 16 bytes
+    uint8_t   qs_lo[TQK_N_REGULAR * 3 / 8];           // 36 bytes
+    uint8_t   signs_hi[TQK_N_OUTLIER / 8];            // 4 bytes
+} block_tqk_5hi_3lo;
+static_assert(sizeof(block_tqk_5hi_3lo) == 3*sizeof(ggml_half) + TQK_N_OUTLIER*4/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8, "wrong tqk_5hi_3lo block size");
+// Total: 62 bytes for 128 elements = 3.875 bpv
+
+// TQV had_mse4: same storage layout as TQK had_mse4.
+typedef block_tqk_had_mse4 block_tqv_had_mse4;
+
 //
 // Super-block quantization structures
 //

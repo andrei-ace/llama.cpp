@@ -263,6 +263,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
 
 const struct ggml_metal_device_props * ggml_metal_device_get_props(ggml_metal_device_t dev);
 
+// TurboQuant per-layer-per-head channel map buffer
+// Default: channels 0-31 = outlier, 32-127 = regular (no calibration)
+// Update via ggml_metal_device_set_tq_channel_map after calibration
+struct ggml_metal_buffer_id ggml_metal_device_get_tq_channel_map(ggml_metal_device_t dev);
+void ggml_metal_device_set_tq_channel_map(ggml_metal_device_t dev, const int * data, int n_layers, int n_kv_heads);
+
 //
 // device buffers
 //
