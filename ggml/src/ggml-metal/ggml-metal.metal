@@ -9792,8 +9792,8 @@ kernel void kernel_set_rows_5hi_3lo_fwht(
     device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
 
     // Get channel permutation for this head (calibrated or default)
-    const int head = i02;
-    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + head) * 128;
+    // iblk = block within row = KV head index (each 128-elem block = one head)
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + iblk) * 128;
 
     // Split using calibrated channel order
     thread float hi_raw[32], lo_raw[96];

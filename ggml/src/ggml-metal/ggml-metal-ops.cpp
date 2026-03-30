@@ -1263,7 +1263,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
             int32_t layer_idx = 0;
             const char * lp = strstr(op->name, "_l");
             if (lp) layer_idx = atoi(lp + 2);
-            int32_t n_kv_heads = (int32_t)ne02;
+            int32_t n_kv_heads = ne00 / 128; // n_embd_k_gqa / head_size
             ggml_metal_encoder_set_bytes(enc, &layer_idx,  sizeof(layer_idx),  5);
             ggml_metal_encoder_set_bytes(enc, &n_kv_heads, sizeof(n_kv_heads), 6);
         }
