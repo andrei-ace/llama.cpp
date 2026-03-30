@@ -491,10 +491,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     {
         const ggml_tensor * K = dst->src[1];
         const ggml_tensor * V = dst->src[2];
-        if (K->type == GGML_TYPE_TURBO3_0_PROD || K->type == GGML_TYPE_TURBO4_0_PROD ||
-            V->type == GGML_TYPE_TURBO3_0_PROD || V->type == GGML_TYPE_TURBO4_0_PROD ||
-            K->type == GGML_TYPE_TURBO3_0_MSE || K->type == GGML_TYPE_TURBO4_0_MSE ||
-            V->type == GGML_TYPE_TURBO3_0_MSE || V->type == GGML_TYPE_TURBO4_0_MSE) {
+        if (false) { // old TurboQuant CUDA guard removed
             GGML_ABORT("TurboQuant flash attention not yet implemented");
         }
     }

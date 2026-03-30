@@ -131,11 +131,8 @@ llama_kv_cache::llama_kv_cache(
     // had_mse4 also goes through fp16 calibration to support sink capture
     // Types needing calibration (channel splitting): start as fp16, re-quantize after prompt
     // had_mse4 needs no calibration — allocated directly. Sinks handled in set_tq_n_sinks().
-    const bool uses_turbo_k = (type_k == GGML_TYPE_TURBO3_0_PROD || type_k == GGML_TYPE_TURBO4_0_PROD ||
-                               type_k == GGML_TYPE_TURBO3_0_MSE  || type_k == GGML_TYPE_TURBO4_0_MSE ||
-                               type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT);
-    const bool uses_turbo_v = (type_v == GGML_TYPE_TURBO3_0_PROD || type_v == GGML_TYPE_TURBO4_0_PROD ||
-                               type_v == GGML_TYPE_TURBO3_0_MSE  || type_v == GGML_TYPE_TURBO4_0_MSE);
+    const bool uses_turbo_k = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT);
+    const bool uses_turbo_v = false; // V types (tqv_had_mse4) don't need calibration
     ggml_type alloc_type_k = type_k;
     ggml_type alloc_type_v = type_v;
     if (uses_turbo_k || uses_turbo_v) {
@@ -315,13 +312,9 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
     // TurboQuant: allocate and initialize rotation matrix for quantization quality
-    const bool uses_turbo = (type_k == GGML_TYPE_TURBO3_0_PROD || type_k == GGML_TYPE_TURBO4_0_PROD ||
-                             type_v == GGML_TYPE_TURBO3_0_PROD || type_v == GGML_TYPE_TURBO4_0_PROD ||
-                             type_k == GGML_TYPE_TURBO3_0_MSE || type_k == GGML_TYPE_TURBO4_0_MSE ||
-                             type_v == GGML_TYPE_TURBO3_0_MSE || type_v == GGML_TYPE_TURBO4_0_MSE ||
-                             type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT ||
+    const bool uses_turbo = (type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT ||
                              type_k == GGML_TYPE_TQK_HAD_MSE4 || type_k == GGML_TYPE_TQK_HAD_PROD5 ||
-                             type_k == GGML_TYPE_TQK_HAD_PROD4);
+                             type_k == GGML_TYPE_TQK_HAD_PROD4 || type_v == GGML_TYPE_TQV_HAD_MSE4);
     if (uses_turbo) {
         const uint32_t head_dim = hparams.n_embd_head_k(0);
         GGML_ASSERT(head_dim == 128 && "TurboQuant currently only supports head_dim=128");

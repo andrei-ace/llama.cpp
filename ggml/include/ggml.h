@@ -428,10 +428,7 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4     = 40, // NVFP4 (4 blocks, E4M3 scale)
-        GGML_TYPE_TURBO3_0_PROD = 41, // TurboQuant_prod 3-bit K cache (PolarQuant + QJL)
-        GGML_TYPE_TURBO4_0_PROD = 42, // TurboQuant_prod 4-bit K cache (PolarQuant + QJL)
-        GGML_TYPE_TURBO3_0_MSE = 43, // TurboQuant_mse 3-bit V cache (pure MSE, no QJL)
-        GGML_TYPE_TURBO4_0_MSE = 44, // TurboQuant_mse 4-bit V cache (pure MSE, no QJL)
+        // 41-44: reserved (old TurboQuant types removed)
         GGML_TYPE_TQK_5HI_3LO_QR   = 45, // TQK 3.88 bpv: 32/96 split, QR rotation, 4b+QJL hi / 3b lo
         GGML_TYPE_TQK_5HI_3LO_FWHT = 46, // TQK 3.88 bpv: 32/96 split, FWHT rotation, 4b+QJL hi / 3b lo
         GGML_TYPE_TQK_HAD_MSE4      = 47, // TQK 4.13 bpv: H_128 Hadamard, 4-bit MSE, no split
