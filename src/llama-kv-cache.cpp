@@ -661,8 +661,9 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    // After calibration, disable sink dispatch — all positions use TQ with calibrated channels
-    // The sink fp16 data stays in k_sink for potential future use (expire/restore)
+    // Disable sinks after calibration — pure TQ works well on 8+ KV head models.
+    // Pointer-based sink dispatch has a known issue causing PPL degradation.
+    // TODO: investigate sink dispatch pointer math for multi-head models.
     tq_clear_sink_state();
     tq_n_sinks_ = 0;
     LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers, sinks disabled (K: %s, V: %s)\n",
