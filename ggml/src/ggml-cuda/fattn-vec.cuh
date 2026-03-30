@@ -266,18 +266,17 @@ static __global__ void flash_attn_ext_vec(
                 tq_fwht_shared<D>(shmem, tid, nthreads);
             } else {
                 // 5hi_3lo_had: permute Q via channel map, then four FWHT-32
-                // Channel map for this head: perm[0..31] = outlier indices, perm[32..127] = regular
                 const int kv_head = head / gqa_ratio;
-                // Use layer 0 channel map for FA (the permutation is per-head, not per-layer for FA)
-                // TODO: per-layer channel maps in FA require passing layer info
-                const int32_t * perm = tq_fa_channel_map_ptr + (int64_t)kv_head * 128;
+                const int32_t * perm = tq_fa_channel_map_ptr
+                    ? tq_fa_channel_map_ptr + (int64_t)kv_head * 128
+                    : nullptr;
 
                 // Load Q permuted: shmem[0..31] = Q[perm[0..31]], shmem[32..127] = Q[perm[32..127]]
                 const float * Q_src = (ncols == 1 || ic0 + j < int(ne01.z))
                     ? (const float *)(Q + j*nb01) : nullptr;
                 for (int i = tid; i < D; i += nthreads) {
                     if (Q_src) {
-                        shmem[i] = scale * Q_src[perm[i]];
+                        shmem[i] = scale * Q_src[perm ? perm[i] : i];
                     } else {
                         shmem[i] = 0.0f;
                     }
