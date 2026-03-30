@@ -525,6 +525,8 @@ static __global__ void flash_attn_ext_vec(
             KQ_sum[j_VKQ] = KQ_sum_shared[j_VKQ][threadIdx.x];
             KQ_sum[j_VKQ] = warp_reduce_sum(KQ_sum[j_VKQ]);
 
+            // Accumulate output values into registers first
+            float dst_vals[D/nthreads > 0 ? D/nthreads : 1];
 #pragma unroll
             for (int i0 = 0; i0 < D; i0 += nthreads) {
                 float dst_val = 0;
@@ -538,7 +540,36 @@ static __global__ void flash_attn_ext_vec(
                 if (gridDim.y == 1) {
                     dst_val /= KQ_sum[j_VKQ];
                 }
-                dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
+                dst_vals[i0/nthreads] = dst_val;
+            }
+
+            if constexpr (!type_V_is_tq) {
+                // Standard: write directly to global
+#pragma unroll
+                for (int i0 = 0; i0 < D; i0 += nthreads) {
+                    dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_vals[i0/nthreads];
+                }
+            } else {
+                // TQV: write to shared memory for FWHT
+                float * fwht_buf = (float *) KQ;
+#pragma unroll
+                for (int i0 = 0; i0 < D; i0 += nthreads) {
+                    fwht_buf[i0 + tid] = dst_vals[i0/nthreads];
+                }
+            }
+        }
+
+        // TQV: apply inverse FWHT to the output in shared memory, then write to global
+        if constexpr (type_V_is_tq) {
+            __syncthreads();
+            float * fwht_buf = (float *) KQ;
+            tq_fwht_shared<D>(fwht_buf, tid, nthreads);
+
+            if (nthreads <= D || tid < D) {
+#pragma unroll
+                for (int i0 = 0; i0 < D; i0 += nthreads) {
+                    dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = fwht_buf[i0 + tid];
+                }
             }
         }
 
