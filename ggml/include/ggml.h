@@ -437,7 +437,8 @@ extern "C" {
         GGML_TYPE_TQK_HAD_MSE4      = 47, // TQK 4.13 bpv: H_128 Hadamard, 4-bit MSE, no split
         GGML_TYPE_TQK_HAD_PROD5     = 48, // TQK 5.25 bpv: H_128 Hadamard, 4-bit MSE + 1-bit QJL (unbiased)
         GGML_TYPE_TQK_HAD_PROD4     = 49, // TQK 4.25 bpv: H_128 Hadamard, 3-bit MSE + 1-bit QJL (unbiased)
-        GGML_TYPE_COUNT     = 50,
+        GGML_TYPE_TQV_HAD_MSE4     = 50, // TQV 4.13 bpv: 4-bit MSE, per-block norm (no rotation needed for dequant)
+        GGML_TYPE_COUNT     = 51,
     };
 
     // precision

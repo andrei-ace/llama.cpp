@@ -388,6 +388,11 @@ typedef struct {
 static_assert(sizeof(block_tqk_5hi_3lo) == 3*sizeof(ggml_half) + TQK_N_OUTLIER*4/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8, "wrong tqk_5hi_3lo block size");
 // Total: 62 bytes for 128 elements = 3.875 bpv
 
+// TQV had_mse4: V cache quantization — 4-bit MSE, per-block norm
+// Same block layout as block_tqk_had_mse4. Dequant: norm * centroid[idx].
+// No rotation in dequant — rotation benefit is minimal for V.
+typedef block_tqk_had_mse4 block_tqv_had_mse4;
+
 //
 // Super-block quantization structures
 //

@@ -1446,6 +1446,31 @@ void ggml_vec_dot_tqk_had_mse4_f32(
 }
 
 // ---------------------------------------------------------------------------
+// TQV had_mse4: V cache 4-bit MSE, per-block norm (no rotation)
+// ---------------------------------------------------------------------------
+
+// Quantize: same as K (normalize, FWHT, 4-bit MSE). Stores rotated values.
+void quantize_row_tqv_had_mse4_ref(const float * GGML_RESTRICT x, block_tqv_had_mse4 * GGML_RESTRICT y, int64_t k) {
+    quantize_row_tqk_had_mse4_ref(x, (block_tqk_had_mse4 *)y, k);
+}
+
+// Dequantize: centroids → inverse FWHT → scale by norm (full reconstruction)
+void dequantize_row_tqv_had_mse4(const block_tqv_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+
+    for (int64_t i = 0; i < nb; i++) {
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+        float rot[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) {
+            rot[j] = centroids_16[up4(x[i].qs, j)];
+        }
+        tq_fwht(rot, TQ_DIM); // inverse FWHT = FWHT (self-inverse)
+        for (int j = 0; j < TQ_DIM; j++) y[i * TQK_BLOCK_SIZE + j] = norm * rot[j];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TQK had_prod5: H_128 Hadamard + 4-bit MSE + 1-bit QJL (unbiased estimator)
 // No split, no calibration. QJL on residual corrects MSE bias.
 // ---------------------------------------------------------------------------

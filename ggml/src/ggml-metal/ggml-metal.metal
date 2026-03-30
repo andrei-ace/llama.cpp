@@ -5812,7 +5812,8 @@ template<
     short C,          // cache items per threadgroup
     short NSG,        // number of simd groups
     bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
-    bool TQ_SPLIT = false> // permute Q by channel map + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_SPLIT = false, // permute Q by channel map + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 void kernel_flash_attn_ext_impl(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -6446,15 +6447,49 @@ void kernel_flash_attn_ext_impl(
 
         const float scale = S[jj] == 0.0 ? 0.0f : 1.0f/S[jj];
 
+        // Scale output
         if (DV4 % NW == 0) {
             FOR_UNROLL (short ii = 0; ii < DV4/NW; ++ii) {
                 const short i = ii*NW + tiisg;
-
-                dst4[i] = (float4) so4[j*PV4 + i]*scale;
+                so4[j*PV4 + i] = so4[j*PV4 + i]*scale;
             }
         } else {
             for (short i = tiisg; i < DV4; i += NW) {
-                dst4[i] = (float4) so4[j*PV4 + i]*scale;
+                so4[j*PV4 + i] = so4[j*PV4 + i]*scale;
+            }
+        }
+
+        // Inverse FWHT on output: V was stored rotated, O_fa = FWHT(O_correct)
+        if (TQ_FWHT_O) {
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup float * so_f = (threadgroup float *)(so + j*DK);
+            // FWHT in shared memory using all 32 threads
+            for (short step = 1; step < DV; step *= 2) {
+                for (short idx = tiisg; idx < DV/2; idx += NW) {
+                    short ii = (idx / step) * (2 * step) + (idx % step);
+                    float a = so_f[ii];
+                    float b = so_f[ii + step];
+                    so_f[ii]        = a + b;
+                    so_f[ii + step] = a - b;
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            float norm_s = 1.0f / sqrt((float)DV);
+            for (short ii = tiisg; ii < DV; ii += NW) {
+                so_f[ii] *= norm_s;
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        // Write to dst
+        if (DV4 % NW == 0) {
+            FOR_UNROLL (short ii = 0; ii < DV4/NW; ++ii) {
+                const short i = ii*NW + tiisg;
+                dst4[i] = (float4) so4[j*PV4 + i];
+            }
+        } else {
+            for (short i = tiisg; i < DV4; i += NW) {
+                dst4[i] = (float4) so4[j*PV4 + i];
             }
         }
     }
@@ -6492,7 +6527,8 @@ template<
     short Q  = OP_FLASH_ATTN_EXT_NQPSG, // queries per threadgroup
     short C  = OP_FLASH_ATTN_EXT_NCPSG, // cache items per threadgroup
     bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
-    bool TQ_SPLIT = false> // permute Q + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 kernel void kernel_flash_attn_ext(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -6514,10 +6550,10 @@ kernel void kernel_flash_attn_ext(
 #define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, tq_chmap, shmem_f16, tq_perm_buf, tgpig, tiisg, sgitg
     switch (FC_flash_attn_ext_nsg) {
       // note: disabled cases to reduce library load time
-      //case 1: kernel_flash_attn_ext_impl<FWD_TMPL, 1, TQ_FWHT, TQ_SPLIT>(FWD_ARGS); break;
-      //case 2: kernel_flash_attn_ext_impl<FWD_TMPL, 2, TQ_FWHT, TQ_SPLIT>(FWD_ARGS); break;
-        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT, TQ_SPLIT>(FWD_ARGS); break;
-        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT, TQ_SPLIT>(FWD_ARGS); break;
+      //case 1: kernel_flash_attn_ext_impl<FWD_TMPL, 1, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
+      //case 2: kernel_flash_attn_ext_impl<FWD_TMPL, 2, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
+        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
+        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
     }
 #undef FWD_TMPL
 #undef FWD_ARGS
@@ -6620,6 +6656,8 @@ template [[host_name("kernel_flash_attn_ext_tqk_had_prod5_f16_dk128_dv128")]] ke
 template [[host_name("kernel_flash_attn_ext_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_prod4, 8, dequantize_had_prod4, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 // 5hi_3lo_fwht K (split channels, Q permuted + 4×FWHT_32) + f16 V
 template [[host_name("kernel_flash_attn_ext_tqk_5hi_3lo_fwht_f16_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5hi_3lo, 8, dequantize_5hi_3lo_fwht, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// TQ K + TQV V (V stored rotated, inverse FWHT on output)
+template [[host_name("kernel_flash_attn_ext_tqk_had_mse4_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_had_mse4, 8, dequantize_had_mse4, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, false, true>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv192")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 192>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk192_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 192, 128>;
 template [[host_name("kernel_flash_attn_ext_q4_0_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q4_0, 2, dequantize_q4_0, block_q4_0, 2, dequantize_q4_0, 256, 256>;
@@ -6730,7 +6768,8 @@ template<
     short Q  = OP_FLASH_ATTN_EXT_VEC_NQPSG,  // queries per threadgroup
     short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG,  // cache items per threadgroup
     bool TQ_FWHT = false,  // apply FWHT_128 to Q (had_mse4/prod5/prod4)
-    bool TQ_SPLIT = false> // permute Q + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_SPLIT = false, // permute Q + 4×FWHT_32 (5hi_3lo_fwht)
+    bool TQ_FWHT_O = false> // apply inverse FWHT_128 to output (V stored rotated)
 kernel void kernel_flash_attn_ext_vec(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
@@ -7176,9 +7215,34 @@ kernel void kernel_flash_attn_ext_vec(
 
         const float S = NWG == 1 ? (ss[0] == 0.0f ? 0.0f : 1.0f/ss[0]) : 1.0f;
 
+        // scale output
+        for (short i = tiisg; i < DV4; i += NW) {
+            so4[i] = so4[i]*S;
+        }
+
+        // inverse FWHT on output if V was stored rotated
+        if (TQ_FWHT_O) {
+            threadgroup float * so_f = (threadgroup float *) so4;
+            for (short step = 1; step < DV; step *= 2) {
+                for (short idx = tiisg; idx < DV/2; idx += NW) {
+                    short ii = (idx / step) * (2 * step) + (idx % step);
+                    float a = so_f[ii];
+                    float b = so_f[ii + step];
+                    so_f[ii]        = a + b;
+                    so_f[ii + step] = a - b;
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            float norm_s = 1.0f / sqrt((float)DV);
+            for (short ii = tiisg; ii < DV; ii += NW) {
+                so_f[ii] *= norm_s;
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
         // interleave the workgroup data
         for (short i = tiisg; i < DV4; i += NW) {
-            dst4[rid*DV4*NWG + NWG*i + iwg] = (float4) so4[i]*S;
+            dst4[rid*DV4*NWG + NWG*i + iwg] = (float4) so4[i];
         }
 
         // store S and M
@@ -7261,6 +7325,8 @@ template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_f16_dk128_dv128")]]
 template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod5_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod5, 32, dequantize_had_prod5_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tqk_had_prod4_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_prod4, 32, dequantize_had_prod4_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tqk_5hi_3lo_fwht_f16_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5hi_3lo, 32, dequantize_5hi_3lo_fwht_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+// TQ K + TQV V (V stored rotated, inverse FWHT on output)
+template [[host_name("kernel_flash_attn_ext_vec_tqk_had_mse4_tqv_had_mse4_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_had_mse4, 32, dequantize_had_mse4_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true, false, true>;
 template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q4_1, 8, dequantize_q4_1_t4, block_q4_1,  8, dequantize_q4_1_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_0, 8, dequantize_q5_0_t4, block_q5_0,  8, dequantize_q5_0_t4, 128, 128, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 128, 128, 1>;
