@@ -1835,17 +1835,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 gf_res_prev->reset();
             }
         }
-        // Expire sinks after enough tokens have been processed
-        if (kv && kv->get_tq_n_sinks() > 0 && !kv->is_tq_calibrating()) {
-            // Check if we've processed enough tokens to expire sinks
-            // Expire when total tokens >= 2 * n_sinks (sinks had their effect)
-            const uint32_t n_sinks = kv->get_tq_n_sinks();
-            const uint32_t occupied = kv->get_size(); // approximate
-            if (occupied >= 2 * n_sinks) {
-                kv->tq_expire_sinks();
-                gf_res_prev->reset();
-            }
-        }
+        // TODO: sink expiry — tq_expire_sinks() is available but auto-trigger
+        // needs a proper token counter, not cache size. Keep sinks permanent for now.
     }
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
