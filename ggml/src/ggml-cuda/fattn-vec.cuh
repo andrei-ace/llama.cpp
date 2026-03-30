@@ -74,18 +74,24 @@ static __global__ void flash_attn_ext_vec(
     constexpr int nthreads_V_q  = (D/4 < 32 ? D/4 : 32);
 #endif // GGML_USE_HIP
 
+    constexpr bool type_K_is_tq = type_K == GGML_TYPE_TQK_HAD_MSE4 || type_K == GGML_TYPE_TQK_HAD_PROD5 ||
+                                   type_K == GGML_TYPE_TQK_HAD_PROD4 || type_K == GGML_TYPE_TQK_5HI_3LO_HAD;
+    constexpr bool type_V_is_tq = type_V == GGML_TYPE_TQV_HAD_MSE4;
+    constexpr bool type_K_is_float = type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 || type_K_is_tq;
+    constexpr bool type_V_is_float = type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16;
+
     constexpr int nthreads    = ggml_cuda_fattn_vec_get_nthreads_device();
-    constexpr int nthreads_KQ = (type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16) ? 128 / cpy_nb : nthreads_KQ_q;
-    constexpr int nthreads_V  = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16) ? 128 / cpy_nb : nthreads_V_q;
+    constexpr int nthreads_KQ = type_K_is_float ? 128 / cpy_nb : nthreads_KQ_q;
+    constexpr int nthreads_V  = (type_V_is_float) ? 128 / cpy_nb : (type_V_is_tq ? nthreads_V_q : nthreads_V_q);
 
     static_assert(WARP_SIZE % nthreads_KQ == 0, "bad nthreads_K");
     static_assert(WARP_SIZE % nthreads_V  == 0, "bad nthreads_V");
 
-    constexpr int V_rows_per_thread = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16) ? 2*cpy_ne : 4;
+    constexpr int V_rows_per_thread = (type_V_is_float) ? 2*cpy_ne : 4;
     constexpr int V_cols_per_iter   = WARP_SIZE / nthreads_V;
 
     constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<type_K, D, nthreads_KQ>();
-    constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16 && type_K != GGML_TYPE_BF16;
+    constexpr bool Q_q8_1 = !type_K_is_float;
 #ifdef V_DOT2_F32_F16_AVAILABLE
     constexpr dequantize_V_t dequantize_V = get_dequantize_V<type_V, half,  V_rows_per_thread>();
 #else
@@ -234,6 +240,74 @@ static __global__ void flash_attn_ext_vec(
             }
         }
 #endif // V_DOT2_F32_F16_AVAILABLE
+    }
+
+    // TurboQuant: pre-rotate Q with FWHT in shared memory.
+    // For had_* types: full H_128 FWHT on Q.
+    // For 5hi_3lo_had: permute Q via channel map into [hi(32), lo(96)], then four H_32 FWHTs.
+    if constexpr (type_K_is_tq && !Q_q8_1) {
+        constexpr int cpy_nb_tq = ggml_cuda_get_max_cpy_bytes();
+        constexpr int cpy_ne_tq = cpy_nb_tq / 4;
+        constexpr bool is_5hi_3lo = (type_K == GGML_TYPE_TQK_5HI_3LO_HAD);
+#pragma unroll
+        for (int j = 0; j < ncols; ++j) {
+            float * shmem = (float *) KQ;
+
+            if constexpr (!is_5hi_3lo) {
+                // had_* types: load Q → FWHT-128
+                for (int i = tid; i < D; i += nthreads) {
+                    if (ncols == 1 || ic0 + j < int(ne01.z)) {
+                        shmem[i] = scale * ((const float *)(Q + j*nb01))[i];
+                    } else {
+                        shmem[i] = 0.0f;
+                    }
+                }
+                __syncthreads();
+                tq_fwht_shared<D>(shmem, tid, nthreads);
+            } else {
+                // 5hi_3lo_had: permute Q via channel map, then four FWHT-32
+                // Channel map for this head: perm[0..31] = outlier indices, perm[32..127] = regular
+                const int kv_head = head / gqa_ratio;
+                // Use layer 0 channel map for FA (the permutation is per-head, not per-layer for FA)
+                // TODO: per-layer channel maps in FA require passing layer info
+                const int32_t * perm = tq_fa_channel_map_ptr + (int64_t)kv_head * 128;
+
+                // Load Q permuted: shmem[0..31] = Q[perm[0..31]], shmem[32..127] = Q[perm[32..127]]
+                const float * Q_src = (ncols == 1 || ic0 + j < int(ne01.z))
+                    ? (const float *)(Q + j*nb01) : nullptr;
+                for (int i = tid; i < D; i += nthreads) {
+                    if (Q_src) {
+                        shmem[i] = scale * Q_src[perm[i]];
+                    } else {
+                        shmem[i] = 0.0f;
+                    }
+                }
+                __syncthreads();
+
+                // Four independent FWHT-32: hi[0..31], lo[32..63], lo[64..95], lo[96..127]
+                tq_fwht_shared<32>(shmem,      tid, nthreads);
+                tq_fwht_shared<32>(shmem + 32, tid, nthreads);
+                tq_fwht_shared<32>(shmem + 64, tid, nthreads);
+                tq_fwht_shared<32>(shmem + 96, tid, nthreads);
+            }
+
+            // Reload into Q_reg using the same interleaved pattern as the f16 path
+            const int lane_kq = (nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ);
+#pragma unroll
+            for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ * cpy_ne_tq) {
+                const int base = i0 + lane_kq * cpy_ne_tq;
+#pragma unroll
+                for (int k = 0; k < cpy_ne_tq; ++k) {
+                    const int si = (base + k) * 2;
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                    Q_reg[j][i0/nthreads_KQ + k] = make_half2(__float2half(shmem[si]), __float2half(shmem[si + 1]));
+#else
+                    Q_reg[j][i0/nthreads_KQ + k] = make_float2(shmem[si], shmem[si + 1]);
+#endif
+                }
+            }
+            __syncthreads();
+        }
     }
 
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
@@ -476,6 +550,8 @@ static __global__ void flash_attn_ext_vec(
             KQ_sum[j_VKQ] = KQ_sum_shared[j_VKQ][threadIdx.x];
             KQ_sum[j_VKQ] = warp_reduce_sum(KQ_sum[j_VKQ]);
 
+            // Accumulate output values into registers first
+            float dst_vals[D/nthreads > 0 ? D/nthreads : 1];
 #pragma unroll
             for (int i0 = 0; i0 < D; i0 += nthreads) {
                 float dst_val = 0;
@@ -489,7 +565,36 @@ static __global__ void flash_attn_ext_vec(
                 if (gridDim.y == 1) {
                     dst_val /= KQ_sum[j_VKQ];
                 }
-                dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
+                dst_vals[i0/nthreads] = dst_val;
+            }
+
+            if constexpr (!type_V_is_tq) {
+                // Standard: write directly to global
+#pragma unroll
+                for (int i0 = 0; i0 < D; i0 += nthreads) {
+                    dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_vals[i0/nthreads];
+                }
+            } else {
+                // TQV: write to shared memory for FWHT
+                float * fwht_buf = (float *) KQ;
+#pragma unroll
+                for (int i0 = 0; i0 < D; i0 += nthreads) {
+                    fwht_buf[i0 + tid] = dst_vals[i0/nthreads];
+                }
+            }
+        }
+
+        // TQV: apply inverse FWHT to the output in shared memory, then write to global
+        if constexpr (type_V_is_tq) {
+            __syncthreads();
+            float * fwht_buf = (float *) KQ;
+            tq_fwht_shared<D>(fwht_buf, tid, nthreads);
+
+            if (nthreads <= D || tid < D) {
+#pragma unroll
+                for (int i0 = 0; i0 < D; i0 += nthreads) {
+                    dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = fwht_buf[i0 + tid];
+                }
             }
         }
 
@@ -598,3 +703,17 @@ EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q8_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_BF16)
+
+// TurboQuant K types — D=128 only, with F16/TQV/Q4_0 V types
+#define EXTERN_DECL_FATTN_VEC_CASES_TQ(type_K)                           \
+    extern DECL_FATTN_VEC_CASE(128, type_K, GGML_TYPE_F16);             \
+    extern DECL_FATTN_VEC_CASE(128, type_K, GGML_TYPE_TQV_HAD_MSE4);   \
+    extern DECL_FATTN_VEC_CASE(128, type_K, GGML_TYPE_Q4_0);           \
+
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_HAD_MSE4)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_HAD_PROD5)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_HAD_PROD4)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_5HI_3LO_HAD)
+
+// Non-TQ K with TQV V — D=128 only
+extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_F16, GGML_TYPE_TQV_HAD_MSE4);

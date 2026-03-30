@@ -280,6 +280,23 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
+    // TurboQuant K types — always built, D=128 only
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_MSE4,    GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD5,   GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD4,   GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_5HI_3LO_HAD, GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_MSE4,    GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD5,   GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD4,   GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_5HI_3LO_HAD, GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_MSE4,    GGML_TYPE_Q4_0)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD5,   GGML_TYPE_Q4_0)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD4,   GGML_TYPE_Q4_0)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_5HI_3LO_HAD, GGML_TYPE_Q4_0)
+
+    // Non-TQ K with TQV V
+    FATTN_VEC_CASE(128, GGML_TYPE_F16, GGML_TYPE_TQV_HAD_MSE4)
+
     GGML_ABORT("fatal error");
 }
 
@@ -353,7 +370,11 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
-    if (K->type != V->type) {
+    // TQ K or V types always allow mixed K+V
+    const bool k_is_tq = K->type == GGML_TYPE_TQK_HAD_MSE4 || K->type == GGML_TYPE_TQK_HAD_PROD5 ||
+                          K->type == GGML_TYPE_TQK_HAD_PROD4 || K->type == GGML_TYPE_TQK_5HI_3LO_HAD;
+    const bool v_is_tq = V->type == GGML_TYPE_TQV_HAD_MSE4;
+    if (K->type != V->type && !k_is_tq && !v_is_tq) {
         return BEST_FATTN_KERNEL_NONE;
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
@@ -372,8 +393,27 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_BF16:
             break;
+        case GGML_TYPE_TQK_HAD_MSE4:
+        case GGML_TYPE_TQK_HAD_PROD5:
+        case GGML_TYPE_TQK_HAD_PROD4:
+        case GGML_TYPE_TQK_5HI_3LO_HAD:
+            // TQ types: force VEC kernel (MMA/tile don't support TQ), D=128 only
+            if (K->ne[0] == 128 && V->ne[0] == 128 && K->ne[1] % FATTN_KQ_STRIDE == 0) {
+                if (V->type == GGML_TYPE_F16 || V->type == GGML_TYPE_TQV_HAD_MSE4 || V->type == GGML_TYPE_Q4_0) {
+                    return BEST_FATTN_KERNEL_VEC;
+                }
+            }
+            return BEST_FATTN_KERNEL_NONE;
         default:
             return BEST_FATTN_KERNEL_NONE;
+    }
+
+    // TQV V type requires VEC kernel (MMA/tile/WMMA don't support TQV)
+    if (V->type == GGML_TYPE_TQV_HAD_MSE4) {
+        if (K->ne[0] == 128 && V->ne[0] == 128 && K->ne[1] % FATTN_KQ_STRIDE == 0) {
+            return BEST_FATTN_KERNEL_VEC;
+        }
+        return BEST_FATTN_KERNEL_NONE;
     }
 
     if (mask && mask->ne[2] != 1) {
@@ -486,6 +526,15 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 }
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    // TODO(TurboQuant): implement custom flash attention kernels for turbo types
+    // (k_turbo3_dequant_f16, k_turbo4_dequant_f16, ggml_cuda_turbo_prefill_attend)
+    {
+        const ggml_tensor * K = dst->src[1];
+        const ggml_tensor * V = dst->src[2];
+        GGML_UNUSED(K);
+        GGML_UNUSED(V);
+    }
+
     ggml_cuda_set_device(ctx.device);
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
@@ -506,5 +555,6 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
 }
 
 bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
+    // TODO(TurboQuant): turbo FA kernels not yet implemented
     return ggml_cuda_get_best_fattn_kernel(device, dst) != BEST_FATTN_KERNEL_NONE;
 }
