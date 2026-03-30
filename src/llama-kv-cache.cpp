@@ -632,10 +632,7 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    // Move TQ buffer from sink_bufs into ctxs_bufs.
-    // Note: cannot free fp16 buffer because V cache tensors are still in it.
-    // The fp16 K data is unused but the buffer must stay for V.
-    // TODO: separate K and V into independent buffers to free fp16 K after calibration.
+    // Move TQ buffer from sink_bufs into ctxs_bufs so it outlives calibration.
     if (tq_calib_buf_idx_ >= 0 && !sink_bufs.empty()) {
         ctxs_bufs.push_back(std::move(sink_bufs[0]));
         sink_bufs.erase(sink_bufs.begin());
@@ -662,8 +659,7 @@ void llama_kv_cache::tq_finish_calibration() {
         }
     }
 
-    // Sinks remain active after calibration — sink positions use fp16 dot product
-    LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers, sinks disabled (K: %s, V: %s)\n",
+    LLAMA_LOG_INFO("%s: TurboQuant calibration complete — re-quantized %d layers (K: %s, V: %s)\n",
                    __func__, (int)layers.size(),
                    ggml_type_name(target_type_k), ggml_type_name(target_type_v));
 }
