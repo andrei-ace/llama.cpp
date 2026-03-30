@@ -320,7 +320,7 @@ llama_kv_cache::llama_kv_cache(
                              type_k == GGML_TYPE_TURBO3_0_MSE || type_k == GGML_TYPE_TURBO4_0_MSE ||
                              type_v == GGML_TYPE_TURBO3_0_MSE || type_v == GGML_TYPE_TURBO4_0_MSE ||
                              type_k == GGML_TYPE_TQK_5HI_3LO_QR || type_k == GGML_TYPE_TQK_5HI_3LO_FWHT ||
-                             type_k == GGML_TYPE_TQK_HAD_MSE4);
+                             type_k == GGML_TYPE_TQK_HAD_MSE4 || type_k == GGML_TYPE_TQK_HAD_PROD4);
     if (uses_turbo) {
         const uint32_t head_dim = hparams.n_embd_head_k(0);
         GGML_ASSERT(head_dim == 128 && "TurboQuant currently only supports head_dim=128");
