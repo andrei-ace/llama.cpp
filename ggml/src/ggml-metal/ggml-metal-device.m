@@ -1178,7 +1178,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4 ||
                                     op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_HAD);
                     bool is_ok_v = (op->src[2]->type == GGML_TYPE_F16 ||
-                                    op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4);
+                                    op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4 ||
+                                    op->src[2]->type == GGML_TYPE_Q4_0);
                     if (!(is_tq_k && is_ok_v)) {
                         return false;
                     }
