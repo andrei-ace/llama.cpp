@@ -661,7 +661,7 @@ void llama_kv_cache::tq_finish_calibration() {
     }
     // Keep the view context alive (owns the stream view tensors)
     ctxs_bufs.emplace_back(ggml_context_ptr(tq_view_ctx), nullptr);
-    // Defer fp16 buffer freeing to first decode step (graph scheduler holds refs during prefill)
+    // Defer fp16 buffer freeing — only possible when ALL tensors moved out of it (K+V both swapped)
     tq_fp16_buf_pending_free_ = true;
 
     tq_calibrating_ = false;
@@ -754,34 +754,7 @@ void llama_kv_cache::tq_expire_sinks() {
 }
 
 void llama_kv_cache::clear(bool data) {
-    // Deferred fp16 buffer free — do it before iterating ctxs_bufs
-    if (tq_fp16_buf_pending_free_) {
-        tq_fp16_buf_pending_free_ = false;
-        for (auto it = ctxs_bufs.begin(); it != ctxs_bufs.end(); ++it) {
-            ggml_backend_buffer_t buf = it->second.get();
-            if (!buf) continue;
-            bool in_use = false;
-            for (const auto & l : layers) {
-                if ((l.k && l.k->buffer == buf) || (l.v && l.v->buffer == buf)) {
-                    in_use = true;
-                    break;
-                }
-            }
-            if (!in_use) {
-                LLAMA_LOG_INFO("%s: freeing fp16 calibration buffer (%.2f MiB)\n",
-                               __func__, ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
-                ggml_context * ctx = it->first.get();
-                if (ctx) {
-                    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
-                        t->buffer = NULL;
-                        t->data   = NULL;
-                    }
-                }
-                ctxs_bufs.erase(it);
-                break;
-            }
-        }
-    }
+    tq_try_free_fp16_buf();
 
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
@@ -1067,6 +1040,7 @@ llama_pos llama_kv_cache::seq_pos_max(llama_seq_id seq_id) const {
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> ret;
     for (const auto & [ctx, buf] : ctxs_bufs) {
+        if (!buf) continue; // view-only context (no buffer)
         ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(buf.get());
 
         if (hparams.no_alloc) {
@@ -1471,7 +1445,38 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
     return res;
 }
 
+void llama_kv_cache::tq_try_free_fp16_buf() {
+    if (!tq_fp16_buf_pending_free_) return;
+    tq_fp16_buf_pending_free_ = false;
+    for (auto it = ctxs_bufs.begin(); it != ctxs_bufs.end(); ++it) {
+        ggml_backend_buffer_t buf = it->second.get();
+        if (!buf) continue;
+        bool in_use = false;
+        for (const auto & l : layers) {
+            if ((l.k && l.k->buffer == buf) || (l.v && l.v->buffer == buf)) {
+                in_use = true;
+                break;
+            }
+        }
+        if (!in_use) {
+            LLAMA_LOG_INFO("%s: freeing fp16 calibration buffer (%.2f MiB)\n",
+                           __func__, ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
+            ggml_context * ctx = it->first.get();
+            if (ctx) {
+                for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+                    t->buffer = NULL;
+                    t->data   = NULL;
+                }
+            }
+            ctxs_bufs.erase(it);
+            break;
+        }
+    }
+}
+
 void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch) {
+    tq_try_free_fp16_buf();
+
     // keep track of the max sequence position that we would overwrite with this ubatch
     // for non-SWA cache, this would be always empty
     llama_seq_id seq_pos_max_rm[LLAMA_MAX_SEQ];
