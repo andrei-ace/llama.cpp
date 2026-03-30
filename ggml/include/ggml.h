@@ -435,8 +435,9 @@ extern "C" {
         GGML_TYPE_TQK_5HI_3LO_QR   = 45, // TQK 3.88 bpv: 32/96 split, QR rotation, 4b+QJL hi / 3b lo
         GGML_TYPE_TQK_5HI_3LO_FWHT = 46, // TQK 3.88 bpv: 32/96 split, FWHT rotation, 4b+QJL hi / 3b lo
         GGML_TYPE_TQK_HAD_MSE4      = 47, // TQK 4.13 bpv: H_128 Hadamard, 4-bit MSE, no split
-        GGML_TYPE_TQK_HAD_PROD4     = 48, // TQK 5.25 bpv: H_128 Hadamard, 4-bit MSE + 1-bit QJL (unbiased)
-        GGML_TYPE_COUNT     = 49,
+        GGML_TYPE_TQK_HAD_PROD5     = 48, // TQK 5.25 bpv: H_128 Hadamard, 4-bit MSE + 1-bit QJL (unbiased)
+        GGML_TYPE_TQK_HAD_PROD4     = 49, // TQK 4.25 bpv: H_128 Hadamard, 3-bit MSE + 1-bit QJL (unbiased)
+        GGML_TYPE_COUNT     = 50,
     };
 
     // precision

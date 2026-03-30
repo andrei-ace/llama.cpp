@@ -353,16 +353,26 @@ typedef struct {
 static_assert(sizeof(block_tqk_had_mse4) == sizeof(ggml_half) + TQK_BLOCK_SIZE * 4 / 8, "wrong tqk_had_mse4 block size");
 // Total: 66 bytes for 128 elements = 4.125 bpv
 
-// TQK had_prod4: H_128 Hadamard + 4-bit MSE + 1-bit QJL on residual (unbiased estimator)
+// TQK had_prod5: H_128 Hadamard + 4-bit MSE + 1-bit QJL on residual (unbiased estimator)
 // No split, no calibration. QJL corrects MSE bias → works with partial sinks.
 typedef struct {
     ggml_half norm;                                    // 2 bytes: L2 norm
     ggml_half rnorm;                                   // 2 bytes: QJL residual norm
     uint8_t   qs[TQK_BLOCK_SIZE * 4 / 8];             // 64 bytes: 4-bit MSE indices (128 channels)
     uint8_t   signs[TQK_BLOCK_SIZE / 8];               // 16 bytes: 1-bit QJL signs (128 channels)
-} block_tqk_had_prod4;
-static_assert(sizeof(block_tqk_had_prod4) == 2*sizeof(ggml_half) + TQK_BLOCK_SIZE*4/8 + TQK_BLOCK_SIZE/8, "wrong tqk_had_prod4 block size");
+} block_tqk_had_prod5;
+static_assert(sizeof(block_tqk_had_prod5) == 2*sizeof(ggml_half) + TQK_BLOCK_SIZE*4/8 + TQK_BLOCK_SIZE/8, "wrong tqk_had_prod5 block size");
 // Total: 84 bytes for 128 elements = 5.25 bpv
+
+// TQK had_prod4: H_128 Hadamard + 3-bit MSE + 1-bit QJL (4.25 bpv, unbiased)
+typedef struct {
+    ggml_half norm;                                    // 2 bytes: L2 norm
+    ggml_half rnorm;                                   // 2 bytes: QJL residual norm
+    uint8_t   qs[TQK_BLOCK_SIZE * 3 / 8];             // 48 bytes: 3-bit MSE indices (128 channels)
+    uint8_t   signs[TQK_BLOCK_SIZE / 8];               // 16 bytes: 1-bit QJL signs
+} block_tqk_had_prod4;
+static_assert(sizeof(block_tqk_had_prod4) == 2*sizeof(ggml_half) + TQK_BLOCK_SIZE*3/8 + TQK_BLOCK_SIZE/8, "wrong tqk_had_prod4 block size");
+// Total: 68 bytes for 128 elements = 4.25 bpv
 
 // TQK 5hi_3lo: 32/96 split, 4-bit MSE + 1-bit QJL on outliers, 3-bit MSE on regulars
 // Used by both QR and FWHT variants (different rotation, same storage)

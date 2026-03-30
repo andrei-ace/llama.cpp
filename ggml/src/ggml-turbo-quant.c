@@ -1443,11 +1443,11 @@ void ggml_vec_dot_tqk_had_mse4_f32(
 }
 
 // ---------------------------------------------------------------------------
-// TQK had_prod4: H_128 Hadamard + 4-bit MSE + 1-bit QJL (unbiased estimator)
+// TQK had_prod5: H_128 Hadamard + 4-bit MSE + 1-bit QJL (unbiased estimator)
 // No split, no calibration. QJL on residual corrects MSE bias.
 // ---------------------------------------------------------------------------
 
-void quantize_row_tqk_had_prod4_ref(const float * GGML_RESTRICT x, block_tqk_had_prod4 * GGML_RESTRICT y, int64_t k) {
+void quantize_row_tqk_had_prod5_ref(const float * GGML_RESTRICT x, block_tqk_had_prod5 * GGML_RESTRICT y, int64_t k) {
     assert(k % TQK_BLOCK_SIZE == 0);
     const int64_t nb = k / TQK_BLOCK_SIZE;
 
@@ -1489,6 +1489,130 @@ void quantize_row_tqk_had_prod4_ref(const float * GGML_RESTRICT x, block_tqk_had
     }
 
     // Write fp16 copy to k_sink tensor (only for sink positions)
+    tq_sink_write_fp16(x, y, k, sizeof(block_tqk_had_prod5));
+}
+
+void dequantize_row_tqk_had_prod5(const block_tqk_had_prod5 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+
+    for (int64_t i = 0; i < nb; i++) {
+        // Check if this block is a sink — read fp16 from k_sink tensor instead
+        if (tq_try_sink_dequant(&x[i], y + i * TQK_BLOCK_SIZE, TQK_BLOCK_SIZE)) continue;
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        // MSE reconstruction: centroids → inverse FWHT → scale by norm
+        float rot[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) {
+            rot[j] = centroids_16[up4(x[i].qs, j)];
+        }
+        tq_fwht(rot, TQ_DIM);
+        for (int j = 0; j < TQ_DIM; j++) y[i * TQK_BLOCK_SIZE + j] = norm * rot[j];
+
+        // QJL correction on residual
+        float corr[TQ_DIM];
+        qjl_inverse(x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm), corr, TQ_DIM, QJL_SEED_128);
+        for (int j = 0; j < TQ_DIM; j++) y[i * TQK_BLOCK_SIZE + j] += corr[j];
+    }
+}
+
+// Asymmetric vec_dot: rotate Q with H_128, dot with stored centroids + QJL correction
+void ggml_vec_dot_tqk_had_prod5_f32(
+        int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx,
+        const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE == 0);
+    assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+
+    const block_tqk_had_prod5 * GGML_RESTRICT x = (const block_tqk_had_prod5 *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE;
+
+    float sumf = 0.0f;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i * TQK_BLOCK_SIZE;
+
+        // Check if this block is a sink — do fp16 dot from k_sink tensor
+        float sink_dot;
+        if (tq_try_sink_dot(&x[i], q, TQK_BLOCK_SIZE, &sink_dot)) {
+            sumf += sink_dot;
+            continue;
+        }
+
+        float norm = GGML_FP16_TO_FP32(x[i].norm);
+
+        // Rotate Q with H_128
+        float q_rot[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) q_rot[j] = q[j];
+        tq_fwht(q_rot, TQ_DIM);
+
+        // MSE centroid dot
+        float dot = 0.0f;
+        for (int j = 0; j < TQ_DIM; j++) {
+            dot += q_rot[j] * centroids_16[up4(x[i].qs, j)];
+        }
+        float mse_dot = norm * dot;
+
+        // QJL asymmetric dot on residual (raw query, not rotated)
+        float qjl_dot = qjl_asymmetric_dot(q, TQ_DIM, QJL_SEED_128,
+                                            x[i].signs, GGML_FP16_TO_FP32(x[i].rnorm));
+
+        sumf += mse_dot + qjl_dot;
+    }
+
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// TQK had_prod4: H_128 Hadamard + 3-bit MSE + 1-bit QJL (4.25 bpv, unbiased)
+// Same structure as had_prod5 but uses 3-bit (8 centroids) instead of 4-bit.
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqk_had_prod4_ref(const float * GGML_RESTRICT x, block_tqk_had_prod4 * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * TQK_BLOCK_SIZE;
+
+        // L2 norm
+        float sum_sq = 0.0f;
+        for (int j = 0; j < TQ_DIM; j++) sum_sq += xb[j] * xb[j];
+        float norm = sqrtf(sum_sq);
+        y[i].norm = GGML_FP32_TO_FP16(norm);
+        y[i].rnorm = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].signs, 0, sizeof(y[i].signs));
+
+        if (norm == 0.0f) { memset(y[i].qs, 0, sizeof(y[i].qs)); continue; }
+        float inv = 1.0f / norm;
+
+        // Normalize and apply H_128 via FWHT
+        float rot[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) rot[j] = xb[j] * inv;
+        tq_fwht(rot, TQ_DIM);
+
+        // 3-bit MSE quantize (8 centroids)
+        memset(y[i].qs, 0, sizeof(y[i].qs));
+        for (int j = 0; j < TQ_DIM; j++) {
+            int idx = nearest(rot[j], centroids_8, 8);
+            pk3(y[i].qs, j, idx);
+        }
+
+        // Compute residual in ORIGINAL space: r = x - norm * H^{-1} * centroids
+        float recon[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) recon[j] = centroids_8[up3(y[i].qs, j)];
+        tq_fwht(recon, TQ_DIM);  // inverse FWHT = FWHT (orthogonal, self-inverse)
+        float resid[TQ_DIM];
+        for (int j = 0; j < TQ_DIM; j++) resid[j] = xb[j] - norm * recon[j];
+
+        // QJL forward on residual
+        y[i].rnorm = GGML_FP32_TO_FP16(qjl_forward(resid, y[i].signs, TQ_DIM, QJL_SEED_128));
+    }
+
+    // Write fp16 copy to k_sink tensor (only for sink positions)
     tq_sink_write_fp16(x, y, k, sizeof(block_tqk_had_prod4));
 }
 
@@ -1505,7 +1629,7 @@ void dequantize_row_tqk_had_prod4(const block_tqk_had_prod4 * GGML_RESTRICT x, f
         // MSE reconstruction: centroids → inverse FWHT → scale by norm
         float rot[TQ_DIM];
         for (int j = 0; j < TQ_DIM; j++) {
-            rot[j] = centroids_16[up4(x[i].qs, j)];
+            rot[j] = centroids_8[up3(x[i].qs, j)];
         }
         tq_fwht(rot, TQ_DIM);
         for (int j = 0; j < TQ_DIM; j++) y[i * TQK_BLOCK_SIZE + j] = norm * rot[j];
@@ -1549,10 +1673,10 @@ void ggml_vec_dot_tqk_had_prod4_f32(
         for (int j = 0; j < TQ_DIM; j++) q_rot[j] = q[j];
         tq_fwht(q_rot, TQ_DIM);
 
-        // MSE centroid dot
+        // MSE centroid dot (3-bit, 8 centroids)
         float dot = 0.0f;
         for (int j = 0; j < TQ_DIM; j++) {
-            dot += q_rot[j] * centroids_16[up4(x[i].qs, j)];
+            dot += q_rot[j] * centroids_8[up3(x[i].qs, j)];
         }
         float mse_dot = norm * dot;
 
