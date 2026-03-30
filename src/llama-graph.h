@@ -501,6 +501,19 @@ public:
     std::map<llama_seq_id, llama_sampler *> samplers;
 };
 
+// TurboQuant: per-KV-head channel permutation for FA (5hi_3lo types)
+class llm_graph_input_tq_chmap : public llm_graph_input_i {
+public:
+    llm_graph_input_tq_chmap(int il, int n_kv_head) : il(il), n_kv_head(n_kv_head) {}
+    virtual ~llm_graph_input_tq_chmap() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+    bool can_reuse(const llm_graph_params &) override { return true; }
+
+    ggml_tensor * chmap = nullptr;
+    int il, n_kv_head;
+};
+
 //
 // llm_graph_result
 //

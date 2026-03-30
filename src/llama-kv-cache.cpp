@@ -5,6 +5,13 @@
 #include "llama-model.h"
 #include "llama-context.h"
 
+extern "C" {
+    void tq_set_head_dim(int dim);
+    void tq_init_outlier_masks(int n_layers, int n_heads, int head_dim);
+    void tq_set_outlier_mask_from_perm(int layer, int head, const uint8_t * perm, int head_dim);
+    void tq_free_outlier_masks(void);
+}
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -98,6 +105,19 @@ llama_kv_cache::llama_kv_cache(
     }
 
     const bool is_mla = hparams.is_mla();
+
+    // TurboQuant: auto-detect head dimension and remap types for d=256
+    {
+        const uint32_t head_dim = hparams.n_embd_head_k(0);
+        tq_set_head_dim((int)head_dim);
+        if (head_dim == 256) {
+            if (type_k == GGML_TYPE_TQK_HAD_MSE4)     type_k = GGML_TYPE_TQK_HAD_MSE4_D256;
+            if (type_k == GGML_TYPE_TQK_HAD_PROD5)    type_k = GGML_TYPE_TQK_HAD_PROD5_D256;
+            if (type_k == GGML_TYPE_TQK_HAD_PROD4)    type_k = GGML_TYPE_TQK_HAD_PROD4_D256;
+            if (type_k == GGML_TYPE_TQK_5HI_3LO_HAD)  type_k = GGML_TYPE_TQK_5HI_3LO_HAD_D256;
+            if (type_v == GGML_TYPE_TQV_HAD_MSE4)      type_v = GGML_TYPE_TQV_HAD_MSE4_D256;
+        }
+    }
 
     for (uint32_t il = 0; il < hparams.n_layer; il++) {
         if (!hparams.has_kv(il)) {
@@ -197,6 +217,87 @@ llama_kv_cache::llama_kv_cache(
 
         ggml_backend_buffer_clear(buf, 0);
         ctxs_bufs.emplace_back(std::move(ctx), buf);
+    }
+
+    // TurboQuant: generate rotation matrices and init outlier masks
+    {
+        const bool uses_turbo = (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQV_HAD_MSE4_D256)
+                             || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQV_HAD_MSE4_D256);
+        if (uses_turbo) {
+            const uint32_t head_dim = hparams.n_embd_head_k(0);
+            const uint32_t d = (head_dim == 256) ? 256 : 128;
+            const uint32_t n_kv_heads = hparams.n_head_kv(0);
+
+            // Rotation matrices: deterministic QR from seed "TuRB0ROT"
+            ggml_backend_buffer_type_t rot_buft = ggml_backend_cpu_buffer_type();
+            if (!layers.empty() && layers[0].k) {
+                auto * buf = layers[0].k->buffer;
+                if (buf) {
+                    rot_buft = ggml_backend_buffer_get_type(buf);
+                }
+            }
+
+            ggml_init_params rot_params = {
+                /*.mem_size =*/ 2 * ggml_tensor_overhead(),
+                /*.mem_buffer =*/ NULL,
+                /*.no_alloc =*/ true,
+            };
+            ggml_context * rot_ctx = ggml_init(rot_params);
+            turbo_rotation     = ggml_new_tensor_2d(rot_ctx, GGML_TYPE_F32, d, d);
+            turbo_rotation_inv = ggml_new_tensor_2d(rot_ctx, GGML_TYPE_F32, d, d);
+            ggml_set_name(turbo_rotation,     "turbo_rot_fwd");
+            ggml_set_name(turbo_rotation_inv, "turbo_rot_inv");
+
+            ggml_backend_buffer_t rot_buf = ggml_backend_alloc_ctx_tensors_from_buft(rot_ctx, rot_buft);
+            if (rot_buf) {
+                // Generate random orthogonal matrix via Gram-Schmidt QR
+                const uint64_t seed = 0x5475524230524F54ULL; // "TuRB0ROT"
+                std::vector<float> Q_mat(d * d), Q_mat_T(d * d);
+
+                // Box-Muller + LCG for Gaussian generation
+                uint64_t s = seed;
+                auto lcg = [&]() -> uint64_t { s = s * 6364136223846793005ULL + 1442695040888963407ULL; return s; };
+                for (uint32_t i = 0; i < d * d; i++) {
+                    float u1 = ((float)(uint32_t)(lcg() >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+                    float u2 = ((float)(uint32_t)(lcg() >> 32) + 1.0f) / ((float)0xFFFFFFFF + 2.0f);
+                    Q_mat[i] = sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+                }
+
+                // Modified Gram-Schmidt QR decomposition
+                for (uint32_t j = 0; j < d; j++) {
+                    for (uint32_t k = 0; k < j; k++) {
+                        float dot = 0.0f;
+                        for (uint32_t i = 0; i < d; i++) dot += Q_mat[k*d+i] * Q_mat[j*d+i];
+                        for (uint32_t i = 0; i < d; i++) Q_mat[j*d+i] -= dot * Q_mat[k*d+i];
+                    }
+                    float norm = 0.0f;
+                    for (uint32_t i = 0; i < d; i++) norm += Q_mat[j*d+i] * Q_mat[j*d+i];
+                    norm = sqrtf(norm);
+                    for (uint32_t i = 0; i < d; i++) Q_mat[j*d+i] /= norm;
+                }
+
+                // Q_mat_T = transpose
+                for (uint32_t i = 0; i < d; i++) {
+                    for (uint32_t j = 0; j < d; j++) {
+                        Q_mat_T[j*d+i] = Q_mat[i*d+j];
+                    }
+                }
+
+                ggml_backend_tensor_set(turbo_rotation,     Q_mat_T.data(), 0, d*d*sizeof(float));
+                ggml_backend_tensor_set(turbo_rotation_inv, Q_mat.data(),   0, d*d*sizeof(float));
+
+                ctxs_bufs.emplace_back(ggml_context_ptr(rot_ctx), ggml_backend_buffer_ptr(rot_buf));
+                LLAMA_LOG_INFO("%s: TurboQuant rotation matrices generated (d=%u)\n", __func__, d);
+            } else {
+                ggml_free(rot_ctx);
+                LLAMA_LOG_WARN("%s: failed to allocate TurboQuant rotation buffers\n", __func__);
+            }
+
+            // Init outlier masks with identity permutation (default)
+            tq_init_outlier_masks((int)layers.size(), (int)n_kv_heads, (int)d);
+            LLAMA_LOG_INFO("%s: TurboQuant outlier masks initialized (%zu layers, %u heads, d=%u)\n",
+                    __func__, layers.size(), n_kv_heads, d);
+        }
     }
 
     {

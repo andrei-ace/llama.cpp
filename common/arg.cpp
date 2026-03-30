@@ -387,6 +387,13 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
+    // TurboQuant K cache types
+    GGML_TYPE_TQK_5HI_3LO_HAD,
+    GGML_TYPE_TQK_HAD_MSE4,
+    GGML_TYPE_TQK_HAD_PROD5,
+    GGML_TYPE_TQK_HAD_PROD4,
+    // TurboQuant V cache type
+    GGML_TYPE_TQV_HAD_MSE4,
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {

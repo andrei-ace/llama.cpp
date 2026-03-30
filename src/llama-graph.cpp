@@ -17,6 +17,21 @@
 #include <sstream>
 #include <unordered_set>
 
+extern "C" {
+    void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm);
+    int  tq_get_head_dim(void);
+}
+
+void llm_graph_input_tq_chmap::set_input(const llama_ubatch *) {
+    if (chmap && chmap->data) {
+        const int dim = tq_get_head_dim();
+        uint8_t * data = (uint8_t *)chmap->data;
+        for (int h = 0; h < n_kv_head; h++) {
+            tq_get_channel_perm(il, h, 1, data + h * dim);
+        }
+    }
+}
+
 // dedup helpers
 
 static ggml_tensor * build_kq_mask(
@@ -1825,6 +1840,18 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
+
+        // TurboQuant split types: pass per-head channel permutation for Q permutation in FA
+        if (k->type == GGML_TYPE_TQK_5HI_3LO_HAD || k->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256) {
+            const int head_size = (int)k->ne[0];
+            const int n_kv_head = (int)k->ne[2];
+            auto inp_chmap = std::make_unique<llm_graph_input_tq_chmap>(il, n_kv_head);
+            inp_chmap->chmap = ggml_new_tensor_1d(ctx0, GGML_TYPE_I8, n_kv_head * head_size);
+            ggml_set_input(inp_chmap->chmap);
+            ggml_set_name(inp_chmap->chmap, "tq_chmap");
+            ggml_flash_attn_ext_add_chmap(cur, inp_chmap->chmap);
+            res->add_input(std::move(inp_chmap));
+        }
 
         if (v_mla) {
 #if 0

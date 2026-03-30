@@ -196,6 +196,10 @@ public:
 
     void set_input_k_shift(ggml_tensor * dst) const;
 
+    // TurboQuant rotation matrices (nullptr if not using turbo types)
+    ggml_tensor * get_turbo_rot_forward() const { return turbo_rotation; }
+    ggml_tensor * get_turbo_rot_inverse() const { return turbo_rotation_inv; }
+
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
@@ -251,6 +255,10 @@ private:
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
+
+    // TurboQuant: rotation matrices (d×d orthogonal, deterministic from seed)
+    ggml_tensor * turbo_rotation     = nullptr;
+    ggml_tensor * turbo_rotation_inv = nullptr;
 
     size_t total_size() const;
 
