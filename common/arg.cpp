@@ -2026,6 +2026,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"--tq-perms"}, "FILE",
+        "TurboQuant channel permutation file (from llama-tq-calibrate)",
+        [](common_params & params, const std::string & value) {
+            params.tq_perms_file = value;
+        }
+    ));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {

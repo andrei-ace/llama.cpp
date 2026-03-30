@@ -268,8 +268,11 @@ static __global__ void flash_attn_ext_vec(
                 // 5hi_3lo_had: permute Q via channel map, then four FWHT-32
                 // Channel map for this head: perm[0..31] = outlier indices, perm[32..127] = regular
                 const int kv_head = head / gqa_ratio;
-                // Use layer 0 channel map for FA (the permutation is per-head, not per-layer for FA)
-                // TODO: per-layer channel maps in FA require passing layer info
+                // TODO(TurboQuant): currently uses layer-0 channel map for ALL layers.
+                // For correct per-layer permutations, need to either:
+                // 1. Pass chmap from src[5] as a kernel argument (requires I8->I32 expansion), or
+                // 2. Update tq_fa_channel_map_ptr per-layer before each FA kernel launch
+                // This only affects tqk3_0j (5hi_3lo) — other TQ types don't use channel maps.
                 const int32_t * perm = tq_fa_channel_map_ptr + (int64_t)kv_head * 128;
 
                 // Load Q permuted: shmem[0..31] = Q[perm[0..31]], shmem[32..127] = Q[perm[32..127]]

@@ -7,6 +7,10 @@
 #include "sampling.h"
 #include "unicode.h"
 
+extern "C" {
+    void tq_set_outlier_mask_from_perm(int layer, int head, const uint8_t * perm, int head_dim);
+}
+
 #include <algorithm>
 #include <cinttypes>
 #include <climits>
@@ -1272,6 +1276,50 @@ common_init_result_ptr common_init_from_params(common_params & params) {
     }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
+
+    // TurboQuant: load channel permutations from calibration file
+    if (!params.tq_perms_file.empty()) {
+        FILE * fp = fopen(params.tq_perms_file.c_str(), "rb");
+        if (!fp) {
+            LOG_ERR("%s: failed to open TQ perms file '%s'\n", __func__, params.tq_perms_file.c_str());
+        } else {
+            uint32_t magic, version, nl, nh, hd, pr, nlm;
+            fread(&magic,   4, 1, fp);
+            fread(&version, 4, 1, fp);
+            fread(&nl,      4, 1, fp);
+            fread(&nh,      4, 1, fp);
+            fread(&hd,      4, 1, fp);
+            fread(&pr,      4, 1, fp);
+            fread(&nlm,     4, 1, fp);
+
+            if (magic != 0x54515045 || version != 1) {
+                LOG_ERR("%s: invalid TQ perms file (magic=0x%08x, version=%u)\n", __func__, magic, version);
+                fclose(fp);
+            } else {
+                // Read layer map
+                std::vector<int32_t> layer_map(nlm);
+                fread(layer_map.data(), 4, nlm, fp);
+
+                // Read permutations and apply
+                std::vector<uint8_t> all_perms((size_t)nl * nh * hd);
+                fread(all_perms.data(), 1, all_perms.size(), fp);
+                fclose(fp);
+
+                // tq_init_outlier_masks was already called in KV cache constructor
+                // Now override with calibrated permutations
+                for (uint32_t il = 0; il < nlm; il++) {
+                    int32_t cidx = layer_map[il];
+                    if (cidx < 0) continue;
+                    for (uint32_t h = 0; h < nh; h++) {
+                        const uint8_t * perm = all_perms.data() + ((size_t)cidx * nh + h) * hd;
+                        tq_set_outlier_mask_from_perm((int)il, (int)h, perm, (int)hd);
+                    }
+                }
+                LOG_INF("%s: loaded TQ channel permutations from '%s' (%u layers, %u heads, d=%u, %s)\n",
+                        __func__, params.tq_perms_file.c_str(), nl, nh, hd, pr ? "pre-RoPE" : "post-RoPE");
+            }
+        }
+    }
 
     if (params.ctx_shift && !llama_memory_can_shift(llama_get_memory(lctx))) {
         LOG_WRN("%s: KV cache shifting is not supported for this context, disabling KV cache shifting\n", __func__);
