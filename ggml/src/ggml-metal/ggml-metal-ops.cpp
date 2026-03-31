@@ -1140,6 +1140,7 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
         src_type == GGML_TYPE_TQK_HAD_PROD4 ||
         src_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
         src_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
+        src_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
         src_type == GGML_TYPE_TQV_HAD_MSE4 ||
         src_type == GGML_TYPE_TQK_HAD_MSE4_D256 ||
         src_type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
@@ -1149,10 +1150,12 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
         // 5hi_3lo split types: use separate dispatch with channel map
         if (src_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             src_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
+            src_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
             src_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256) {
             const bool is_d256 = (src_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256);
             const int block_size = is_d256 ? 256 : 128;
             const char * name = (src_type == GGML_TYPE_TQK_6HI_3LO_HAD) ? "kernel_get_rows_6hi_3lo_had" :
+                (src_type == GGML_TYPE_TQK_2HI_1LO_HAD) ? "kernel_get_rows_2hi_1lo_had" :
                 is_d256 ? "kernel_get_rows_5hi_3lo_had_d256" : "kernel_get_rows_5hi_3lo_had";
             auto pipeline = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
 
@@ -1291,6 +1294,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         dst_type == GGML_TYPE_TQK_HAD_PROD4 ||
         dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
         dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
+        dst_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
         dst_type == GGML_TYPE_TQV_HAD_MSE4 ||
         dst_type == GGML_TYPE_TQK_HAD_MSE4_D256 ||
         dst_type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
@@ -1299,6 +1303,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         dst_type == GGML_TYPE_TQV_HAD_MSE4_D256) {
         if (dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
+            dst_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
             dst_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256) {
             // split types need channel map — handled separately below
         }
@@ -1316,6 +1321,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
                             dst_type == GGML_TYPE_TQV_HAD_MSE4         ? "kernel_set_rows_had_mse4_i32" :
                             dst_type == GGML_TYPE_TQK_5HI_3LO_HAD     ? "kernel_set_rows_5hi_3lo_had_i32" :
                             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD     ? "kernel_set_rows_6hi_3lo_had_i32" :
+                            dst_type == GGML_TYPE_TQK_2HI_1LO_HAD     ? "kernel_set_rows_2hi_1lo_had_i32" :
                             dst_type == GGML_TYPE_TQK_HAD_MSE4_D256    ? "kernel_set_rows_had_mse4_d256_i32" :
                             dst_type == GGML_TYPE_TQK_HAD_PROD5_D256   ? "kernel_set_rows_had_prod5_d256_i32" :
                             dst_type == GGML_TYPE_TQK_HAD_PROD4_D256   ? "kernel_set_rows_had_prod4_d256_i32" :
@@ -1349,6 +1355,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         // 5hi_3lo: pass channel map buffer and layer index for calibrated channel ordering
         if (dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
+            dst_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
             dst_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256) {
             // get_tq_channel_map auto-creates default map if none exists yet
             ggml_metal_buffer_id bid_chmap = ggml_metal_device_get_tq_channel_map(ctx->dev);

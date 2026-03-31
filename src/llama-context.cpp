@@ -2971,8 +2971,8 @@ llama_context * llama_init_from_model(
 
     // TurboQuant types require Flash Attention
     {
-        const bool tq_k = (params.type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_k <= GGML_TYPE_TQK_6HI_3LO_HAD);
-        const bool tq_v = (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQK_6HI_3LO_HAD);
+        const bool tq_k = (params.type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_k <= GGML_TYPE_TQK_2HI_1LO_HAD);
+        const bool tq_v = (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQK_2HI_1LO_HAD);
         if (tq_k || tq_v) {
             if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
                 LLAMA_LOG_ERROR("%s: TurboQuant KV cache types require flash_attn\n", __func__);

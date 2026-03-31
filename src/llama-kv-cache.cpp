@@ -221,8 +221,8 @@ llama_kv_cache::llama_kv_cache(
 
     // TurboQuant: generate rotation matrices and init outlier masks
     {
-        const bool uses_turbo = (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQK_6HI_3LO_HAD)
-                             || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQK_6HI_3LO_HAD);
+        const bool uses_turbo = (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQK_2HI_1LO_HAD)
+                             || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQK_2HI_1LO_HAD);
         if (uses_turbo && !hparams.no_alloc) {
             const uint32_t head_dim = hparams.n_embd_head_k(0);
             const uint32_t d = (head_dim == 256) ? 256 : 128;
