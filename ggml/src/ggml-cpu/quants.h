@@ -57,7 +57,6 @@ void dequantize_row_tqk_had_prod5_d256  (const block_tqk_had_prod5_d256 * GGML_R
 void dequantize_row_tqk_had_prod4_d256  (const block_tqk_had_prod4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqk_5hi_3lo_had_d256(const block_tqk_5hi_3lo_d256   * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqv_had_mse4_d256   (const block_tqv_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tqk_6hi_3lo_had(const block_tqk_6hi_3lo  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 
 void quantize_row_iq4_nl (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_iq4_xs (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
