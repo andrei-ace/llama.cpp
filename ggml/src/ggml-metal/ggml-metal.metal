@@ -9966,52 +9966,6 @@ kernel void kernel_set_rows_had_prod4(
     blk->rnorm = half(sqrt(rnorm_sq));
 }
 
-// 5hi_3lo_had: get_rows (full dequant — uses default channel order, for debug/non-FA path)
-[[host_name("kernel_get_rows_5hi_3lo_had")]]
-kernel void kernel_get_rows_5hi_3lo_had(
-        constant ggml_metal_kargs_get_rows & args,
-        device const void  * src0,
-        device const void  * src1,
-        device       float * dst,
-        uint3 tgpig[[threadgroup_position_in_grid]],
-        ushort tiitg[[thread_index_in_threadgroup]]) {
-    const int i10 = tgpig.x;
-    const int i02 = tgpig.y;
-    const int i03 = tgpig.z;
-    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
-    const int iblk = tiitg;
-    if (iblk >= args.ne00 / 128) return;
-
-    device const block_tqk_5hi_3lo * blk = (device const block_tqk_5hi_3lo *)
-        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
-
-    float norm_hi = float(blk->norm_hi);
-    float norm_lo = float(blk->norm_lo);
-    float rnorm_hi = float(blk->rnorm_hi);
-
-    thread float hi[32];
-    for (int j = 0; j < 32; j++) hi[j] = tq_c16_d32[tq_up4(blk->qs_hi, j)];
-    tq_fwht<32>(hi);
-    thread float corr[32];
-    for (int j = 0; j < 32; j++) corr[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
-    tq_fwht<32>(corr);
-    float qjl_s = 1.2533141f / 32.0f * rnorm_hi;
-    for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
-
-    thread float lo[96];
-    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d32[tq_up3(blk->qs_lo, j)];
-    tq_fwht<32>(lo);
-    tq_fwht<32>(lo + 32);
-    tq_fwht<32>(lo + 64);
-    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
-
-    // Merge with default channel order (0-31=hi, 32-127=lo)
-    // NOTE: for correct merge with calibrated channels, would need channel map
-    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
-    for (int j = 0; j < 32; j++)  out[j]      = hi[j];
-    for (int j = 0; j < 96; j++)  out[32 + j]  = lo[j];
-}
-
 // 5hi_3lo_had: set_rows (quantize — uses calibrated channel map if available)
 [[host_name("kernel_set_rows_5hi_3lo_had_i32")]]
 kernel void kernel_set_rows_5hi_3lo_had(
@@ -10421,50 +10375,6 @@ kernel void kernel_set_rows_had_prod4_d256(
         if (resid[j] >= 0.0f) blk->signs[j / 8] |= (uint8_t)(1 << (j % 8));
     }
     blk->rnorm = half(sqrt(rnorm_sq));
-}
-
-// 5hi_3lo_had_d256: get_rows
-[[host_name("kernel_get_rows_5hi_3lo_had_d256")]]
-kernel void kernel_get_rows_5hi_3lo_had_d256(
-        constant ggml_metal_kargs_get_rows & args,
-        device const void  * src0,
-        device const void  * src1,
-        device       float * dst,
-        uint3 tgpig[[threadgroup_position_in_grid]],
-        ushort tiitg[[thread_index_in_threadgroup]]) {
-    const int i10 = tgpig.x;
-    const int i02 = tgpig.y;
-    const int i03 = tgpig.z;
-    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
-    const int iblk = tiitg;
-    if (iblk >= args.ne00 / 256) return;
-
-    device const block_tqk_5hi_3lo_d256 * blk = (device const block_tqk_5hi_3lo_d256 *)
-        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
-
-    float norm_hi = float(blk->norm_hi);
-    float norm_lo = float(blk->norm_lo);
-    float rnorm_hi = float(blk->rnorm_hi);
-
-    thread float hi[64];
-    for (int j = 0; j < 64; j++) hi[j] = tq_c16_d64[tq_up4(blk->qs_hi, j)];
-    tq_fwht<64>(hi);
-    thread float corr[64];
-    for (int j = 0; j < 64; j++) corr[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
-    tq_fwht<64>(corr);
-    float qjl_s = 1.2533141f / 64.0f * rnorm_hi;
-    for (int j = 0; j < 64; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
-
-    thread float lo[192];
-    for (int j = 0; j < 192; j++) lo[j] = tq_c8_d192[tq_up3(blk->qs_lo, j)];
-    tq_fwht<64>(lo);
-    tq_fwht<64>(lo + 64);
-    tq_fwht<64>(lo + 128);
-    for (int j = 0; j < 192; j++) lo[j] *= norm_lo;
-
-    device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
-    for (int j = 0; j < 64; j++)   out[j]      = hi[j];
-    for (int j = 0; j < 192; j++)  out[64 + j]  = lo[j];
 }
 
 // 5hi_3lo_had_d256: set_rows
