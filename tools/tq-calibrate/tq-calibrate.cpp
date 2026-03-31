@@ -7,6 +7,7 @@
 #include "common.h"
 #include "llama.h"
 #include "ggml.h"
+#include <functional>
 
 #include <algorithm>
 #include <cassert>
