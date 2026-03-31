@@ -9,6 +9,7 @@
 
 extern "C" {
     void tq_set_outlier_mask_from_perm(int layer, int head, const uint8_t * perm, int head_dim);
+    void tq_upload_channel_maps_to_devices(void);
 }
 
 #include <algorithm>
@@ -1315,6 +1316,9 @@ common_init_result_ptr common_init_from_params(common_params & params) {
                         tq_set_outlier_mask_from_perm((int)il, (int)h, perm, (int)hd);
                     }
                 }
+                // Upload channel maps to Metal/CUDA device buffers
+                tq_upload_channel_maps_to_devices();
+
                 LOG_INF("%s: loaded TQ channel permutations from '%s' (%u layers, %u heads, d=%u, %s)\n",
                         __func__, params.tq_perms_file.c_str(), nl, nh, hd, pr ? "pre-RoPE" : "post-RoPE");
             }

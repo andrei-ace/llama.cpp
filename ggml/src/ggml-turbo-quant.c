@@ -692,6 +692,50 @@ void tq_free_outlier_masks(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Upload channel maps to Metal/CUDA devices
+// ---------------------------------------------------------------------------
+
+#ifdef GGML_USE_METAL
+    struct ggml_metal_device;
+    typedef struct ggml_metal_device * ggml_metal_device_t;
+    extern ggml_metal_device_t ggml_metal_device_get(int device);
+    extern void ggml_metal_device_set_tq_channel_map(ggml_metal_device_t dev, const int * data, int n_layers, int n_kv_heads);
+#endif
+
+void tq_upload_channel_maps_to_devices(void) {
+    if (!tq_k_outlier_mask || tq_n_layers == 0 || tq_n_heads == 0) return;
+
+    const int dim = tq_head_dim;
+    const int n_hi = dim / 4;
+    const int n_lo = dim - n_hi;
+
+    // Build int32 channel map: [n_layers][n_heads][dim]
+    // First n_hi entries = outlier channel indices, next n_lo = regular
+    int * chmap = (int *)malloc((size_t)tq_n_layers * tq_n_heads * dim * sizeof(int));
+    if (!chmap) return;
+
+    for (int l = 0; l < tq_n_layers; l++) {
+        for (int h = 0; h < tq_n_heads; h++) {
+            int * row = chmap + ((size_t)l * tq_n_heads + h) * dim;
+            tq_get_channel_map(l, h, 1, row, row + n_hi);
+        }
+    }
+
+#ifdef GGML_USE_METAL
+    {
+        ggml_metal_device_t mdev = ggml_metal_device_get(0);
+        if (mdev) {
+            ggml_metal_device_set_tq_channel_map(mdev, chmap, tq_n_layers, tq_n_heads);
+        }
+    }
+#endif
+
+    // CUDA: ggml_cuda_set_tq_channel_map would go here if CUDA is enabled
+
+    free(chmap);
+}
+
+// ---------------------------------------------------------------------------
 // Fast Walsh-Hadamard Transform (FWHT) — in-place, normalized, self-inverse
 // n must be a power of 2.  H_n = (1/√n) * Walsh-Hadamard matrix.
 // ---------------------------------------------------------------------------
