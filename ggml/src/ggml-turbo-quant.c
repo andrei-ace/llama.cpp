@@ -465,6 +465,20 @@ static inline int up5(const uint8_t * q, int j) {
     return val & 0x1F;
 }
 
+static inline void pk2(uint8_t * q, int j, int v) {
+    q[j / 4] |= (uint8_t)(v << ((j % 4) * 2));
+}
+static inline int up2(const uint8_t * q, int j) {
+    return (q[j / 4] >> ((j % 4) * 2)) & 3;
+}
+
+static inline void pk1(uint8_t * q, int j, int v) {
+    q[j / 8] |= (uint8_t)(v << (j % 8));
+}
+static inline int up1(const uint8_t * q, int j) {
+    return (q[j / 8] >> (j % 8)) & 1;
+}
+
 // ---------------------------------------------------------------------------
 // Generic quantize/dequantize helpers (operate in rotated space)
 // ---------------------------------------------------------------------------
@@ -1508,6 +1522,218 @@ void ggml_vec_dot_tqk_6hi_3lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs,
         for (int j = 0; j < TQ_DIM_LO; j++) mse_dot_lo += q_rot_lo[j]*centroids_8_d32[up3(x[i].qs_lo, j)];
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
         sumf += mse_dot_hi*norm_hi + mse_dot_lo*norm_lo + qjl_hi;
+    }
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// TQK 2hi_1lo_had: 2-bit MSE + QJL on outliers, 1-bit MSE + QJL on regulars (2.75 bpv)
+// ---------------------------------------------------------------------------
+
+#define QJL_SEED_96 0x514A4C60ULL
+
+void quantize_row_tqk_2hi_1lo_had_ref(const float * GGML_RESTRICT x, block_tqk_2hi_1lo * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+    tq_init_rotations();
+    for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        const float * xb = x + i * TQK_BLOCK_SIZE;
+        float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
+        tq_split_channels(xb, hi_raw, lo_raw);
+        float hi_rot[TQ_DIM_HI], lo_rot[TQ_DIM_LO];
+        memcpy(hi_rot, hi_raw, sizeof(hi_rot));
+        tq_fwht(hi_rot, TQ_DIM_HI);
+        memcpy(lo_rot, lo_raw, sizeof(lo_rot));
+        tq_fwht(lo_rot, TQ_DIM_HI); tq_fwht(lo_rot+32, TQ_DIM_HI); tq_fwht(lo_rot+64, TQ_DIM_HI);
+        float sum_hi = 0, sum_lo = 0;
+        for (int j = 0; j < TQ_DIM_HI; j++) sum_hi += hi_rot[j]*hi_rot[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) sum_lo += lo_rot[j]*lo_rot[j];
+        float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
+        y[i].norm_hi = GGML_FP32_TO_FP16(norm_hi); y[i].norm_lo = GGML_FP32_TO_FP16(norm_lo);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(0); y[i].rnorm_lo = GGML_FP32_TO_FP16(0);
+        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+        memset(y[i].signs_lo, 0, sizeof(y[i].signs_lo));
+        if (norm_hi == 0 && norm_lo == 0) { memset(y[i].qs_hi,0,sizeof(y[i].qs_hi)); memset(y[i].qs_lo,0,sizeof(y[i].qs_lo)); continue; }
+        float inv_hi = (norm_hi > 1e-12f) ? 1.0f/norm_hi : 0, inv_lo = (norm_lo > 1e-12f) ? 1.0f/norm_lo : 0;
+        // 2-bit MSE on hi (4 centroids, d=32)
+        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        for (int j = 0; j < TQ_DIM_HI; j++) pk2(y[i].qs_hi, j, nearest(hi_rot[j]*inv_hi, centroids_4_d32, 4));
+        // 1-bit MSE on lo (2 centroids, d=96)
+        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        for (int j = 0; j < TQ_DIM_LO; j++) pk1(y[i].qs_lo, j, nearest(lo_rot[j]*inv_lo, centroids_2_d96, 2));
+        // QJL on hi residual
+        float yhi[TQ_DIM_HI];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_4_d32[up2(y[i].qs_hi, j)];
+        float hi_rec[TQ_DIM_HI]; memcpy(hi_rec, yhi, sizeof(hi_rec)); tq_fwht(hi_rec, TQ_DIM_HI);
+        float r_hi[TQ_DIM_HI]; for (int j = 0; j < TQ_DIM_HI; j++) r_hi[j] = hi_raw[j] - norm_hi*hi_rec[j];
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQ_DIM_HI, QJL_SEED_32));
+        // QJL on lo residual
+        float ylo[TQ_DIM_LO];
+        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_2_d96[up1(y[i].qs_lo, j)];
+        float lo_rec[TQ_DIM_LO]; memcpy(lo_rec, ylo, sizeof(lo_rec));
+        tq_fwht(lo_rec, TQ_DIM_HI); tq_fwht(lo_rec+32, TQ_DIM_HI); tq_fwht(lo_rec+64, TQ_DIM_HI);
+        float r_lo[TQ_DIM_LO]; for (int j = 0; j < TQ_DIM_LO; j++) r_lo[j] = lo_raw[j] - norm_lo*lo_rec[j];
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(r_lo, y[i].signs_lo, TQ_DIM_LO, QJL_SEED_96));
+    }
+}
+
+void dequantize_row_tqk_2hi_1lo_had(const block_tqk_2hi_1lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+    tq_init_rotations();
+    for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float yhi[TQ_DIM_HI], ylo[TQ_DIM_LO];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_4_d32[up2(x[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_2_d96[up1(x[i].qs_lo, j)];
+        float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
+        memcpy(hi_orig, yhi, sizeof(hi_orig)); tq_fwht(hi_orig, TQ_DIM_HI);
+        memcpy(lo_orig, ylo, sizeof(lo_orig));
+        tq_fwht(lo_orig, TQ_DIM_HI); tq_fwht(lo_orig+32, TQ_DIM_HI); tq_fwht(lo_orig+64, TQ_DIM_HI);
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] *= norm_hi;
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] *= norm_lo;
+        float corr_hi[TQ_DIM_HI];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQ_DIM_HI, QJL_SEED_32);
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] += corr_hi[j];
+        float corr_lo[TQ_DIM_LO];
+        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQ_DIM_LO, QJL_SEED_96);
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] += corr_lo[j];
+        tq_merge_channels(hi_orig, lo_orig, y + i*TQK_BLOCK_SIZE);
+    }
+}
+
+void ggml_vec_dot_tqk_2hi_1lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE == 0); assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+    tq_init_rotations();
+    const block_tqk_2hi_1lo * GGML_RESTRICT x = (const block_tqk_2hi_1lo *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE;
+    float sumf = 0;
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i*TQK_BLOCK_SIZE;
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
+        tq_split_channels(q, hi_raw, lo_raw);
+        float q_rot_hi[TQ_DIM_HI], q_rot_lo[TQ_DIM_LO];
+        memcpy(q_rot_hi, hi_raw, sizeof(q_rot_hi)); tq_fwht(q_rot_hi, TQ_DIM_HI);
+        memcpy(q_rot_lo, lo_raw, sizeof(q_rot_lo));
+        tq_fwht(q_rot_lo, TQ_DIM_HI); tq_fwht(q_rot_lo+32, TQ_DIM_HI); tq_fwht(q_rot_lo+64, TQ_DIM_HI);
+        float mse_dot_hi = 0, mse_dot_lo = 0;
+        for (int j = 0; j < TQ_DIM_HI; j++) mse_dot_hi += q_rot_hi[j]*centroids_4_d32[up2(x[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) mse_dot_lo += q_rot_lo[j]*centroids_2_d96[up1(x[i].qs_lo, j)];
+        float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
+        float qjl_lo = qjl_asymmetric_dot(lo_raw, TQ_DIM_LO, QJL_SEED_96, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        sumf += mse_dot_hi*norm_hi + mse_dot_lo*norm_lo + qjl_hi + qjl_lo;
+    }
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// TQK 3hi_2lo_had: 3-bit MSE + QJL on outliers, 2-bit MSE + QJL on regulars (3.75 bpv)
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqk_3hi_2lo_had_ref(const float * GGML_RESTRICT x, block_tqk_3hi_2lo * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+    tq_init_rotations();
+    for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        const float * xb = x + i * TQK_BLOCK_SIZE;
+        float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
+        tq_split_channels(xb, hi_raw, lo_raw);
+        float hi_rot[TQ_DIM_HI], lo_rot[TQ_DIM_LO];
+        memcpy(hi_rot, hi_raw, sizeof(hi_rot));
+        tq_fwht(hi_rot, TQ_DIM_HI);
+        memcpy(lo_rot, lo_raw, sizeof(lo_rot));
+        tq_fwht(lo_rot, TQ_DIM_HI); tq_fwht(lo_rot+32, TQ_DIM_HI); tq_fwht(lo_rot+64, TQ_DIM_HI);
+        float sum_hi = 0, sum_lo = 0;
+        for (int j = 0; j < TQ_DIM_HI; j++) sum_hi += hi_rot[j]*hi_rot[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) sum_lo += lo_rot[j]*lo_rot[j];
+        float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
+        y[i].norm_hi = GGML_FP32_TO_FP16(norm_hi); y[i].norm_lo = GGML_FP32_TO_FP16(norm_lo);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(0); y[i].rnorm_lo = GGML_FP32_TO_FP16(0);
+        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+        memset(y[i].signs_lo, 0, sizeof(y[i].signs_lo));
+        if (norm_hi == 0 && norm_lo == 0) { memset(y[i].qs_hi,0,sizeof(y[i].qs_hi)); memset(y[i].qs_lo,0,sizeof(y[i].qs_lo)); continue; }
+        float inv_hi = (norm_hi > 1e-12f) ? 1.0f/norm_hi : 0, inv_lo = (norm_lo > 1e-12f) ? 1.0f/norm_lo : 0;
+        // 3-bit MSE on hi (8 centroids, d=32)
+        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        for (int j = 0; j < TQ_DIM_HI; j++) pk3(y[i].qs_hi, j, nearest(hi_rot[j]*inv_hi, centroids_8_d32, 8));
+        // 2-bit MSE on lo (4 centroids, d=96)
+        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        for (int j = 0; j < TQ_DIM_LO; j++) pk2(y[i].qs_lo, j, nearest(lo_rot[j]*inv_lo, centroids_4_d96, 4));
+        // QJL on hi residual
+        float yhi[TQ_DIM_HI];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_8_d32[up3(y[i].qs_hi, j)];
+        float hi_rec[TQ_DIM_HI]; memcpy(hi_rec, yhi, sizeof(hi_rec)); tq_fwht(hi_rec, TQ_DIM_HI);
+        float r_hi[TQ_DIM_HI]; for (int j = 0; j < TQ_DIM_HI; j++) r_hi[j] = hi_raw[j] - norm_hi*hi_rec[j];
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQ_DIM_HI, QJL_SEED_32));
+        // QJL on lo residual
+        float ylo[TQ_DIM_LO];
+        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_4_d96[up2(y[i].qs_lo, j)];
+        float lo_rec[TQ_DIM_LO]; memcpy(lo_rec, ylo, sizeof(lo_rec));
+        tq_fwht(lo_rec, TQ_DIM_HI); tq_fwht(lo_rec+32, TQ_DIM_HI); tq_fwht(lo_rec+64, TQ_DIM_HI);
+        float r_lo[TQ_DIM_LO]; for (int j = 0; j < TQ_DIM_LO; j++) r_lo[j] = lo_raw[j] - norm_lo*lo_rec[j];
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward(r_lo, y[i].signs_lo, TQ_DIM_LO, QJL_SEED_96));
+    }
+}
+
+void dequantize_row_tqk_3hi_2lo_had(const block_tqk_3hi_2lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+    tq_init_rotations();
+    for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float yhi[TQ_DIM_HI], ylo[TQ_DIM_LO];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_8_d32[up3(x[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_4_d96[up2(x[i].qs_lo, j)];
+        float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
+        memcpy(hi_orig, yhi, sizeof(hi_orig)); tq_fwht(hi_orig, TQ_DIM_HI);
+        memcpy(lo_orig, ylo, sizeof(lo_orig));
+        tq_fwht(lo_orig, TQ_DIM_HI); tq_fwht(lo_orig+32, TQ_DIM_HI); tq_fwht(lo_orig+64, TQ_DIM_HI);
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] *= norm_hi;
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] *= norm_lo;
+        float corr_hi[TQ_DIM_HI];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQ_DIM_HI, QJL_SEED_32);
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] += corr_hi[j];
+        float corr_lo[TQ_DIM_LO];
+        qjl_inverse(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQ_DIM_LO, QJL_SEED_96);
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] += corr_lo[j];
+        tq_merge_channels(hi_orig, lo_orig, y + i*TQK_BLOCK_SIZE);
+    }
+}
+
+void ggml_vec_dot_tqk_3hi_2lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE == 0); assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+    tq_init_rotations();
+    const block_tqk_3hi_2lo * GGML_RESTRICT x = (const block_tqk_3hi_2lo *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE;
+    float sumf = 0;
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i*TQK_BLOCK_SIZE;
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
+        tq_split_channels(q, hi_raw, lo_raw);
+        float q_rot_hi[TQ_DIM_HI], q_rot_lo[TQ_DIM_LO];
+        memcpy(q_rot_hi, hi_raw, sizeof(q_rot_hi)); tq_fwht(q_rot_hi, TQ_DIM_HI);
+        memcpy(q_rot_lo, lo_raw, sizeof(q_rot_lo));
+        tq_fwht(q_rot_lo, TQ_DIM_HI); tq_fwht(q_rot_lo+32, TQ_DIM_HI); tq_fwht(q_rot_lo+64, TQ_DIM_HI);
+        float mse_dot_hi = 0, mse_dot_lo = 0;
+        for (int j = 0; j < TQ_DIM_HI; j++) mse_dot_hi += q_rot_hi[j]*centroids_8_d32[up3(x[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) mse_dot_lo += q_rot_lo[j]*centroids_4_d96[up2(x[i].qs_lo, j)];
+        float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
+        float qjl_lo = qjl_asymmetric_dot(lo_raw, TQ_DIM_LO, QJL_SEED_96, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        sumf += mse_dot_hi*norm_hi + mse_dot_lo*norm_lo + qjl_hi + qjl_lo;
     }
     *s = sumf;
 }

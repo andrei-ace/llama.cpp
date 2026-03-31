@@ -340,6 +340,20 @@ typedef struct {
 static_assert(sizeof(block_tqk_2hi_1lo) == 4*sizeof(ggml_half) + TQK_N_OUTLIER*2/8 + TQK_N_REGULAR/8 + TQK_N_OUTLIER/8 + TQK_N_REGULAR/8, "wrong tqk_2hi_1lo block size");
 // Total: 44 bytes for 128 elements = 2.75 bpv
 
+// TQK 3hi_2lo: 32/96 split, 3-bit MSE + 1-bit QJL on outliers, 2-bit MSE + 1-bit QJL on regulars
+typedef struct {
+    ggml_half norm_hi;                                 // 2 bytes
+    ggml_half norm_lo;                                 // 2 bytes
+    ggml_half rnorm_hi;                                // 2 bytes
+    ggml_half rnorm_lo;                                // 2 bytes
+    uint8_t   qs_hi[TQK_N_OUTLIER * 3 / 8];           // 12 bytes: 3-bit MSE
+    uint8_t   qs_lo[TQK_N_REGULAR * 2 / 8];           // 24 bytes: 2-bit MSE
+    uint8_t   signs_hi[TQK_N_OUTLIER / 8];            // 4 bytes
+    uint8_t   signs_lo[TQK_N_REGULAR / 8];            // 12 bytes
+} block_tqk_3hi_2lo;
+static_assert(sizeof(block_tqk_3hi_2lo) == 4*sizeof(ggml_half) + TQK_N_OUTLIER*3/8 + TQK_N_REGULAR*2/8 + TQK_N_OUTLIER/8 + TQK_N_REGULAR/8, "wrong tqk_3hi_2lo block size");
+// Total: 60 bytes for 128 elements = 3.75 bpv
+
 // TQV had_mse4: V cache quantization — 4-bit MSE, per-block norm
 typedef block_tqk_had_mse4 block_tqv_had_mse4;
 
