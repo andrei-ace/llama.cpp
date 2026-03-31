@@ -39,7 +39,8 @@ static __global__ void flash_attn_ext_vec(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const int8_t * __restrict__ chmap) {
 #ifdef FLASH_ATTN_AVAILABLE
 
     // Skip unused kernel variants for faster compilation:
@@ -52,7 +53,8 @@ static __global__ void flash_attn_ext_vec(
                   nb11, nb12, nb13,
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
-                  nb31, nb32, nb33);
+                  nb31, nb32, nb33,
+                  chmap);
         NO_DEVICE_CODE;
         return;
     }
@@ -268,19 +270,18 @@ static __global__ void flash_attn_ext_vec(
                 // 5hi_3lo_had: permute Q via channel map, then four FWHT-32
                 // Channel map for this head: perm[0..31] = outlier indices, perm[32..127] = regular
                 const int kv_head = head / gqa_ratio;
-                // TODO(TurboQuant): currently uses layer-0 channel map for ALL layers.
-                // For correct per-layer permutations, need to either:
-                // 1. Pass chmap from src[5] as a kernel argument (requires I8->I32 expansion), or
-                // 2. Update tq_fa_channel_map_ptr per-layer before each FA kernel launch
-                // This only affects tqk3_0j (5hi_3lo) — other TQ types don't use channel maps.
-                const int32_t * perm = tq_fa_channel_map_ptr + (int64_t)kv_head * 128;
+                // Per-layer channel permutation from src[5] (chmap tensor, I8)
+                // Layout: [n_kv_heads * head_dim] uint8 — first D/4 are outlier indices
+                const int8_t * perm_i8 = chmap ? chmap + (int64_t)kv_head * D : nullptr;
 
                 // Load Q permuted: shmem[0..31] = Q[perm[0..31]], shmem[32..127] = Q[perm[32..127]]
                 const float * Q_src = (ncols == 1 || ic0 + j < int(ne01.z))
                     ? (const float *)(Q + j*nb01) : nullptr;
                 for (int i = tid; i < D; i += nthreads) {
-                    if (Q_src) {
-                        shmem[i] = scale * Q_src[perm[i]];
+                    if (Q_src && perm_i8) {
+                        shmem[i] = scale * Q_src[(int)perm_i8[i]];
+                    } else if (Q_src) {
+                        shmem[i] = scale * Q_src[i]; // fallback: identity permutation
                     } else {
                         shmem[i] = 0.0f;
                     }
