@@ -1,6 +1,12 @@
 #!/bin/sh
 # vim: set ts=4 sw=4 et:
 # Download Penn Treebank dataset (for TurboQuant calibration)
+#
+# Citation:
+#   Marcus, Mitchell P., Santorini, Beatrice, and Marcinkiewicz, Mary Ann.
+#   "Building a Large Annotated Corpus of English: The Penn Treebank."
+#   Computational Linguistics, 19(2), 313-330, 1993.
+#   https://www.aclweb.org/anthology/J93-2004
 
 BASE_URL="https://raw.githubusercontent.com/wojzaremba/lstm/master/data"
 DIR="ptb"
