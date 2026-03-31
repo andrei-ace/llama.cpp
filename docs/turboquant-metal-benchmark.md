@@ -81,6 +81,39 @@ This model is highly robust to KV quantization — all types produce near-lossle
 | tqk4_sj+tqv4_0 | 4.13 | 7.529 | +2.9% |
 | tqk3_sj+tqv4_0 | 4.00 | 7.547 | +3.1% |
 
+## Qwen3 8B (Q8_0 weights, 8.11 GiB)
+
+Qwen3 is robust to KV quantization — all types produce usable results. The split+calibrated `tqk4_sj` is the best TQ type.
+
+### Perplexity
+
+| Type | KV bpv | PPL | vs f16 |
+|------|--------|-----|--------|
+| q8_0+q8_0 | 8.50 | 10.90 | -0.2% |
+| f16+f16 | 16.00 | 10.92 | baseline |
+| q4_1+q4_1 | 5.00 | 10.97 | +0.5% |
+| **tqk4_sj+tqv4_0** | **4.13** | **11.12** | **+1.7%** |
+| q4_0+q4_0 | 4.50 | 11.32 | +3.6% |
+| tqk4_0+tqv4_0 | 4.13 | 11.43 | +4.7% |
+| tqk5_0j+tqv4_0 | 5.25 | 11.44 | +4.8% |
+| tqk3_sj+tqv4_0 | 3.88 | 11.97 | +9.6% |
+| tqk4_1j+tqv4_0 | 4.25 | 12.38 | +13% |
+| tqk3b_sj+tqv4_0 | 3.75 | 13.71 | +26% |
+| tqk2_sj+tqv4_0 | 2.75 | 131.6 | — |
+
+### Throughput
+
+| Type | KV bpv | pp512 (t/s) | tg128 (t/s) |
+|------|--------|-------------|-------------|
+| f16+f16 | 16.00 | 477 | 29.8 |
+| q4_0+q4_0 | 4.50 | 470 | 28.9 |
+| q8_0+q8_0 | 8.50 | 467 | 28.7 |
+| q4_1+q4_1 | 5.00 | 469 | 28.5 |
+| tqk4_0+tqv4_0 | 4.13 | 459 | 26.3 |
+| tqk4_sj+tqv4_0 | 4.13 | 445 | 23.2 |
+| tqk3_sj+tqv4_0 | 3.88 | 445 | 23.6 |
+| tqk3b_sj+tqv4_0 | 3.75 | 443 | 22.0 |
+
 ## Notes
 
 - **tqk4_sj** is the recommended type for outlier-sensitive models (Qwen 2.5). It achieves 3.9x KV compression with the only viable sub-8.5 bpv quality.

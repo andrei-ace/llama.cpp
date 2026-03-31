@@ -207,6 +207,32 @@ llama-bench -m model.gguf -ctk tqk4_sj -ctv tqv4_0 -fa 1 -t 10
 | High (Qwen 2.5) | `tqk4_sj + tqv4_0` | 4.13 | Calibration essential — 21x better than q4_0 |
 | Memory-constrained | `tqk3b_sj + tqv4_0` | 3.94 | Aggressive but usable on robust models |
 
+## Benchmark summary
+
+Results across 4 models on Apple M4 Pro (Metal) and NVIDIA RTX A6000 (CUDA). PPL = WikiText-2 perplexity (lower is better). Calibrated on Penn Treebank train set. All TQ K types paired with tqv4_0 V; standard types use matching V.
+
+### PPL comparison (selected types)
+
+| Model | f16 | q8_0 | q4_0 (4.50) | q4_1 (5.00) | tqk4_0 (4.13) | tqk4_sj (4.13) |
+|---|---|---|---|---|---|---|
+| **Qwen 2.5 7B** | 7.78 | 7.78 | 6820 | 12256 | 5069 | **328** |
+| **Qwen3 8B** | 10.92 | 10.90 | 11.32 | 10.97 | 11.43 | **11.12** |
+| **Mistral 7B** | 7.32 | 7.31 | 7.29 | 7.34 | 7.36 | 7.53 |
+
+### Key findings
+
+1. **Outlier-sensitive models (Qwen 2.5)**: `tqk4_sj` is the only viable sub-8.5 bpv option. At PPL 328 it's 21x better than q4_0 (6820) and 37x better than q4_1 (12256) at comparable or lower bpv. Without calibration, split types degrade to uniform-type levels.
+
+2. **Robust models (Qwen3, Mistral, Llama 3.1)**: All KV quantization types work well. `tqk4_sj` at +1.7% PPL is competitive with q4_1 at +0.5% while using 17% fewer bits. For these models, `tqk4_0` (no calibration needed) is the pragmatic choice.
+
+3. **Calibration impact**: On Qwen 2.5 7B, variance-based calibration (Var(K)) reduces `tqk4_sj` PPL from 2804 (no calibration) to 223 (calibrated) — an 12x improvement. Calibration generalizes across datasets (train on PTB, evaluate on WikiText-2).
+
+4. **Speed**: TQ uniform types (`tqk4_0`) are 3% slower on prompt processing and 14% slower on text generation vs f16. Split types (`tqk4_sj`) are 5% slower on pp and 27% slower on tg. Standard quantization (q4_0, q4_1) has negligible speed impact.
+
+5. **Memory savings**: At 4.13 bpv (K+V), TurboQuant achieves 3.9x KV cache compression. For a 7B model with 128K context, KV cache drops from 16.4 GiB to 4.2 GiB.
+
+For detailed per-model results, see [Metal benchmarks](turboquant-metal-benchmark.md) and [CUDA benchmarks](turboquant-cuda-benchmark.md).
+
 ## Backend support
 
 | Backend | FA | get_rows | set_rows |
