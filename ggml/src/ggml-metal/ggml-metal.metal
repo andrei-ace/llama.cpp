@@ -10421,7 +10421,7 @@ kernel void kernel_get_rows_3hi_2lo_had(
     float qjl_s_hi = 1.2533141f / 32.0f * rnorm_hi;
     for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s_hi * corr_hi[j];
     thread float lo[96];
-    for (int j = 0; j < 96; j++) lo[j] = tq_c4_d96[tq_up1(blk->qs_lo, j)];
+    for (int j = 0; j < 96; j++) lo[j] = tq_c4_d96[tq_up2(blk->qs_lo, j)];
     tq_fwht<32>(lo); tq_fwht<32>(lo+32); tq_fwht<32>(lo+64);
     for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
     thread float corr_lo[96];
@@ -10479,7 +10479,7 @@ kernel void kernel_set_rows_3hi_2lo_had(
     for (int j=0;j<32;j++) { if (r_hi[j]>=0) blk->signs_hi[j/8]|=(uint8_t)(1<<(j%8)); }
     blk->rnorm_hi=half(sqrt(rn_hi));
     // QJL on lo
-    thread float ylo[96]; for (int j=0;j<96;j++) ylo[j]=tq_c4_d96[tq_up1(blk->qs_lo,j)];
+    thread float ylo[96]; for (int j=0;j<96;j++) ylo[j]=tq_c4_d96[tq_up2(blk->qs_lo,j)];
     thread float lo_rec[96]; for (int j=0;j<96;j++) lo_rec[j]=ylo[j]; tq_fwht<32>(lo_rec); tq_fwht<32>(lo_rec+32); tq_fwht<32>(lo_rec+64);
     thread float r_lo[96]; for (int j=0;j<96;j++) r_lo[j]=lo_raw[j]-norm_lo*lo_rec[j];
     float rn_lo=0; for (int j=0;j<96;j++) rn_lo+=r_lo[j]*r_lo[j]; tq_fwht<32>(r_lo); tq_fwht<32>(r_lo+32); tq_fwht<32>(r_lo+64);
