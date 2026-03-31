@@ -984,6 +984,14 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_tqv_had_mse4_d256,
         .from_float_ref           = (ggml_from_float_t) quantize_row_tqv_had_mse4_d256_ref,
     },
+    [GGML_TYPE_TQK_6HI_3LO_HAD] = {
+        .type_name                = "tqk4_sj",
+        .blck_size                = TQK_BLOCK_SIZE,
+        .type_size                = sizeof(block_tqk_6hi_3lo),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_6hi_3lo_had,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_6hi_3lo_had_ref,
+    },
 };
 
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {

@@ -440,7 +440,8 @@ extern "C" {
         GGML_TYPE_TQK_HAD_PROD4_D256   = 57, // tqk4_1j_d256: 4.13 bpv, d=256 + QJL
         GGML_TYPE_TQK_5HI_3LO_HAD_D256 = 58, // tqk3_0j_d256: 3.69 bpv, d=256 split + QJL
         GGML_TYPE_TQV_HAD_MSE4_D256    = 59, // tqv4_0_d256:  4.06 bpv, d=256 variant
-        GGML_TYPE_COUNT     = 60,
+        GGML_TYPE_TQK_6HI_3LO_HAD     = 60, // tqk4_sj:      4.13 bpv, 32/96 split, 5-bit+QJL hi / 3-bit lo
+        GGML_TYPE_COUNT     = 61,
     };
 
     // precision

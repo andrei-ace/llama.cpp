@@ -98,6 +98,18 @@ static const float centroids_8_d192[8] = {
      0.0176559645f,  0.0544312518f,  0.0966361419f,  0.1543156657f,
 };
 
+// d=32, 5-bit: exact Lloyd-Max for Beta(15.5, 15.5) on [-1, 1]
+static const float centroids_32_d32[32] = {
+    -0.5175248590f, -0.4322951804f, -0.3738535012f, -0.3274365979f,
+    -0.2880653515f, -0.2533989028f, -0.2221277254f, -0.1934313197f,
+    -0.1667502889f, -0.1416759621f, -0.1178913430f, -0.0951371170f,
+    -0.0731909740f, -0.0518544796f, -0.0309444291f, -0.0102869244f,
+     0.0102869244f,  0.0309444291f,  0.0518544796f,  0.0731909740f,
+     0.0951371170f,  0.1178913430f,  0.1416759621f,  0.1667502889f,
+     0.1934313197f,  0.2221277254f,  0.2533989028f,  0.2880653515f,
+     0.3274365979f,  0.3738535012f,  0.4322951804f,  0.5175248590f,
+};
+
 // ---------------------------------------------------------------------------
 // Two independent rotation matrices: Π_hi (32×32) and Π_lo (96×96)
 // Per the paper: split channels into outlier/regular sets, apply independent
@@ -439,6 +451,18 @@ static inline void pk4(uint8_t * q, int j, int v) {
 
 static inline int up4(const uint8_t * q, int j) {
     return (q[j / 2] >> ((j % 2) * 4)) & 0xF;
+}
+
+static inline void pk5(uint8_t * q, int j, int v) {
+    int bit = j * 5, byte0 = bit / 8, shift = bit % 8;
+    q[byte0] |= (uint8_t)((v & 0x1F) << shift);
+    if (shift > 3) q[byte0 + 1] |= (uint8_t)((v & 0x1F) >> (8 - shift));
+}
+static inline int up5(const uint8_t * q, int j) {
+    int bit = j * 5, byte0 = bit / 8, shift = bit % 8;
+    int val = q[byte0] >> shift;
+    if (shift > 3) val |= q[byte0 + 1] << (8 - shift);
+    return val & 0x1F;
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,6 +1417,98 @@ void ggml_vec_dot_tqk_5hi_3lo_had_f32(
         sumf += mse_dot + qjl_hi;
     }
 
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// TQK 6hi_3lo_had: like 5hi_3lo but 5-bit MSE (32 centroids) on outliers
+// ---------------------------------------------------------------------------
+
+void quantize_row_tqk_6hi_3lo_had_ref(const float * GGML_RESTRICT x, block_tqk_6hi_3lo * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+    tq_init_rotations();
+    for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        const float * xb = x + i * TQK_BLOCK_SIZE;
+        float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
+        tq_split_channels(xb, hi_raw, lo_raw);
+        float hi_rot[TQ_DIM_HI], lo_rot[TQ_DIM_LO];
+        memcpy(hi_rot, hi_raw, sizeof(hi_rot));
+        tq_fwht(hi_rot, TQ_DIM_HI);
+        memcpy(lo_rot, lo_raw, sizeof(lo_rot));
+        tq_fwht(lo_rot, TQ_DIM_HI); tq_fwht(lo_rot+32, TQ_DIM_HI); tq_fwht(lo_rot+64, TQ_DIM_HI);
+        float sum_hi = 0, sum_lo = 0;
+        for (int j = 0; j < TQ_DIM_HI; j++) sum_hi += hi_rot[j]*hi_rot[j];
+        for (int j = 0; j < TQ_DIM_LO; j++) sum_lo += lo_rot[j]*lo_rot[j];
+        float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
+        y[i].norm_hi = GGML_FP32_TO_FP16(norm_hi);
+        y[i].norm_lo = GGML_FP32_TO_FP16(norm_lo);
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(0.0f);
+        memset(y[i].signs_hi, 0, sizeof(y[i].signs_hi));
+        if (norm_hi == 0 && norm_lo == 0) { memset(y[i].qs_hi,0,sizeof(y[i].qs_hi)); memset(y[i].qs_lo,0,sizeof(y[i].qs_lo)); continue; }
+        float inv_hi = (norm_hi > 1e-12f) ? 1.0f/norm_hi : 0, inv_lo = (norm_lo > 1e-12f) ? 1.0f/norm_lo : 0;
+        memset(y[i].qs_hi, 0, sizeof(y[i].qs_hi));
+        for (int j = 0; j < TQ_DIM_HI; j++) pk5(y[i].qs_hi, j, nearest(hi_rot[j]*inv_hi, centroids_32_d32, 32));
+        memset(y[i].qs_lo, 0, sizeof(y[i].qs_lo));
+        for (int j = 0; j < TQ_DIM_LO; j++) pk3(y[i].qs_lo, j, nearest(lo_rot[j]*inv_lo, centroids_8_d32, 8));
+        float yhi[TQ_DIM_HI];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_32_d32[up5(y[i].qs_hi, j)];
+        float hi_rec[TQ_DIM_HI]; memcpy(hi_rec, yhi, sizeof(hi_rec)); tq_fwht(hi_rec, TQ_DIM_HI);
+        float r_hi[TQ_DIM_HI];
+        for (int j = 0; j < TQ_DIM_HI; j++) r_hi[j] = hi_raw[j] - norm_hi*hi_rec[j];
+        y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQ_DIM_HI, QJL_SEED_32));
+    }
+}
+
+void dequantize_row_tqk_6hi_3lo_had(const block_tqk_6hi_3lo * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % TQK_BLOCK_SIZE == 0);
+    const int64_t nb = k / TQK_BLOCK_SIZE;
+    tq_init_rotations();
+    for (int64_t i = 0; i < nb; i++) {
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float yhi[TQ_DIM_HI], ylo[TQ_DIM_LO];
+        for (int j = 0; j < TQ_DIM_HI; j++) yhi[j] = centroids_32_d32[up5(x[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) ylo[j] = centroids_8_d32[up3(x[i].qs_lo, j)];
+        float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
+        memcpy(hi_orig, yhi, sizeof(hi_orig)); tq_fwht(hi_orig, TQ_DIM_HI);
+        memcpy(lo_orig, ylo, sizeof(lo_orig));
+        tq_fwht(lo_orig, TQ_DIM_HI); tq_fwht(lo_orig+32, TQ_DIM_HI); tq_fwht(lo_orig+64, TQ_DIM_HI);
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] *= norm_hi;
+        for (int j = 0; j < TQ_DIM_LO; j++) lo_orig[j] *= norm_lo;
+        float corr_hi[TQ_DIM_HI];
+        qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQ_DIM_HI, QJL_SEED_32);
+        for (int j = 0; j < TQ_DIM_HI; j++) hi_orig[j] += corr_hi[j];
+        tq_merge_channels(hi_orig, lo_orig, y + i*TQK_BLOCK_SIZE);
+    }
+}
+
+void ggml_vec_dot_tqk_6hi_3lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % TQK_BLOCK_SIZE == 0); assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+    tq_init_rotations();
+    const block_tqk_6hi_3lo * GGML_RESTRICT x = (const block_tqk_6hi_3lo *)vx;
+    const float * GGML_RESTRICT y = (const float *)vy;
+    const int64_t nb = n / TQK_BLOCK_SIZE;
+    float sumf = 0;
+    for (int64_t i = 0; i < nb; i++) {
+        const float * q = y + i*TQK_BLOCK_SIZE;
+        if (nb > 1) tq_cur_head = (int)(i % (tq_n_heads > 0 ? tq_n_heads : nb));
+        float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
+        float hi_raw[TQ_DIM_HI], lo_raw[TQ_DIM_LO];
+        tq_split_channels(q, hi_raw, lo_raw);
+        float q_rot_hi[TQ_DIM_HI], q_rot_lo[TQ_DIM_LO];
+        memcpy(q_rot_hi, hi_raw, sizeof(q_rot_hi)); tq_fwht(q_rot_hi, TQ_DIM_HI);
+        memcpy(q_rot_lo, lo_raw, sizeof(q_rot_lo));
+        tq_fwht(q_rot_lo, TQ_DIM_HI); tq_fwht(q_rot_lo+32, TQ_DIM_HI); tq_fwht(q_rot_lo+64, TQ_DIM_HI);
+        float mse_dot_hi = 0, mse_dot_lo = 0;
+        for (int j = 0; j < TQ_DIM_HI; j++) mse_dot_hi += q_rot_hi[j]*centroids_32_d32[up5(x[i].qs_hi, j)];
+        for (int j = 0; j < TQ_DIM_LO; j++) mse_dot_lo += q_rot_lo[j]*centroids_8_d32[up3(x[i].qs_lo, j)];
+        float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
+        sumf += mse_dot_hi*norm_hi + mse_dot_lo*norm_lo + qjl_hi;
+    }
     *s = sumf;
 }
 

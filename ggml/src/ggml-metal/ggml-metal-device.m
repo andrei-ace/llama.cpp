@@ -1177,6 +1177,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4 ||
                                     op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                                    op->src[1]->type == GGML_TYPE_TQK_6HI_3LO_HAD ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4_D256 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4_D256 ||
@@ -1294,6 +1295,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_TQK_HAD_PROD5:
                     case GGML_TYPE_TQK_HAD_PROD4:
                     case GGML_TYPE_TQK_5HI_3LO_HAD:
+                    case GGML_TYPE_TQK_6HI_3LO_HAD:
                     case GGML_TYPE_TQV_HAD_MSE4:
                     case GGML_TYPE_TQK_HAD_MSE4_D256:
                     case GGML_TYPE_TQK_HAD_PROD5_D256:
