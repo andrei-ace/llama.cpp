@@ -39,18 +39,36 @@ Benchmark results for TurboQuant KV cache quantization types on CUDA, comparing 
 
 ### Throughput
 
+After warp-shuffle FWHT optimization (see below):
+
 | Type | bpv | pp512 (t/s) | tg128 (t/s) |
 |------|-----|-------------|-------------|
-| f16 | 16.00 | 4889 | 119 |
+| f16 | 16.00 | 4887 | 119 |
 | q8_0 | 8.50 | 4807 | 118 |
-| q4_0 | 4.50 | 4835 | 117 |
-| tqk4_0 | 4.13 | 1682 | 76 |
-| tqk5_0j | 5.25 | 1660 | 81 |
-| tqk4_1j | 4.25 | 1839 | 83 |
-| tqk3_sj | 3.88 | 1291 | 81 |
-| tqk4_sj | 4.13 | 1267 | 79 |
-| tqk3b_sj | 3.75 | 1357 | 80 |
-| tqk2_sj | 2.75 | 821 | 80 |
+| q4_0 | 4.50 | 4833 | 118 |
+| tqk4_0 | 4.13 | 1713 | 77 |
+| tqk5_0j | 5.25 | 1693 | 81 |
+| tqk4_1j | 4.25 | 1879 | 84 |
+| tqk3_sj | 3.88 | 1399 | 83 |
+| tqk4_sj | 4.13 | 1328 | 80 |
+| tqk3b_sj | 3.75 | 1488 | 82 |
+| tqk2_sj | 2.75 | 994 | 82 |
+
+### Warp-shuffle FWHT optimization
+
+The FA Q pre-rotation was rewritten to use `__shfl_xor_sync()` warp shuffles instead of `__syncthreads()`-heavy shared memory FWHT, based on the WHT warp-shuffle approach from [@seanrasch](https://github.com/seanrasch). Thank you for the suggestion!
+
+**Split types** (4 x FWHT-32): each of the 4 warps independently transforms one 32-element sub-block via shuffles — all 4 run in parallel with zero barriers. Previously 4 sequential shared-memory FWHTs with 24 `__syncthreads()` total.
+
+**Non-split types** (FWHT-128): hybrid approach — warp shuffles for the 5 intra-warp butterfly stages (steps 1-16), shared memory for the 2 cross-warp stages (steps 32, 64). Reduces barriers from 7 to 3.
+
+| Type | Before pp512 | After pp512 | Speedup |
+|------|-------------|-------------|---------|
+| tqk2_sj | 821 | 994 | **+21%** |
+| tqk3b_sj | 1357 | 1488 | **+10%** |
+| tqk3_sj | 1291 | 1399 | **+8%** |
+| tqk4_sj | 1267 | 1328 | **+5%** |
+| tqk4_0 | 1682 | 1713 | **+2%** |
 
 ## Notes
 
@@ -59,6 +77,7 @@ Benchmark results for TurboQuant KV cache quantization types on CUDA, comparing 
 - **tqk3_sj** (3.88 bpv) is the best quality-per-bit among split types.
 - **tqk2_sj** (2.75 bpv) degrades significantly on this short evaluation — it may perform better on longer contexts where KV cache memory savings matter more, but quality loss is substantial.
 - TQ types are slower than standard quantization types due to the per-block FWHT transform in the flash attention kernel. The split types additionally require channel map permutation. This overhead is most visible in prompt processing (pp512); text generation (tg128) is less affected since it is more memory-bound.
+- The remaining prefill gap vs f16 (~3x for non-split, ~3.5x for split) is dominated by warp divergence in the FA K dequant inner loop (branch on `j < 32` for split types) and the FWHT compute cost itself, not the Q pre-rotation.
 - Split types require offline calibration (`llama-tq-calibrate`) to identify outlier channels. Without calibration they use an identity permutation, which produces poor quality.
 
 ## CUDA Implementation Coverage

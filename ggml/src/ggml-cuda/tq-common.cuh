@@ -215,6 +215,23 @@ static __device__ __forceinline__ void tq_fwht_local(float * x) {
 }
 
 // ---------------------------------------------------------------------------
+// Fast Walsh-Hadamard Transform — warp shuffle, zero barriers.
+// Each lane in the warp holds one element. N must be <= WARP_SIZE (32).
+// Returns the transformed value for this lane. No shared memory needed.
+// ---------------------------------------------------------------------------
+
+template <int N>
+static __device__ __forceinline__ float tq_fwht_warp(float val, unsigned lane) {
+    static_assert(N <= 32 && (N & (N - 1)) == 0, "N must be power of 2, <= 32");
+#pragma unroll
+    for (int step = 1; step < N; step *= 2) {
+        float other = __shfl_xor_sync(0xFFFFFFFF, val, step);
+        val = (lane & step) ? (other - val) : (val + other);
+    }
+    return val * rsqrtf((float)N);
+}
+
+// ---------------------------------------------------------------------------
 // Fast Walsh-Hadamard Transform — shared memory, cooperative across threads.
 // Used in FA Q pre-rotation where multiple threads share work.
 // Caller must ensure shmem has N floats and __syncthreads() after return.

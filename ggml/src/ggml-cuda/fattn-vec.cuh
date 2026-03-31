@@ -246,9 +246,9 @@ static __global__ void flash_attn_ext_vec(
 #endif // V_DOT2_F32_F16_AVAILABLE
     }
 
-    // TurboQuant: pre-rotate Q with FWHT in shared memory.
-    // For had_* types: full H_128 FWHT on Q.
-    // For 5hi_3lo_had: permute Q via channel map into [hi(32), lo(96)], then four H_32 FWHTs.
+    // TurboQuant: pre-rotate Q with FWHT.
+    // Split types: warp-parallel FWHT-32 via __shfl_xor (zero barriers for the transform).
+    // Non-split types: hybrid FWHT-128 (warp shuffles for steps 1-16, shmem for steps 32,64).
     if constexpr (type_K_is_tq && !Q_q8_1) {
         constexpr int cpy_nb_tq = ggml_cuda_get_max_cpy_bytes();
         constexpr int cpy_ne_tq = cpy_nb_tq / 4;
@@ -261,43 +261,69 @@ static __global__ void flash_attn_ext_vec(
             float * shmem = (float *) KQ;
 
             if constexpr (!is_split_type) {
-                // had_* types: load Q → FWHT-128
-                for (int i = tid; i < D; i += nthreads) {
-                    if (ncols == 1 || ic0 + j < int(ne01.z)) {
-                        shmem[i] = scale * ((const float *)(Q + j*nb01))[i];
-                    } else {
-                        shmem[i] = 0.0f;
-                    }
+                // had_* types: hybrid FWHT-128 (warp shuffles + shmem for cross-warp stages)
+                if (ncols == 1 || ic0 + j < int(ne01.z)) {
+                    shmem[tid] = scale * ((const float *)(Q + j*nb01))[tid];
+                } else {
+                    shmem[tid] = 0.0f;
                 }
                 __syncthreads();
-                tq_fwht_shared<D>(shmem, tid, nthreads);
+
+                // Load into register for warp-shuffle stages
+                float val = shmem[tid];
+                const unsigned lane = tid % WARP_SIZE;
+
+                // Steps 1-16: intra-warp shuffles (no barriers)
+#pragma unroll
+                for (int step = 1; step <= 16; step *= 2) {
+                    float other = __shfl_xor_sync(0xFFFFFFFF, val, step);
+                    val = (lane & step) ? (other - val) : (val + other);
+                }
+
+                // Steps 32,64: cross-warp via shared memory
+                shmem[tid] = val;
+                __syncthreads();
+
+                val = shmem[tid]; // re-read after sync
+                float other = shmem[tid ^ 32];
+                val = (tid & 32) ? (other - val) : (val + other);
+                shmem[tid] = val;
+                __syncthreads();
+
+                val = shmem[tid];
+                other = shmem[tid ^ 64];
+                val = (tid & 64) ? (other - val) : (val + other);
+
+                shmem[tid] = val * rsqrtf((float)D);
+                __syncthreads();
             } else {
-                // 5hi_3lo_had: permute Q via channel map, then four FWHT-32
-                // Channel map for this head: perm[0..31] = outlier indices, perm[32..127] = regular
+                // Split types: permute Q → shmem, then 4 parallel FWHT-32 via warp shuffles.
+                // Each warp independently transforms one 32-element sub-block — zero barriers.
                 const int kv_head = head / gqa_ratio;
-                // Per-layer channel permutation from src[5] (chmap tensor, I8)
-                // Layout: [n_kv_heads * head_dim] uint8 — first D/4 are outlier indices
                 const int8_t * perm_i8 = chmap ? chmap + (int64_t)kv_head * D : nullptr;
 
-                // Load Q permuted: shmem[0..31] = Q[perm[0..31]], shmem[32..127] = Q[perm[32..127]]
                 const float * Q_src = (ncols == 1 || ic0 + j < int(ne01.z))
                     ? (const float *)(Q + j*nb01) : nullptr;
-                for (int i = tid; i < D; i += nthreads) {
-                    if (Q_src && perm_i8) {
-                        shmem[i] = scale * Q_src[(int)perm_i8[i]];
-                    } else if (Q_src) {
-                        shmem[i] = scale * Q_src[i]; // fallback: identity permutation
-                    } else {
-                        shmem[i] = 0.0f;
-                    }
+
+                // Load permuted Q into shmem (each thread loads one element)
+                if (Q_src && perm_i8) {
+                    shmem[tid] = scale * Q_src[(int)perm_i8[tid]];
+                } else if (Q_src) {
+                    shmem[tid] = scale * Q_src[tid];
+                } else {
+                    shmem[tid] = 0.0f;
                 }
                 __syncthreads();
 
-                // Four independent FWHT-32: hi[0..31], lo[32..63], lo[64..95], lo[96..127]
-                tq_fwht_shared<32>(shmem,      tid, nthreads);
-                tq_fwht_shared<32>(shmem + 32, tid, nthreads);
-                tq_fwht_shared<32>(shmem + 64, tid, nthreads);
-                tq_fwht_shared<32>(shmem + 96, tid, nthreads);
+                // Each warp does FWHT-32 on its own 32-element block via shuffles
+                // Warp 0: shmem[0..31], Warp 1: shmem[32..63], etc.
+                const unsigned lane = tid % WARP_SIZE;
+                const int warp_base = (tid / WARP_SIZE) * WARP_SIZE;
+                float val = tq_fwht_warp<32>(shmem[warp_base + lane], lane);
+
+                // Write results back to shmem for Q_reg reload
+                shmem[warp_base + lane] = val;
+                __syncthreads();
             }
 
             // Reload into Q_reg using the same interleaved pattern as the f16 path
