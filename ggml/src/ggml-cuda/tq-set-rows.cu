@@ -533,9 +533,9 @@ static __global__ void k_set_rows_tq_5hi_3lo_had_d256(
 
     float hi_rot[64], lo_rot[192];
     for (int j = 0; j < 64; j++) hi_rot[j] = hi_raw[j];
-    tq_fwht_local<32>(hi_rot); tq_fwht_local<32>(hi_rot + 32);
+    tq_fwht_local<64>(hi_rot);
     for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j];
-    for (int b = 0; b < 6; b++) tq_fwht_local<32>(lo_rot + b * 32);
+    for (int b = 0; b < 3; b++) tq_fwht_local<64>(lo_rot + b * 64);
 
     float sum_hi = 0.0f, sum_lo = 0.0f;
     for (int j = 0; j < 64; j++)  sum_hi += hi_rot[j] * hi_rot[j];
@@ -565,11 +565,11 @@ static __global__ void k_set_rows_tq_5hi_3lo_had_d256(
     // QJL on hi residual
     float yhi[64];
     for (int j = 0; j < 64; j++) yhi[j] = tq_c16_d64[tq_up4(dst_block->qs_hi, j)];
-    tq_fwht_local<32>(yhi); tq_fwht_local<32>(yhi + 32);
+    tq_fwht_local<64>(yhi);
     float r_hi[64];
     float rnorm_sq = 0.0f;
     for (int j = 0; j < 64; j++) { r_hi[j] = hi_raw[j] - norm_hi * yhi[j]; rnorm_sq += r_hi[j] * r_hi[j]; }
-    tq_fwht_local<32>(r_hi); tq_fwht_local<32>(r_hi + 32);
+    tq_fwht_local<64>(r_hi);
     for (int j = 0; j < 64; j++) {
         if (r_hi[j] >= 0.0f) dst_block->signs_hi[j / 8] |= (uint8_t)(1 << (j % 8));
     }

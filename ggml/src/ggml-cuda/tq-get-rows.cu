@@ -533,20 +533,20 @@ static __global__ void k_get_rows_tq_5hi_3lo_had_d256(
         const int32_t * perm = chmap + ((int64_t)layer_idx * n_kv_heads + head) * 256;
         float norm_hi = __half2float(blk->norm_hi), norm_lo = __half2float(blk->norm_lo);
         float rnorm_hi = __half2float(blk->rnorm_hi);
-        // Decode hi: 64 outliers, 4-bit + QJL
+        // Decode hi: 64 outliers, 4-bit + QJL (H64 transform)
         float hi[64];
         for (int j = 0; j < 64; j++) hi[j] = tq_c16_d64[tq_up4(blk->qs_hi, j)];
-        tq_fwht_local<32>(hi); tq_fwht_local<32>(hi + 32);
+        tq_fwht_local<64>(hi);
         for (int j = 0; j < 64; j++) hi[j] *= norm_hi;
         float corr[64];
         for (int j = 0; j < 64; j++) corr[j] = tq_sign_bit(blk->signs_hi, j);
-        tq_fwht_local<32>(corr); tq_fwht_local<32>(corr + 32);
+        tq_fwht_local<64>(corr);
         float qjl_scale = QJL_SCALE_64 * rnorm_hi;
         for (int j = 0; j < 64; j++) hi[j] += qjl_scale * corr[j];
-        // Decode lo: 192 regular, 3-bit, shared 192-D norm → d192 centroids
+        // Decode lo: 192 regular, 3-bit, shared 192-D norm → d192 centroids (3×H64)
         float lo[192];
         for (int j = 0; j < 192; j++) lo[j] = tq_c8_d192[tq_up3(blk->qs_lo, j)];
-        for (int b = 0; b < 6; b++) tq_fwht_local<32>(lo + b * 32);
+        for (int b = 0; b < 3; b++) tq_fwht_local<64>(lo + b * 64);
         for (int j = 0; j < 192; j++) lo[j] *= norm_lo;
         // Inverse-permute via channel map
         const int64_t base = block_in_row * 256;
