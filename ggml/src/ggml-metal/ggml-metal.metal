@@ -9966,6 +9966,59 @@ kernel void kernel_set_rows_had_prod4(
     blk->rnorm = half(sqrt(rnorm_sq));
 }
 
+// 5hi_3lo_had: get_rows (dequant with calibrated channel map — inverse permutation)
+[[host_name("kernel_get_rows_5hi_3lo_had")]]
+kernel void kernel_get_rows_5hi_3lo_had(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void    * src0,
+        device const void    * src1,
+        device       float   * dst,
+        device const int32_t * tq_chmap,
+        constant int32_t & tq_layer_idx,
+        constant int32_t & tq_n_kv_heads,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+
+    device const block_tqk_5hi_3lo * blk = (device const block_tqk_5hi_3lo *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+
+    // Channel permutation for this head (inverse: perm[i] = original channel index)
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + iblk) * 128;
+
+    float norm_hi = float(blk->norm_hi);
+    float norm_lo = float(blk->norm_lo);
+    float rnorm_hi = float(blk->rnorm_hi);
+
+    // Dequant hi: centroid lookup → inverse FWHT → scale + QJL correction
+    thread float hi[32];
+    for (int j = 0; j < 32; j++) hi[j] = tq_c16_d32[tq_up4(blk->qs_hi, j)];
+    tq_fwht<32>(hi);
+    thread float corr[32];
+    for (int j = 0; j < 32; j++) corr[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    tq_fwht<32>(corr);
+    float qjl_s = 1.2533141f / 32.0f * rnorm_hi;
+    for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
+
+    // Dequant lo: centroid lookup → inverse FWHT → scale
+    thread float lo[96];
+    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d32[tq_up3(blk->qs_lo, j)];
+    tq_fwht<32>(lo);
+    tq_fwht<32>(lo + 32);
+    tq_fwht<32>(lo + 64);
+    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
+
+    // Inverse permutation: place channels back in original positions
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 32; j++)  out[perm[j]]      = hi[j];
+    for (int j = 0; j < 96; j++)  out[perm[32 + j]]  = lo[j];
+}
+
 // 5hi_3lo_had: set_rows (quantize — uses calibrated channel map if available)
 [[host_name("kernel_set_rows_5hi_3lo_had_i32")]]
 kernel void kernel_set_rows_5hi_3lo_had(
