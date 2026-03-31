@@ -1,0 +1,3 @@
+#include "../fattn-vec.cuh"
+
+DECL_FATTN_VEC_CASE(128, GGML_TYPE_TQK_2HI_1LO_HAD, GGML_TYPE_TQV_HAD_MSE4);

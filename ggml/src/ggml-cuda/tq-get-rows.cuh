@@ -42,3 +42,30 @@ void get_rows_tq_5hi_3lo_had(
     size_t nb10, size_t nb11, size_t nb12,
     size_t nb1, size_t nb2, size_t nb3,
     cudaStream_t stream);
+
+template <typename dst_t>
+void get_rows_tq_6hi_3lo_had(
+    const void * src0_d, const int32_t * src1_d, dst_t * dst_d,
+    int64_t ne00, size_t nb01, size_t nb02, size_t nb03,
+    int64_t ne10, int64_t ne11, int64_t ne12,
+    size_t nb10, size_t nb11, size_t nb12,
+    size_t nb1, size_t nb2, size_t nb3,
+    cudaStream_t stream);
+
+template <typename dst_t>
+void get_rows_tq_2hi_1lo_had(
+    const void * src0_d, const int32_t * src1_d, dst_t * dst_d,
+    int64_t ne00, size_t nb01, size_t nb02, size_t nb03,
+    int64_t ne10, int64_t ne11, int64_t ne12,
+    size_t nb10, size_t nb11, size_t nb12,
+    size_t nb1, size_t nb2, size_t nb3,
+    cudaStream_t stream);
+
+template <typename dst_t>
+void get_rows_tq_3hi_2lo_had(
+    const void * src0_d, const int32_t * src1_d, dst_t * dst_d,
+    int64_t ne00, size_t nb01, size_t nb02, size_t nb03,
+    int64_t ne10, int64_t ne11, int64_t ne12,
+    size_t nb10, size_t nb11, size_t nb12,
+    size_t nb1, size_t nb2, size_t nb3,
+    cudaStream_t stream);

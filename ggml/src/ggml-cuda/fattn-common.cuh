@@ -702,14 +702,141 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_5hi_3lo_had(
             if (j0 < 32) {
                 kv0 = norm_hi * tq_c16_d32[tq_up4(blk->qs_hi, j0)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0);
             } else {
-                kv0 = norm_lo * tq_c8_d32[tq_up3(blk->qs_lo, j0 - 32)];
+                kv0 = norm_lo * tq_c8_d96[tq_up3(blk->qs_lo, j0 - 32)];
             }
             if (j0 + 1 < 32) {
                 kv1 = norm_hi * tq_c16_d32[tq_up4(blk->qs_hi, j0 + 1)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0 + 1);
             } else if (j0 + 1 == 32) {
-                kv1 = norm_lo * tq_c8_d32[tq_up3(blk->qs_lo, 0)];
+                kv1 = norm_lo * tq_c8_d96[tq_up3(blk->qs_lo, 0)];
             } else {
-                kv1 = norm_lo * tq_c8_d32[tq_up3(blk->qs_lo, j0 + 1 - 32)];
+                kv1 = norm_lo * tq_c8_d96[tq_up3(blk->qs_lo, j0 + 1 - 32)];
+            }
+            float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+            sum += kv0 * qv.x + kv1 * qv.y;
+        }
+    }
+    return sum;
+}
+
+// TQK 6hi_3lo_had: 5-bit MSE + QJL on hi, 3-bit MSE on lo (no QJL on lo)
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_6hi_3lo_had(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const block_tqk_6hi_3lo * blk = (const block_tqk_6hi_3lo *) K_c;
+    float norm_hi  = __half2float(blk->norm_hi);
+    float norm_lo  = __half2float(blk->norm_lo);
+    float rnorm_hi = __half2float(blk->rnorm_hi);
+    float qjl_scale_hi = QJL_SCALE_32 * rnorm_hi;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+        const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+            const int j0 = j_base + k_KQ_1 * 2;
+            float kv0, kv1;
+            if (j0 < 32) {
+                kv0 = norm_hi * tq_c32_d32[tq_up5(blk->qs_hi, j0)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0);
+            } else {
+                kv0 = norm_lo * tq_c8_d96[tq_up3(blk->qs_lo, j0 - 32)];
+            }
+            if (j0 + 1 < 32) {
+                kv1 = norm_hi * tq_c32_d32[tq_up5(blk->qs_hi, j0 + 1)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0 + 1);
+            } else if (j0 + 1 == 32) {
+                kv1 = norm_lo * tq_c8_d96[tq_up3(blk->qs_lo, 0)];
+            } else {
+                kv1 = norm_lo * tq_c8_d96[tq_up3(blk->qs_lo, j0 + 1 - 32)];
+            }
+            float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+            sum += kv0 * qv.x + kv1 * qv.y;
+        }
+    }
+    return sum;
+}
+
+// TQK 2hi_1lo_had: 2-bit MSE + QJL on hi, 1-bit MSE + QJL on lo
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_2hi_1lo_had(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const block_tqk_2hi_1lo * blk = (const block_tqk_2hi_1lo *) K_c;
+    float norm_hi  = __half2float(blk->norm_hi);
+    float norm_lo  = __half2float(blk->norm_lo);
+    float rnorm_hi = __half2float(blk->rnorm_hi);
+    float rnorm_lo = __half2float(blk->rnorm_lo);
+    float qjl_scale_hi = QJL_SCALE_32 * rnorm_hi;
+    float qjl_scale_lo = QJL_SCALE_96 * rnorm_lo;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+        const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+            const int j0 = j_base + k_KQ_1 * 2;
+            float kv0, kv1;
+            if (j0 < 32) {
+                kv0 = norm_hi * tq_c4_d32[tq_up2(blk->qs_hi, j0)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0);
+            } else {
+                kv0 = norm_lo * tq_c2_d96[tq_up1(blk->qs_lo, j0 - 32)] + qjl_scale_lo * tq_sign_bit(blk->signs_lo, j0 - 32);
+            }
+            if (j0 + 1 < 32) {
+                kv1 = norm_hi * tq_c4_d32[tq_up2(blk->qs_hi, j0 + 1)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0 + 1);
+            } else if (j0 + 1 == 32) {
+                kv1 = norm_lo * tq_c2_d96[tq_up1(blk->qs_lo, 0)] + qjl_scale_lo * tq_sign_bit(blk->signs_lo, 0);
+            } else {
+                kv1 = norm_lo * tq_c2_d96[tq_up1(blk->qs_lo, j0 + 1 - 32)] + qjl_scale_lo * tq_sign_bit(blk->signs_lo, j0 + 1 - 32);
+            }
+            float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+            sum += kv0 * qv.x + kv1 * qv.y;
+        }
+    }
+    return sum;
+}
+
+// TQK 3hi_2lo_had: 3-bit MSE + QJL on hi, 2-bit MSE + QJL on lo
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_3hi_2lo_had(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const block_tqk_3hi_2lo * blk = (const block_tqk_3hi_2lo *) K_c;
+    float norm_hi  = __half2float(blk->norm_hi);
+    float norm_lo  = __half2float(blk->norm_lo);
+    float rnorm_hi = __half2float(blk->rnorm_hi);
+    float rnorm_lo = __half2float(blk->rnorm_lo);
+    float qjl_scale_hi = QJL_SCALE_32 * rnorm_hi;
+    float qjl_scale_lo = QJL_SCALE_96 * rnorm_lo;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+        const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+            const int j0 = j_base + k_KQ_1 * 2;
+            float kv0, kv1;
+            if (j0 < 32) {
+                kv0 = norm_hi * tq_c8_d32[tq_up3(blk->qs_hi, j0)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0);
+            } else {
+                kv0 = norm_lo * tq_c4_d96[tq_up2(blk->qs_lo, j0 - 32)] + qjl_scale_lo * tq_sign_bit(blk->signs_lo, j0 - 32);
+            }
+            if (j0 + 1 < 32) {
+                kv1 = norm_hi * tq_c8_d32[tq_up3(blk->qs_hi, j0 + 1)] + qjl_scale_hi * tq_sign_bit(blk->signs_hi, j0 + 1);
+            } else if (j0 + 1 == 32) {
+                kv1 = norm_lo * tq_c4_d96[tq_up2(blk->qs_lo, 0)] + qjl_scale_lo * tq_sign_bit(blk->signs_lo, 0);
+            } else {
+                kv1 = norm_lo * tq_c4_d96[tq_up2(blk->qs_lo, j0 + 1 - 32)] + qjl_scale_lo * tq_sign_bit(blk->signs_lo, j0 + 1 - 32);
             }
             float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
             sum += kv0 * qv.x + kv1 * qv.y;
@@ -763,6 +890,12 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_tqk_had_prod4<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_TQK_5HI_3LO_HAD) {
         return vec_dot_fattn_vec_KQ_tqk_5hi_3lo_had<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_6HI_3LO_HAD) {
+        return vec_dot_fattn_vec_KQ_tqk_6hi_3lo_had<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_2HI_1LO_HAD) {
+        return vec_dot_fattn_vec_KQ_tqk_2hi_1lo_had<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_3HI_2LO_HAD) {
+        return vec_dot_fattn_vec_KQ_tqk_3hi_2lo_had<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;

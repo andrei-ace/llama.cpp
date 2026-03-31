@@ -95,5 +95,8 @@ static __device__ void quantize_f32_tqk_had_prod4_block(const float * src, block
     dst->rnorm = __float2half(sqrtf(rnorm_sq));
 }
 
-// 5hi_3lo_had — custom kernel, needs channel map + layer/head
+// Split types — custom kernels, need channel map + layer/head
 void ggml_cuda_op_set_rows_tq_5hi_3lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+void ggml_cuda_op_set_rows_tq_6hi_3lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+void ggml_cuda_op_set_rows_tq_2hi_1lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+void ggml_cuda_op_set_rows_tq_3hi_2lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);

@@ -293,6 +293,15 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD5,   GGML_TYPE_Q4_0)
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_HAD_PROD4,   GGML_TYPE_Q4_0)
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_5HI_3LO_HAD, GGML_TYPE_Q4_0)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_6HI_3LO_HAD, GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_6HI_3LO_HAD, GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_6HI_3LO_HAD, GGML_TYPE_Q4_0)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_2HI_1LO_HAD, GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_2HI_1LO_HAD, GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_2HI_1LO_HAD, GGML_TYPE_Q4_0)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_3HI_2LO_HAD, GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_3HI_2LO_HAD, GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_3HI_2LO_HAD, GGML_TYPE_Q4_0)
 
     // Non-TQ K with TQV V
     FATTN_VEC_CASE(128, GGML_TYPE_F16, GGML_TYPE_TQV_HAD_MSE4)
@@ -372,7 +381,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 #ifndef GGML_CUDA_FA_ALL_QUANTS
     // TQ K or V types always allow mixed K+V
     const bool k_is_tq = K->type == GGML_TYPE_TQK_HAD_MSE4 || K->type == GGML_TYPE_TQK_HAD_PROD5 ||
-                          K->type == GGML_TYPE_TQK_HAD_PROD4 || K->type == GGML_TYPE_TQK_5HI_3LO_HAD;
+                          K->type == GGML_TYPE_TQK_HAD_PROD4 || K->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                          K->type == GGML_TYPE_TQK_6HI_3LO_HAD || K->type == GGML_TYPE_TQK_2HI_1LO_HAD ||
+                          K->type == GGML_TYPE_TQK_3HI_2LO_HAD;
     const bool v_is_tq = V->type == GGML_TYPE_TQV_HAD_MSE4;
     if (K->type != V->type && !k_is_tq && !v_is_tq) {
         return BEST_FATTN_KERNEL_NONE;
@@ -397,6 +408,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_TQK_HAD_PROD5:
         case GGML_TYPE_TQK_HAD_PROD4:
         case GGML_TYPE_TQK_5HI_3LO_HAD:
+        case GGML_TYPE_TQK_6HI_3LO_HAD:
+        case GGML_TYPE_TQK_2HI_1LO_HAD:
+        case GGML_TYPE_TQK_3HI_2LO_HAD:
             // TQ types: force VEC kernel (MMA/tile don't support TQ), D=128 only
             if (K->ne[0] == 128 && V->ne[0] == 128 && K->ne[1] % FATTN_KQ_STRIDE == 0) {
                 if (V->type == GGML_TYPE_F16 || V->type == GGML_TYPE_TQV_HAD_MSE4 || V->type == GGML_TYPE_Q4_0) {

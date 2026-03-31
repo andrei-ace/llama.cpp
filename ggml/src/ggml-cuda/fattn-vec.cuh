@@ -77,7 +77,9 @@ static __global__ void flash_attn_ext_vec(
 #endif // GGML_USE_HIP
 
     constexpr bool type_K_is_tq = type_K == GGML_TYPE_TQK_HAD_MSE4 || type_K == GGML_TYPE_TQK_HAD_PROD5 ||
-                                   type_K == GGML_TYPE_TQK_HAD_PROD4 || type_K == GGML_TYPE_TQK_5HI_3LO_HAD;
+                                   type_K == GGML_TYPE_TQK_HAD_PROD4 || type_K == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                                   type_K == GGML_TYPE_TQK_6HI_3LO_HAD || type_K == GGML_TYPE_TQK_2HI_1LO_HAD ||
+                                   type_K == GGML_TYPE_TQK_3HI_2LO_HAD;
     constexpr bool type_V_is_tq = type_V == GGML_TYPE_TQV_HAD_MSE4;
     constexpr bool type_K_is_float = type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 || type_K_is_tq;
     constexpr bool type_V_is_float = type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16;
@@ -250,12 +252,15 @@ static __global__ void flash_attn_ext_vec(
     if constexpr (type_K_is_tq && !Q_q8_1) {
         constexpr int cpy_nb_tq = ggml_cuda_get_max_cpy_bytes();
         constexpr int cpy_ne_tq = cpy_nb_tq / 4;
-        constexpr bool is_5hi_3lo = (type_K == GGML_TYPE_TQK_5HI_3LO_HAD);
+        constexpr bool is_split_type = (type_K == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                                        type_K == GGML_TYPE_TQK_6HI_3LO_HAD ||
+                                        type_K == GGML_TYPE_TQK_2HI_1LO_HAD ||
+                                        type_K == GGML_TYPE_TQK_3HI_2LO_HAD);
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
             float * shmem = (float *) KQ;
 
-            if constexpr (!is_5hi_3lo) {
+            if constexpr (!is_split_type) {
                 // had_* types: load Q → FWHT-128
                 for (int i = tid; i < D; i += nthreads) {
                     if (ncols == 1 || ic0 + j < int(ne01.z)) {
@@ -718,6 +723,9 @@ EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_HAD_MSE4)
 EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_HAD_PROD5)
 EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_HAD_PROD4)
 EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_5HI_3LO_HAD)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_6HI_3LO_HAD)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_2HI_1LO_HAD)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_3HI_2LO_HAD)
 
 // Non-TQ K with TQV V — D=128 only
 extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_F16, GGML_TYPE_TQV_HAD_MSE4);

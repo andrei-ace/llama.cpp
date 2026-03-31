@@ -353,6 +353,12 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
     } else if (dst->type == GGML_TYPE_TQK_5HI_3LO_HAD) {
         // Custom path — needs channel map
         ggml_cuda_op_set_rows_tq_5hi_3lo_had(ctx, dst);
+    } else if (dst->type == GGML_TYPE_TQK_6HI_3LO_HAD) {
+        ggml_cuda_op_set_rows_tq_6hi_3lo_had(ctx, dst);
+    } else if (dst->type == GGML_TYPE_TQK_2HI_1LO_HAD) {
+        ggml_cuda_op_set_rows_tq_2hi_1lo_had(ctx, dst);
+    } else if (dst->type == GGML_TYPE_TQK_3HI_2LO_HAD) {
+        ggml_cuda_op_set_rows_tq_3hi_2lo_had(ctx, dst);
     } else {
         GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
     }

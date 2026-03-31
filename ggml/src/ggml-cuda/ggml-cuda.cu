@@ -4889,6 +4889,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_TQK_HAD_PROD5:
                     case GGML_TYPE_TQK_HAD_PROD4:
                     case GGML_TYPE_TQK_5HI_3LO_HAD:
+                    case GGML_TYPE_TQK_6HI_3LO_HAD:
+                    case GGML_TYPE_TQK_2HI_1LO_HAD:
+                    case GGML_TYPE_TQK_3HI_2LO_HAD:
                     case GGML_TYPE_TQV_HAD_MSE4:
                         return true;
                     default:
@@ -4906,6 +4909,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                        op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL ||
                        op->type == GGML_TYPE_TQK_HAD_MSE4 || op->type == GGML_TYPE_TQK_HAD_PROD5 ||
                        op->type == GGML_TYPE_TQK_HAD_PROD4 || op->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+                       op->type == GGML_TYPE_TQK_6HI_3LO_HAD || op->type == GGML_TYPE_TQK_2HI_1LO_HAD ||
+                       op->type == GGML_TYPE_TQK_3HI_2LO_HAD ||
                        op->type == GGML_TYPE_TQV_HAD_MSE4) &&
                        op->src[0]->type == GGML_TYPE_F32 &&
                        (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32);

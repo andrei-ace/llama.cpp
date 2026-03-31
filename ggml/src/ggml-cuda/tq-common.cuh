@@ -37,15 +37,43 @@ static __device__ __constant__ float tq_c8_d32[8] = {
      0.0428515156f,  0.1317560968f,  0.2324605670f,  0.3662682422f,
 };
 
-// d=96, 3-bit (8 centroids) — unused currently but kept for completeness
+// d=32, 5-bit (32 centroids) — for 6hi_3lo outlier subset
+static __device__ __constant__ float tq_c32_d32[32] = {
+    -0.5264998987f, -0.4434050674f, -0.3863517231f, -0.3408589649f,
+    -0.3020293074f, -0.2675540961f, -0.2361407504f, -0.2069821496f,
+    -0.1795336985f, -0.1534053336f, -0.1283036018f, -0.1039980715f,
+    -0.0803005660f, -0.0570515734f, -0.0341108450f, -0.0113504874f,
+     0.0113504874f,  0.0341108450f,  0.0570515734f,  0.0803005660f,
+     0.1039980715f,  0.1283036018f,  0.1534053336f,  0.1795336985f,
+     0.2069821496f,  0.2361407504f,  0.2675540961f,  0.3020293074f,
+     0.3408589649f,  0.3863517231f,  0.4434050674f,  0.5264998987f,
+};
+
+// d=32, 2-bit (4 centroids) — for 2hi_1lo outlier subset
+static __device__ __constant__ float tq_c4_d32[4] = {
+    -0.2633194113f, -0.0798019295f, 0.0798019295f, 0.2633194113f,
+};
+
+// d=96, 3-bit (8 centroids)
 static __device__ __constant__ float tq_c8_d96[8] = {
     -0.2168529349f, -0.1361685800f, -0.0767954958f, -0.0249236898f,
      0.0249236898f,  0.0767954958f,  0.1361685800f,  0.2168529349f,
 };
 
+// d=96, 2-bit (4 centroids) — for 3hi_2lo regular subset
+static __device__ __constant__ float tq_c4_d96[4] = {
+    -0.1534455138f, -0.0461670286f, 0.0461670286f, 0.1534455138f,
+};
+
+// d=96, 1-bit (2 centroids) — for 2hi_1lo regular subset
+static __device__ __constant__ float tq_c2_d96[2] = {
+    -0.0816460916f, 0.0816460916f,
+};
+
 // QJL scale constant: sqrt(pi/2) / dim = 1.2533141 / dim
 #define QJL_SCALE_128 (1.2533141f / 128.0f)
 #define QJL_SCALE_32  (1.2533141f / 32.0f)
+#define QJL_SCALE_96  (1.2533141f / 96.0f)
 
 // Device-side pointer to channel map for 5hi_3lo FA kernels.
 // Set by host before launching FA kernels that use 5hi_3lo K types.
@@ -78,6 +106,41 @@ static __device__ __forceinline__ void tq_pk3(uint8_t * q, int j, int v) {
     int bp = j * 3, bi = bp >> 3, sh = bp & 7;
     q[bi] |= (uint8_t)((v << sh) & 0xFF);
     if (sh > 5) q[bi + 1] |= (uint8_t)(v >> (8 - sh));
+}
+
+// Unpack 5-bit index from packed byte array
+static __device__ __forceinline__ int tq_up5(const uint8_t * q, int j) {
+    int bp = j * 5, bi = bp >> 3, sh = bp & 7;
+    int v = q[bi] >> sh;
+    if (sh > 3) v |= q[bi + 1] << (8 - sh);
+    return v & 0x1F;
+}
+
+// Pack 5-bit index into packed byte array
+static __device__ __forceinline__ void tq_pk5(uint8_t * q, int j, int v) {
+    int bp = j * 5, bi = bp >> 3, sh = bp & 7;
+    q[bi] |= (uint8_t)(((v & 0x1F) << sh) & 0xFF);
+    if (sh > 3) q[bi + 1] |= (uint8_t)((v & 0x1F) >> (8 - sh));
+}
+
+// Unpack 2-bit index from packed byte array
+static __device__ __forceinline__ int tq_up2(const uint8_t * q, int j) {
+    return (q[j / 4] >> ((j % 4) * 2)) & 3;
+}
+
+// Pack 2-bit index into packed byte array
+static __device__ __forceinline__ void tq_pk2(uint8_t * q, int j, int v) {
+    q[j / 4] |= (uint8_t)(v << ((j % 4) * 2));
+}
+
+// Unpack 1-bit index from packed byte array (returns 0 or 1)
+static __device__ __forceinline__ int tq_up1(const uint8_t * q, int j) {
+    return (q[j / 8] >> (j % 8)) & 1;
+}
+
+// Pack 1-bit index into packed byte array
+static __device__ __forceinline__ void tq_pk1(uint8_t * q, int j, int v) {
+    q[j / 8] |= (uint8_t)(v << (j % 8));
 }
 
 // Unpack 1-bit sign from packed byte array (returns +1.0f or -1.0f)
