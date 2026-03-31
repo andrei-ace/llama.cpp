@@ -46,9 +46,13 @@ void tq_get_channel_perm(int layer, int head, int is_k, uint8_t * perm);
 // Seeds: QJL_SEED_32 = 0x514A4C20, QJL_SEED_96 = 0x514A4C60
 void tq_get_qjl_matrix(float * out, int dim, uint64_t seed);
 
-// Upload current outlier masks as channel maps to Metal/CUDA device buffers.
-// Call after tq_set_outlier_mask_from_perm() to sync GPU-side channel maps.
+// Rebuild the global int32 channel map from current outlier masks.
+// Call after tq_set_outlier_mask_from_perm() to make maps available to GPU backends.
 void tq_upload_channel_maps_to_devices(void);
+
+// Get the global channel map (built by tq_upload_channel_maps_to_devices).
+// Returns NULL if not built. Layout: [n_layers][n_heads][head_dim] int32.
+const int * tq_get_global_channel_map(int * out_n_layers, int * out_n_heads);
 
 // Layer/head context for quantize/dequant/vec_dot (thread-local)
 void tq_set_current_layer(int layer, int is_k);

@@ -1319,10 +1319,30 @@ const struct ggml_metal_device_props * ggml_metal_device_get_props(ggml_metal_de
     return &dev->props;
 }
 
+// Declared in ggml-turbo-quant.h — pull calibrated channel map if available
+extern const int * tq_get_global_channel_map(int * out_n_layers, int * out_n_heads);
+extern int tq_get_head_dim(void);
+
 struct ggml_metal_buffer_id ggml_metal_device_get_tq_channel_map(ggml_metal_device_t dev) {
-    if (dev->tq_channel_map == nil) {
-        // Create default channel map: 256 layers * 128 heads * 128 channels
-        // Default: channels 0-31 = outlier, 32-127 = regular
+    // Check if a calibrated global channel map is available and upload it
+    int gl_n_layers = 0, gl_n_heads = 0;
+    const int * gl_chmap = tq_get_global_channel_map(&gl_n_layers, &gl_n_heads);
+    if (gl_chmap && gl_n_layers > 0 && gl_n_heads > 0) {
+        const int n_ch = tq_get_head_dim();
+        size_t sz = (size_t)gl_n_layers * gl_n_heads * n_ch * sizeof(int32_t);
+        if (dev->tq_channel_map == nil ||
+            dev->tq_chmap_n_layers != gl_n_layers ||
+            dev->tq_chmap_n_heads  != gl_n_heads) {
+            dev->tq_channel_map = [dev->mtl_device newBufferWithBytes:gl_chmap
+                                                               length:sz
+                                                              options:MTLResourceStorageModeShared];
+            dev->tq_chmap_n_layers = gl_n_layers;
+            dev->tq_chmap_n_heads  = gl_n_heads;
+            GGML_LOG_INFO("%s: uploaded calibrated TQ channel map (%d layers, %d heads, d=%d)\n",
+                    __func__, gl_n_layers, gl_n_heads, n_ch);
+        }
+    } else if (dev->tq_channel_map == nil) {
+        // Create default channel map: identity permutation
         const int max_layers = 256;
         const int max_heads  = 128;
         const int n_ch       = 128;
@@ -1331,8 +1351,8 @@ struct ggml_metal_buffer_id ggml_metal_device_get_tq_channel_map(ggml_metal_devi
         for (int l = 0; l < max_layers; l++) {
             for (int h = 0; h < max_heads; h++) {
                 int32_t * row = data + ((int64_t)l * max_heads + h) * n_ch;
-                for (int i = 0; i < 32;  i++) { row[i] = i; }       // outlier = 0..31
-                for (int i = 0; i < 96;  i++) { row[32 + i] = 32 + i; } // regular = 32..127
+                for (int i = 0; i < 32;  i++) { row[i] = i; }
+                for (int i = 0; i < 96;  i++) { row[32 + i] = 32 + i; }
             }
         }
         dev->tq_channel_map = [dev->mtl_device newBufferWithBytes:data
