@@ -38,6 +38,7 @@ void quantize_row_tqk_had_mse4_ref   (const float * GGML_RESTRICT x, block_tqk_h
 void quantize_row_tqk_had_prod5_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod5 * GGML_RESTRICT y, int64_t k);
 void quantize_row_tqk_had_prod4_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod4 * GGML_RESTRICT y, int64_t k);
 void quantize_row_tqv_had_mse4_ref   (const float * GGML_RESTRICT x, block_tqv_had_mse4  * GGML_RESTRICT y, int64_t k);
+void quantize_row_tqk_6hi_3lo_had_ref(const float * GGML_RESTRICT x, block_tqk_6hi_3lo   * GGML_RESTRICT y, int64_t k);
 void quantize_row_tqk_had_mse4_d256_ref   (const float * GGML_RESTRICT x, block_tqk_had_mse4_d256  * GGML_RESTRICT y, int64_t k);
 void quantize_row_tqk_had_prod5_d256_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod5_d256 * GGML_RESTRICT y, int64_t k);
 void quantize_row_tqk_had_prod4_d256_ref  (const float * GGML_RESTRICT x, block_tqk_had_prod4_d256 * GGML_RESTRICT y, int64_t k);
@@ -50,6 +51,7 @@ void dequantize_row_tqk_had_mse4   (const block_tqk_had_mse4 * GGML_RESTRICT x, 
 void dequantize_row_tqk_had_prod5  (const block_tqk_had_prod5 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqk_had_prod4  (const block_tqk_had_prod4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqv_had_mse4   (const block_tqv_had_mse4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tqk_6hi_3lo_had(const block_tqk_6hi_3lo  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqk_had_mse4_d256   (const block_tqk_had_mse4_d256  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqk_had_prod5_d256  (const block_tqk_had_prod5_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void dequantize_row_tqk_had_prod4_d256  (const block_tqk_had_prod4_d256 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
@@ -88,6 +90,7 @@ void ggml_vec_dot_tqk_had_mse4_d256_f32    (int n, float * GGML_RESTRICT s, size
 void ggml_vec_dot_tqk_had_prod5_d256_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void ggml_vec_dot_tqk_had_prod4_d256_f32   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void ggml_vec_dot_tqk_5hi_3lo_had_d256_f32 (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+void ggml_vec_dot_tqk_6hi_3lo_had_f32      (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 
 // TurboQuant layer/head context
 void tq_set_current_layer(int layer, int is_k);
