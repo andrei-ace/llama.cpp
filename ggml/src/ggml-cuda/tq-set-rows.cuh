@@ -95,8 +95,85 @@ static __device__ void quantize_f32_tqk_had_prod4_block(const float * src, block
     dst->rnorm = __float2half(sqrtf(rnorm_sq));
 }
 
+// ---------------------------------------------------------------------------
+// d=256 non-split quantizers
+// ---------------------------------------------------------------------------
+
+static __device__ void quantize_f32_tqk_had_mse4_d256_block(const float * src, block_tqk_had_mse4_d256 * dst) {
+    float rot[256];
+    float sum_sq = 0.0f;
+    for (int j = 0; j < 256; j++) { rot[j] = src[j]; sum_sq += src[j] * src[j]; }
+    float norm = sqrtf(sum_sq);
+    dst->norm = __float2half(norm);
+    if (norm == 0.0f) { memset(dst->qs, 0, sizeof(dst->qs)); return; }
+    float inv = 1.0f / norm;
+    for (int j = 0; j < 256; j++) rot[j] *= inv;
+    tq_fwht_local<256>(rot);
+    memset(dst->qs, 0, sizeof(dst->qs));
+    for (int j = 0; j < 256; j++) tq_pk4(dst->qs, j, tq_nearest(rot[j], tq_c16_d256, 16));
+}
+
+static __device__ void quantize_f32_tqv_had_mse4_d256_block(const float * src, block_tqv_had_mse4_d256 * dst) {
+    quantize_f32_tqk_had_mse4_d256_block(src, dst);
+}
+
+static __device__ void quantize_f32_tqk_had_prod5_d256_block(const float * src, block_tqk_had_prod5_d256 * dst) {
+    float rot[256];
+    float sum_sq = 0.0f;
+    for (int j = 0; j < 256; j++) { rot[j] = src[j]; sum_sq += src[j] * src[j]; }
+    float norm = sqrtf(sum_sq);
+    dst->norm = __float2half(norm);
+    dst->rnorm = __float2half(0.0f);
+    memset(dst->signs, 0, sizeof(dst->signs));
+    if (norm == 0.0f) { memset(dst->qs, 0, sizeof(dst->qs)); return; }
+    float inv = 1.0f / norm;
+    for (int j = 0; j < 256; j++) rot[j] *= inv;
+    tq_fwht_local<256>(rot);
+    memset(dst->qs, 0, sizeof(dst->qs));
+    for (int j = 0; j < 256; j++) tq_pk4(dst->qs, j, tq_nearest(rot[j], tq_c16_d256, 16));
+    float recon[256];
+    for (int j = 0; j < 256; j++) recon[j] = tq_c16_d256[tq_up4(dst->qs, j)];
+    tq_fwht_local<256>(recon);
+    float resid[256];
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 256; j++) { resid[j] = src[j] - norm * recon[j]; rnorm_sq += resid[j] * resid[j]; }
+    tq_fwht_local<256>(resid);
+    for (int j = 0; j < 256; j++) {
+        if (resid[j] >= 0.0f) dst->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    dst->rnorm = __float2half(sqrtf(rnorm_sq));
+}
+
+static __device__ void quantize_f32_tqk_had_prod4_d256_block(const float * src, block_tqk_had_prod4_d256 * dst) {
+    float rot[256];
+    float sum_sq = 0.0f;
+    for (int j = 0; j < 256; j++) { rot[j] = src[j]; sum_sq += src[j] * src[j]; }
+    float norm = sqrtf(sum_sq);
+    dst->norm = __float2half(norm);
+    dst->rnorm = __float2half(0.0f);
+    memset(dst->signs, 0, sizeof(dst->signs));
+    if (norm == 0.0f) { memset(dst->qs, 0, sizeof(dst->qs)); return; }
+    float inv = 1.0f / norm;
+    for (int j = 0; j < 256; j++) rot[j] *= inv;
+    tq_fwht_local<256>(rot);
+    memset(dst->qs, 0, sizeof(dst->qs));
+    for (int j = 0; j < 256; j++) tq_pk3(dst->qs, j, tq_nearest(rot[j], tq_c8_d256, 8));
+    float recon[256];
+    for (int j = 0; j < 256; j++) recon[j] = tq_c8_d256[tq_up3(dst->qs, j)];
+    tq_fwht_local<256>(recon);
+    float resid[256];
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 256; j++) { resid[j] = src[j] - norm * recon[j]; rnorm_sq += resid[j] * resid[j]; }
+    tq_fwht_local<256>(resid);
+    for (int j = 0; j < 256; j++) {
+        if (resid[j] >= 0.0f) dst->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    dst->rnorm = __float2half(sqrtf(rnorm_sq));
+}
+
 // Split types — custom kernels, need channel map + layer/head
 void ggml_cuda_op_set_rows_tq_5hi_3lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_set_rows_tq_6hi_3lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_set_rows_tq_2hi_1lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_set_rows_tq_3hi_2lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+void ggml_cuda_op_set_rows_tq_5hi_3lo_had_d256(ggml_backend_cuda_context & ctx, ggml_tensor * dst);

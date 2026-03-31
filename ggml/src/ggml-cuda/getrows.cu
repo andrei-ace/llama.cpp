@@ -213,11 +213,25 @@ static void ggml_cuda_get_rows_switch_src0_type(
             get_rows_tq_had_prod4(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
+        case GGML_TYPE_TQK_HAD_MSE4_D256:
+        case GGML_TYPE_TQV_HAD_MSE4_D256:
+            get_rows_tq_had_mse4_d256(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_TQK_HAD_PROD5_D256:
+            get_rows_tq_had_prod5_d256(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_TQK_HAD_PROD4_D256:
+            get_rows_tq_had_prod4_d256(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
         // Split TQ types handled at tensor level (ggml_cuda_op_get_rows)
         case GGML_TYPE_TQK_5HI_3LO_HAD:
         case GGML_TYPE_TQK_6HI_3LO_HAD:
         case GGML_TYPE_TQK_2HI_1LO_HAD:
         case GGML_TYPE_TQK_3HI_2LO_HAD:
+        case GGML_TYPE_TQK_5HI_3LO_HAD_D256:
             GGML_ABORT("split TQ types must be dispatched via ggml_cuda_op_get_rows, not template chain");
             break;
         default:
@@ -265,7 +279,8 @@ void ggml_cuda_op_get_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         case GGML_TYPE_TQK_5HI_3LO_HAD: ggml_cuda_op_get_rows_tq_5hi_3lo_had(ctx, dst); return;
         case GGML_TYPE_TQK_6HI_3LO_HAD: ggml_cuda_op_get_rows_tq_6hi_3lo_had(ctx, dst); return;
         case GGML_TYPE_TQK_2HI_1LO_HAD: ggml_cuda_op_get_rows_tq_2hi_1lo_had(ctx, dst); return;
-        case GGML_TYPE_TQK_3HI_2LO_HAD: ggml_cuda_op_get_rows_tq_3hi_2lo_had(ctx, dst); return;
+        case GGML_TYPE_TQK_3HI_2LO_HAD:     ggml_cuda_op_get_rows_tq_3hi_2lo_had(ctx, dst); return;
+        case GGML_TYPE_TQK_5HI_3LO_HAD_D256: ggml_cuda_op_get_rows_tq_5hi_3lo_had_d256(ctx, dst); return;
         default: break;
     }
 

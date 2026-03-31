@@ -1,0 +1,9 @@
+model,k_type,v_type,sink,ppl
+Llama-3.1-8B-Instruct,f16,f16,0,4.4159
+Llama-3.1-8B-Instruct,q8_0,q8_0,0,4.4196
+Llama-3.1-8B-Instruct,q4_0,q4_0,0,4.5282
+Llama-3.1-8B-Instruct,tqk_had_mse4,tqv_had_mse4,0,4.4971
+Llama-3.1-8B-Instruct,tqk_5hi_3lo_had,tqv_had_mse4,0,2606.5407
+Llama-3.1-8B-Instruct,tqk_5hi_3lo_had,tqv_had_mse4,64,2606.5407
+Llama-3.1-8B-Instruct,tqk_5hi_3lo_had,tqv_had_mse4,128,2606.5407
+Llama-3.1-8B-Instruct,tqk_5hi_3lo_had,tqv_had_mse4,256,2606.5407

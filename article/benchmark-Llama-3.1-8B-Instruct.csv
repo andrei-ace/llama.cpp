@@ -1,0 +1,12 @@
+model,k_type,v_type,k_bpv,v_bpv,ppl,pp512,tg128
+Llama-3.1-8B-Instruct,f16,f16,16.00,16.00,8.0044,4880.47,123.53
+Llama-3.1-8B-Instruct,q8_0,q8_0,8.00,8.00,8.0141,4821.48,122.51
+Llama-3.1-8B-Instruct,q4_0,q4_0,4.50,4.50,8.2060,4864.92,122.26
+Llama-3.1-8B-Instruct,tqk_5hi_3lo_had,tqv_had_mse4,3.88,4.13,145.1083,1489.81,83.71
+Llama-3.1-8B-Instruct,tqk_5hi_3lo_had,q4_0,3.88,4.50,131.4965,1956.12,100.43
+Llama-3.1-8B-Instruct,tqk_had_mse4,tqv_had_mse4,4.13,4.13,8.1641,1758.80,82.54
+Llama-3.1-8B-Instruct,tqk_had_mse4,q4_0,4.13,4.50,8.1085,2465.30,97.95
+Llama-3.1-8B-Instruct,tqk_had_prod4,tqv_had_mse4,4.25,4.13,8.4191,1968.34,89.27
+Llama-3.1-8B-Instruct,tqk_had_prod4,q4_0,4.25,4.50,8.3735,2739.58,106.94
+Llama-3.1-8B-Instruct,tqk_had_prod5,tqv_had_mse4,5.25,4.13,8.1503,1753.39,86.36
+Llama-3.1-8B-Instruct,tqk_had_prod5,q4_0,5.25,4.50,8.0858,2415.15,103.41

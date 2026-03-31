@@ -1,0 +1,9 @@
+model,k_type,v_type,sink,ppl
+Qwen3-8B,f16,f16,0,5.4650
+Qwen3-8B,q8_0,q8_0,0,5.4663
+Qwen3-8B,q4_0,q4_0,0,5.6042
+Qwen3-8B,tqk_had_mse4,tqv_had_mse4,0,5.4673
+Qwen3-8B,tqk_5hi_3lo_had,tqv_had_mse4,0,2669.3541
+Qwen3-8B,tqk_5hi_3lo_had,tqv_had_mse4,64,2669.3541
+Qwen3-8B,tqk_5hi_3lo_had,tqv_had_mse4,128,2669.3541
+Qwen3-8B,tqk_5hi_3lo_had,tqv_had_mse4,256,2669.3541

@@ -4905,6 +4905,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_TQK_2HI_1LO_HAD:
                     case GGML_TYPE_TQK_3HI_2LO_HAD:
                     case GGML_TYPE_TQV_HAD_MSE4:
+                    case GGML_TYPE_TQK_HAD_MSE4_D256:
+                    case GGML_TYPE_TQK_HAD_PROD5_D256:
+                    case GGML_TYPE_TQK_HAD_PROD4_D256:
+                    case GGML_TYPE_TQK_5HI_3LO_HAD_D256:
+                    case GGML_TYPE_TQV_HAD_MSE4_D256:
                         return true;
                     default:
                         return false;
@@ -4923,7 +4928,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                        op->type == GGML_TYPE_TQK_HAD_PROD4 || op->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
                        op->type == GGML_TYPE_TQK_6HI_3LO_HAD || op->type == GGML_TYPE_TQK_2HI_1LO_HAD ||
                        op->type == GGML_TYPE_TQK_3HI_2LO_HAD ||
-                       op->type == GGML_TYPE_TQV_HAD_MSE4) &&
+                       op->type == GGML_TYPE_TQV_HAD_MSE4 ||
+                       op->type == GGML_TYPE_TQK_HAD_MSE4_D256 || op->type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
+                       op->type == GGML_TYPE_TQK_HAD_PROD4_D256 || op->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
+                       op->type == GGML_TYPE_TQV_HAD_MSE4_D256) &&
                        op->src[0]->type == GGML_TYPE_F32 &&
                        (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32);
             } break;

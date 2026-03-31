@@ -70,9 +70,39 @@ static __device__ __constant__ float tq_c2_d96[2] = {
     -0.0816460916f, 0.0816460916f,
 };
 
+// d=256, 4-bit (16 centroids)
+static __device__ __constant__ float tq_c16_d256[16] = {
+    -0.1694104365f, -0.1285881998f, -0.1006980067f, -0.0782493129f,
+    -0.0587321071f, -0.0409491965f, -0.0242008774f, -0.0080083741f,
+     0.0080083741f,  0.0242008774f,  0.0409491965f,  0.0587321071f,
+     0.0782493129f,  0.1006980067f,  0.1285881998f,  0.1694104365f,
+};
+
+// d=256, 3-bit (8 centroids)
+static __device__ __constant__ float tq_c8_d256[8] = {
+    -0.1338542901f, -0.0837654569f, -0.0471667103f, -0.0152974877f,
+     0.0152974877f,  0.0471667103f,  0.0837654569f,  0.1338542901f,
+};
+
+// d=64, 4-bit (16 centroids) — for 5hi_3lo_d256 outlier subset
+static __device__ __constant__ float tq_c16_d64[16] = {
+    -0.3389919281f, -0.2586479166f, -0.2033218447f, -0.1583036541f,
+    -0.1191039932f, -0.0831167296f, -0.0491520456f, -0.0162627764f,
+     0.0162627764f,  0.0491520456f,  0.0831167296f,  0.1191039932f,
+     0.1583036541f,  0.2033218447f,  0.2586479166f,  0.3389919281f,
+};
+
+// d=192, 3-bit (8 centroids) — for 5hi_3lo_d256 regular subset
+static __device__ __constant__ float tq_c8_d192[8] = {
+    -0.1543156657f, -0.0966361419f, -0.0544312518f, -0.0176559645f,
+     0.0176559645f,  0.0544312518f,  0.0966361419f,  0.1543156657f,
+};
+
 // QJL scale constant: sqrt(pi/2) / dim = 1.2533141 / dim
 #define QJL_SCALE_128 (1.2533141f / 128.0f)
+#define QJL_SCALE_256 (1.2533141f / 256.0f)
 #define QJL_SCALE_32  (1.2533141f / 32.0f)
+#define QJL_SCALE_64  (1.2533141f / 64.0f)
 #define QJL_SCALE_96  (1.2533141f / 96.0f)
 
 // Device-side pointer to channel map for 5hi_3lo FA kernels.

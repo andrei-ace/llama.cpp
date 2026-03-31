@@ -450,7 +450,7 @@ static __global__ void k_set_rows_tq_3hi_2lo_had(
 // Host dispatch — helper macro for split-type set_rows
 // ---------------------------------------------------------------------------
 
-#define DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(suffix, block_type) \
+#define DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(suffix, block_type, blk_sz) \
 void ggml_cuda_op_set_rows_tq_##suffix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) { \
     const ggml_tensor * src0 = dst->src[0]; \
     const ggml_tensor * src1 = dst->src[1]; \
@@ -463,9 +463,9 @@ void ggml_cuda_op_set_rows_tq_##suffix(ggml_backend_cuda_context & ctx, ggml_ten
     if (lp) layer_idx = atoi(lp + 2); \
     int32_t * chmap = ggml_cuda_get_tq_channel_map_device(); \
     int n_kv_heads = ggml_cuda_get_tq_chmap_n_heads(); \
-    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / 128); \
-    GGML_ASSERT(ne00 % 128 == 0); \
-    const int64_t ne_total = (ne00 * ne01 * ne02 * ne03) / 128; \
+    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / (blk_sz)); \
+    GGML_ASSERT(ne00 % (blk_sz) == 0); \
+    const int64_t ne_total = (ne00 * ne01 * ne02 * ne03) / (blk_sz); \
     const int num_blocks = (int)((ne_total + CUDA_SET_ROWS_BLOCK_SIZE - 1) / CUDA_SET_ROWS_BLOCK_SIZE); \
     const int64_t s01 = nb01 / sizeof(float); \
     const int64_t s02 = nb02 / sizeof(float); \
@@ -489,9 +489,94 @@ void ggml_cuda_op_set_rows_tq_##suffix(ggml_backend_cuda_context & ctx, ggml_ten
     } \
 }
 
-DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(6hi_3lo_had, block_tqk_6hi_3lo)
-DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(2hi_1lo_had, block_tqk_2hi_1lo)
-DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(3hi_2lo_had, block_tqk_3hi_2lo)
+DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(6hi_3lo_had,      block_tqk_6hi_3lo,     128)
+DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(2hi_1lo_had,      block_tqk_2hi_1lo,     128)
+DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(3hi_2lo_had,      block_tqk_3hi_2lo,     128)
+
+// ---------------------------------------------------------------------------
+// 5hi_3lo_had_d256: 64/192 split, 4-bit + QJL on hi, 3-bit on lo
+// ---------------------------------------------------------------------------
+
+template <typename idx_t>
+static __global__ void k_set_rows_tq_5hi_3lo_had_d256(
+        const float * __restrict__ src0,
+        const idx_t * __restrict__ src1,
+        block_tqk_5hi_3lo_d256 * __restrict__ dst,
+        const int32_t * __restrict__ chmap,
+        const int32_t n_kv_heads,
+        const int32_t layer_idx,
+        const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
+        const int64_t s01, const int64_t s02, const int64_t s03,
+        const int64_t s10, const int64_t s11, const int64_t s12,
+        const int64_t nb1, const int64_t nb2, const int64_t nb3) {
+
+    const int64_t i = (int64_t)blockDim.x * blockIdx.x + threadIdx.x;
+    const int64_t ne_total = (ne00 * ne01 * ne02 * ne03) / 256;
+    if (i >= ne_total) return;
+
+    int64_t tmp = i;
+    const int64_t block_in_row = tmp % (ne00 / 256); tmp /= (ne00 / 256);
+    const int64_t i01 = tmp % ne01; tmp /= ne01;
+    const int64_t i02 = tmp % ne02; tmp /= ne02;
+    const int64_t i03 = tmp;
+
+    const int64_t dst_row = *(src1 + i01*s10 + i02*s11 + i03*s12);
+    const float * src_block = src0 + i01*s01 + i02*s02 + i03*s03 + block_in_row * 256;
+    block_tqk_5hi_3lo_d256 * dst_block = (block_tqk_5hi_3lo_d256 *)((char *)dst + dst_row*nb1 + i02*nb2 + i03*nb3) + block_in_row;
+
+    const int head = (int)(block_in_row % n_kv_heads);
+    const int32_t * perm = chmap + ((int64_t)layer_idx * n_kv_heads + head) * 256;
+
+    float hi_raw[64], lo_raw[192];
+    for (int j = 0; j < 64; j++)  hi_raw[j] = src_block[perm[j]];
+    for (int j = 0; j < 192; j++) lo_raw[j] = src_block[perm[64 + j]];
+
+    float hi_rot[64], lo_rot[192];
+    for (int j = 0; j < 64; j++) hi_rot[j] = hi_raw[j];
+    tq_fwht_local<32>(hi_rot); tq_fwht_local<32>(hi_rot + 32);
+    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j];
+    for (int b = 0; b < 6; b++) tq_fwht_local<32>(lo_rot + b * 32);
+
+    float sum_hi = 0.0f, sum_lo = 0.0f;
+    for (int j = 0; j < 64; j++)  sum_hi += hi_rot[j] * hi_rot[j];
+    for (int j = 0; j < 192; j++) sum_lo += lo_rot[j] * lo_rot[j];
+    float norm_hi = sqrtf(sum_hi), norm_lo = sqrtf(sum_lo);
+
+    dst_block->norm_hi  = __float2half(norm_hi);
+    dst_block->norm_lo  = __float2half(norm_lo);
+    dst_block->rnorm_hi = __float2half(0.0f);
+    memset(dst_block->signs_hi, 0, sizeof(dst_block->signs_hi));
+
+    if (norm_hi == 0.0f && norm_lo == 0.0f) {
+        memset(dst_block->qs_hi, 0, sizeof(dst_block->qs_hi));
+        memset(dst_block->qs_lo, 0, sizeof(dst_block->qs_lo));
+        return;
+    }
+
+    float inv_hi = (norm_hi > 1e-12f) ? 1.0f / norm_hi : 0.0f;
+    float inv_lo = (norm_lo > 1e-12f) ? 1.0f / norm_lo : 0.0f;
+
+    memset(dst_block->qs_hi, 0, sizeof(dst_block->qs_hi));
+    for (int j = 0; j < 64; j++) tq_pk4(dst_block->qs_hi, j, tq_nearest(hi_rot[j] * inv_hi, tq_c16_d64, 16));
+
+    memset(dst_block->qs_lo, 0, sizeof(dst_block->qs_lo));
+    for (int j = 0; j < 192; j++) tq_pk3(dst_block->qs_lo, j, tq_nearest(lo_rot[j] * inv_lo, tq_c8_d192, 8));
+
+    // QJL on hi residual
+    float yhi[64];
+    for (int j = 0; j < 64; j++) yhi[j] = tq_c16_d64[tq_up4(dst_block->qs_hi, j)];
+    tq_fwht_local<32>(yhi); tq_fwht_local<32>(yhi + 32);
+    float r_hi[64];
+    float rnorm_sq = 0.0f;
+    for (int j = 0; j < 64; j++) { r_hi[j] = hi_raw[j] - norm_hi * yhi[j]; rnorm_sq += r_hi[j] * r_hi[j]; }
+    tq_fwht_local<32>(r_hi); tq_fwht_local<32>(r_hi + 32);
+    for (int j = 0; j < 64; j++) {
+        if (r_hi[j] >= 0.0f) dst_block->signs_hi[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+    dst_block->rnorm_hi = __float2half(sqrtf(rnorm_sq));
+}
+
+DEFINE_TQ_SPLIT_SET_ROWS_DISPATCH(5hi_3lo_had_d256, block_tqk_5hi_3lo_d256, 256)
 
 void ggml_cuda_op_set_rows_tq_5hi_3lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
