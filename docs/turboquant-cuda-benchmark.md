@@ -41,18 +41,20 @@ Benchmark results for TurboQuant KV cache quantization types on CUDA, comparing 
 
 After warp-shuffle FWHT optimization (see below):
 
-| Type | bpv | pp512 (t/s) | tg128 (t/s) |
-|------|-----|-------------|-------------|
-| f16 | 16.00 | 4887 | 119 |
-| q8_0 | 8.50 | 4807 | 118 |
-| q4_0 | 4.50 | 4833 | 118 |
-| tqk4_0 | 4.13 | 1713 | 77 |
-| tqk5_0j | 5.25 | 1693 | 81 |
-| tqk4_1j | 4.25 | 1879 | 84 |
-| tqk3_sj | 3.88 | 1399 | 83 |
-| tqk4_sj | 4.13 | 1328 | 80 |
-| tqk3b_sj | 3.75 | 1488 | 82 |
-| tqk2_sj | 2.75 | 994 | 82 |
+| Type | bpv | pp512 (t/s) | % of q4_0 pp | tg128 (t/s) | % of q4_0 tg |
+|------|-----|-------------|-------------|-------------|-------------|
+| f16 | 16.00 | 4887 | 101% | 119 | 101% |
+| q8_0 | 8.50 | 4807 | 99% | 118 | 100% |
+| q4_0 | 4.50 | 4833 | 100% | 118 | 100% |
+| tqk4_1j | 4.25 | 1879 | 39% | 84 | 71% |
+| tqk5_0j | 5.25 | 1693 | 35% | 81 | 69% |
+| tqk4_0 | 4.13 | 1713 | 35% | 77 | 65% |
+| tqk3b_sj | 3.75 | 1488 | 31% | 82 | 69% |
+| tqk3_sj | 3.88 | 1399 | 29% | 83 | 70% |
+| tqk4_sj | 4.13 | 1328 | 27% | 80 | 68% |
+| tqk2_sj | 2.75 | 994 | 21% | 82 | 69% |
+
+Prefill is ~21-39% of q4_0 due to FWHT compute + warp divergence in the K dequant. Decode is ~65-71% of q4_0 since it is memory-bandwidth-bound and the FWHT cost is amortized.
 
 ### Warp-shuffle FWHT optimization
 
