@@ -26,7 +26,7 @@ struct tq_calibration_data {
     int n_kv_heads = 0;
     int head_dim   = 0;
     bool pre_rope  = false;
-    calib_metric_t metric = METRIC_MAG;
+    calib_metric_t metric = METRIC_VAR;
 
     // [n_layers][n_kv_heads][head_dim]
     std::vector<double> sum_abs;  // sum |K[d]|
@@ -170,8 +170,8 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  -ngl,--n-gpu-layers N  GPU layers (default: 99)\n");
     fprintf(stderr, "       --pre-rope        Capture pre-RoPE K (default: post-RoPE)\n");
     fprintf(stderr, "       --post-rope       Capture post-RoPE K (default)\n");
-    fprintf(stderr, "       --metric mag      Outlier = highest mean |K| (default)\n");
-    fprintf(stderr, "       --metric var      Outlier = highest variance Var(K)\n");
+    fprintf(stderr, "       --metric var      Outlier = highest variance Var(K) (default)\n");
+    fprintf(stderr, "       --metric mag      Outlier = highest mean |K|\n");
     fprintf(stderr, "       --metric both     Outlier = |K| × std(K)\n");
 }
 
@@ -179,7 +179,7 @@ int main(int argc, char ** argv) {
     std::string model_path, calib_file, output_path = "tq-perms.bin";
     int n_tokens_max = 4096, n_ctx = 512, n_gpu_layers = 99;
     bool pre_rope = false;
-    calib_metric_t metric = METRIC_MAG;
+    calib_metric_t metric = METRIC_VAR;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
