@@ -1301,6 +1301,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_TQK_HAD_PROD4:
                     case GGML_TYPE_TQK_5HI_3LO_HAD:
                     case GGML_TYPE_TQK_6HI_3LO_HAD:
+                    case GGML_TYPE_TQK_2HI_1LO_HAD:
+                    case GGML_TYPE_TQK_3HI_2LO_HAD:
                     case GGML_TYPE_TQV_HAD_MSE4:
                     case GGML_TYPE_TQK_HAD_MSE4_D256:
                     case GGML_TYPE_TQK_HAD_PROD5_D256:
