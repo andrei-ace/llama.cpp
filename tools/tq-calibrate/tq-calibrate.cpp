@@ -19,23 +19,29 @@
 #include <string>
 #include <vector>
 
+enum calib_metric_t { METRIC_MAG = 0, METRIC_VAR = 1, METRIC_BOTH = 2 };
+
 struct tq_calibration_data {
     int n_layers   = 0;
     int n_kv_heads = 0;
     int head_dim   = 0;
     bool pre_rope  = false;
+    calib_metric_t metric = METRIC_MAG;
 
-    // [n_layers][n_kv_heads][head_dim] — accumulated |K| per channel
-    std::vector<double> accum;
+    // [n_layers][n_kv_heads][head_dim]
+    std::vector<double> sum_abs;  // sum |K[d]|
+    std::vector<double> sum_val;  // sum K[d]      (for variance: mean)
+    std::vector<double> sum_sq;   // sum K[d]^2    (for variance: E[X^2])
     std::vector<int64_t> counts;
     std::vector<int> layer_map;
     std::mutex mtx;
 
     void init(int n_layer_model, int n_kv_heads_, int head_dim_, bool pre_rope_,
-              const std::function<bool(int)> & has_kv) {
+              calib_metric_t metric_, const std::function<bool(int)> & has_kv) {
         n_kv_heads = n_kv_heads_;
         head_dim   = head_dim_;
         pre_rope   = pre_rope_;
+        metric     = metric_;
 
         layer_map.resize(n_layer_model, -1);
         int idx = 0;
@@ -43,25 +49,33 @@ struct tq_calibration_data {
             if (has_kv(il)) layer_map[il] = idx++;
         }
         n_layers = idx;
-        accum.resize((size_t)n_layers * n_kv_heads * head_dim, 0.0);
+        size_t sz = (size_t)n_layers * n_kv_heads * head_dim;
+        sum_abs.resize(sz, 0.0);
+        sum_val.resize(sz, 0.0);
+        sum_sq.resize(sz, 0.0);
         counts.resize(n_layers, 0);
     }
 
-    double * get_accum(int cidx, int h) {
-        return accum.data() + ((size_t)cidx * n_kv_heads + h) * head_dim;
+    void accum_head(int cidx, int h, const float * hd) {
+        size_t off = ((size_t)cidx * n_kv_heads + h) * head_dim;
+        double * sa = sum_abs.data() + off;
+        double * sv = sum_val.data() + off;
+        double * ss = sum_sq.data()  + off;
+        for (int d = 0; d < head_dim; d++) {
+            double v = (double)hd[d];
+            sa[d] += fabs(v);
+            sv[d] += v;
+            ss[d] += v * v;
+        }
     }
 
     void accumulate(int model_il, const float * data, int64_t n_tokens) {
         int cidx = layer_map[model_il];
         if (cidx < 0) return;
         std::lock_guard<std::mutex> lock(mtx);
-        for (int64_t t = 0; t < n_tokens; t++) {
-            for (int h = 0; h < n_kv_heads; h++) {
-                double * acc = get_accum(cidx, h);
-                const float * hd = data + (t * n_kv_heads + h) * head_dim;
-                for (int d = 0; d < head_dim; d++) acc[d] += fabs((double)hd[d]);
-            }
-        }
+        for (int64_t t = 0; t < n_tokens; t++)
+            for (int h = 0; h < n_kv_heads; h++)
+                accum_head(cidx, h, data + (t * n_kv_heads + h) * head_dim);
         counts[cidx] += n_tokens;
     }
 
@@ -69,24 +83,35 @@ struct tq_calibration_data {
         int cidx = layer_map[model_il];
         if (cidx < 0) return;
         std::lock_guard<std::mutex> lock(mtx);
-        for (int64_t t = 0; t < n_tokens; t++) {
-            const float * row = data + t * n_embd_k_gqa;
-            for (int h = 0; h < n_kv_heads; h++) {
-                double * acc = get_accum(cidx, h);
-                const float * hd = row + h * head_dim;
-                for (int d = 0; d < head_dim; d++) acc[d] += fabs((double)hd[d]);
-            }
-        }
+        for (int64_t t = 0; t < n_tokens; t++)
+            for (int h = 0; h < n_kv_heads; h++)
+                accum_head(cidx, h, data + t * n_embd_k_gqa + h * head_dim);
         counts[cidx] += n_tokens;
     }
 
     void compute_perm(int cidx, int head, uint8_t * perm) const {
-        const double * acc = accum.data() + ((size_t)cidx * n_kv_heads + head) * head_dim;
-        int64_t cnt = std::max(counts[cidx], (int64_t)1);
-        std::vector<std::pair<double, int>> mags(head_dim);
-        for (int d = 0; d < head_dim; d++) mags[d] = { acc[d] / cnt, d };
-        std::sort(mags.begin(), mags.end(), [](const auto & a, const auto & b) { return a.first > b.first; });
-        for (int d = 0; d < head_dim; d++) perm[d] = (uint8_t)mags[d].second;
+        size_t off = ((size_t)cidx * n_kv_heads + head) * head_dim;
+        const double * sa = sum_abs.data() + off;
+        const double * sv = sum_val.data() + off;
+        const double * ss = sum_sq.data()  + off;
+        int64_t n = std::max(counts[cidx], (int64_t)1);
+
+        std::vector<std::pair<double, int>> importance(head_dim);
+        for (int d = 0; d < head_dim; d++) {
+            double mag = sa[d] / n;                          // mean |K|
+            double var = ss[d] / n - (sv[d] / n) * (sv[d] / n); // Var(K)
+            if (var < 0) var = 0; // numerical safety
+
+            double score;
+            if (metric == METRIC_MAG)       score = mag;
+            else if (metric == METRIC_VAR)  score = var;
+            else /* METRIC_BOTH */          score = mag * sqrt(var); // magnitude × std
+            importance[d] = { score, d };
+        }
+
+        std::sort(importance.begin(), importance.end(),
+                  [](const auto & a, const auto & b) { return a.first > b.first; });
+        for (int d = 0; d < head_dim; d++) perm[d] = (uint8_t)importance[d].second;
     }
 };
 
@@ -145,12 +170,16 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  -ngl,--n-gpu-layers N  GPU layers (default: 99)\n");
     fprintf(stderr, "       --pre-rope        Capture pre-RoPE K (default: post-RoPE)\n");
     fprintf(stderr, "       --post-rope       Capture post-RoPE K (default)\n");
+    fprintf(stderr, "       --metric mag      Outlier = highest mean |K| (default)\n");
+    fprintf(stderr, "       --metric var      Outlier = highest variance Var(K)\n");
+    fprintf(stderr, "       --metric both     Outlier = |K| × std(K)\n");
 }
 
 int main(int argc, char ** argv) {
     std::string model_path, calib_file, output_path = "tq-perms.bin";
     int n_tokens_max = 4096, n_ctx = 512, n_gpu_layers = 99;
     bool pre_rope = false;
+    calib_metric_t metric = METRIC_MAG;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -162,6 +191,13 @@ int main(int argc, char ** argv) {
         else if ((arg == "-ngl" || arg == "--n-gpu-layers") && i+1 < argc) n_gpu_layers = std::atoi(argv[++i]);
         else if (arg == "--pre-rope") pre_rope = true;
         else if (arg == "--post-rope") pre_rope = false;
+        else if (arg == "--metric" && i+1 < argc) {
+            std::string m = argv[++i];
+            if (m == "mag") metric = METRIC_MAG;
+            else if (m == "var") metric = METRIC_VAR;
+            else if (m == "both") metric = METRIC_BOTH;
+            else { fprintf(stderr, "error: unknown metric '%s'\n", m.c_str()); return 1; }
+        }
         else { print_usage(argv[0]); return 1; }
     }
     if (model_path.empty() || calib_file.empty()) { print_usage(argv[0]); return 1; }
@@ -180,11 +216,13 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "model: %d layers, %d KV heads, %d Q heads (GQA %d:1), head_dim=%d\n",
             n_layer, n_kv_heads, n_q_heads, n_q_heads/n_kv_heads, head_dim);
 
-    auto has_kv = [&](int) -> bool { return true; };
-    g_calib.init(n_layer, n_kv_heads, head_dim, pre_rope, has_kv);
+    const char * metric_str = metric == METRIC_MAG ? "mag" : metric == METRIC_VAR ? "var" : "both";
 
-    fprintf(stderr, "calibration: %d KV layers, %s, max %d tokens\n",
-            g_calib.n_layers, pre_rope ? "pre-RoPE" : "post-RoPE", n_tokens_max);
+    auto has_kv = [&](int) -> bool { return true; };
+    g_calib.init(n_layer, n_kv_heads, head_dim, pre_rope, metric, has_kv);
+
+    fprintf(stderr, "calibration: %d KV layers, %s, metric=%s, max %d tokens\n",
+            g_calib.n_layers, pre_rope ? "pre-RoPE" : "post-RoPE", metric_str, n_tokens_max);
 
     auto tokens = tokenize_file(vocab, calib_file, n_tokens_max);
     if (tokens.empty()) { llama_model_free(model); return 1; }
