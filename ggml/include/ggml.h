@@ -430,7 +430,7 @@ extern "C" {
         GGML_TYPE_NVFP4     = 40, // NVFP4 (4 blocks, E4M3 scale)
         // 41-49: reserved
         // TurboQuant KV cache types (50+) — tqk = K cache, tqv = V cache
-        GGML_TYPE_TQK_5HI_3LO_HAD      = 50, // tqk3_sj:      3.88 bpv, 32/96 split + FWHT + QJL
+        GGML_TYPE_TQK_5HI_3LO_HAD      = 50, // tqk3_0j:      3.88 bpv, 32/96 split + FWHT + QJL
         GGML_TYPE_TQK_HAD_MSE4         = 51, // tqk4_0:       4.13 bpv, Hadamard + 4-bit MSE
         GGML_TYPE_TQK_HAD_PROD5        = 52, // tqk5_0j:      5.25 bpv, 4-bit MSE + 1-bit QJL
         GGML_TYPE_TQK_HAD_PROD4        = 53, // tqk4_1j:      4.25 bpv, 3-bit MSE + 1-bit QJL
@@ -438,10 +438,9 @@ extern "C" {
         GGML_TYPE_TQK_HAD_MSE4_D256    = 55, // tqk4_0_d256:  4.06 bpv, d=256 variant
         GGML_TYPE_TQK_HAD_PROD5_D256   = 56, // tqk5_0j_d256: 5.13 bpv, d=256 + QJL
         GGML_TYPE_TQK_HAD_PROD4_D256   = 57, // tqk4_1j_d256: 4.13 bpv, d=256 + QJL
-        GGML_TYPE_TQK_5HI_3LO_HAD_D256 = 58, // tqk3_sj_d256: 3.69 bpv, d=256 split + QJL
+        GGML_TYPE_TQK_5HI_3LO_HAD_D256 = 58, // tqk3_0j_d256: 3.69 bpv, d=256 split + QJL
         GGML_TYPE_TQV_HAD_MSE4_D256    = 59, // tqv4_0_d256:  4.06 bpv, d=256 variant
-        GGML_TYPE_TQK_6HI_3LO_HAD     = 60, // tqk4_sj:      4.13 bpv, 32/96 split, 5-bit+QJL hi / 3-bit lo
-        GGML_TYPE_COUNT     = 61,
+        GGML_TYPE_COUNT     = 60,
     };
 
     // precision

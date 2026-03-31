@@ -1842,8 +1842,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
         // TurboQuant split types: pass per-head channel permutation for Q permutation in FA
-        if (k->type == GGML_TYPE_TQK_5HI_3LO_HAD || k->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
-            k->type == GGML_TYPE_TQK_6HI_3LO_HAD) {
+        if (k->type == GGML_TYPE_TQK_5HI_3LO_HAD || k->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256) {
             const int head_size = (int)k->ne[0];
             const int n_kv_head = (int)k->ne[2];
             auto inp_chmap = std::make_unique<llm_graph_input_tq_chmap>(il, n_kv_head);
