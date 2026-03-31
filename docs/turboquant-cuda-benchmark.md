@@ -18,7 +18,7 @@ Benchmark results for TurboQuant KV cache quantization types on CUDA, comparing 
 
 - **Perplexity**: WikiText-2 test set, context 512, 3 chunks
 - **Speed**: `llama-bench` with pp512 (prompt processing) and tg128 (text generation), flash attention enabled, full GPU offload (`-ngl 99`)
-- **Calibration**: Split types (tqk3_sj, tqk4_sj, tqk3b_sj, tqk2_sj) calibrated on PTB train set (`--pre-rope`, 32k tokens, context 2048). Non-split types and standard types need no calibration.
+- **Calibration**: Split types (tqk3_sj, tqk4_sj, tqk3b_sj, tqk2_sj) calibrated on Penn Treebank (PTB) train set using `llama-tq-calibrate -m model.gguf -f ptb/ptb.train.txt -o perms.bin -n 32000 -c 2048 --pre-rope`. The calibration identifies per-layer per-head outlier channels by accumulating K channel magnitudes over 32k tokens with context window 2048, using pre-RoPE activations. Non-split types and standard types need no calibration.
 - All TQ K types paired with tqv4_0 V cache (4.13 bpv). Standard types use matching V types.
 
 ## Results
