@@ -1351,17 +1351,16 @@ struct ggml_metal_buffer_id ggml_metal_device_get_tq_channel_map(ggml_metal_devi
                     __func__, gl_n_layers, gl_n_heads, n_ch);
         }
     } else if (dev->tq_channel_map == nil) {
-        // Create default channel map: identity permutation
+        // Create default channel map: identity permutation (sized for d=256)
         const int max_layers = 256;
         const int max_heads  = 128;
-        const int n_ch       = 128;
+        const int n_ch       = 256; // must cover d=256 split types
         size_t sz = (size_t)max_layers * max_heads * n_ch * sizeof(int32_t);
         int32_t * data = (int32_t *)malloc(sz);
         for (int l = 0; l < max_layers; l++) {
             for (int h = 0; h < max_heads; h++) {
                 int32_t * row = data + ((int64_t)l * max_heads + h) * n_ch;
-                for (int i = 0; i < 32;  i++) { row[i] = i; }
-                for (int i = 0; i < 96;  i++) { row[32 + i] = 32 + i; }
+                for (int i = 0; i < n_ch; i++) { row[i] = i; } // identity
             }
         }
         dev->tq_channel_map = [dev->mtl_device newBufferWithBytes:data

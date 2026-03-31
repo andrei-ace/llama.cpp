@@ -606,6 +606,7 @@ static void dequant_lo_mse(const uint8_t * qs, const float * c, int bits, int n_
 // ---------------------------------------------------------------------------
 
 void tq_set_current_layer(int layer, int is_k) {
+    tq_cur_layer = layer;
     tq_cur_is_k  = is_k;
 }
 
