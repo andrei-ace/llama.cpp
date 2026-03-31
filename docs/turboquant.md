@@ -28,6 +28,68 @@ These split channels into 32 outliers and 96 regulars based on calibrated per-la
 
 Naming convention: `tqk{approx_bpv}_{variant}` where `s` = split, `j` = QJL correction.
 
+### Block layout and bpv calculation
+
+Each type stores a fixed number of bytes per block of 128 elements. `bpv = block_bytes × 8 / 128`.
+
+**Uniform types** (128 elements per block):
+
+```
+tqk4_0 (66B = 4.13 bpv):
+  norm         2B (fp16 L2 norm)
+  qs         64B (128 × 4-bit MSE indices)
+
+tqk5_0j (84B = 5.25 bpv):
+  norm         2B    rnorm        2B (QJL residual norm)
+  qs         64B (128 × 4-bit)
+  signs      16B (128 × 1-bit QJL signs)
+
+tqk4_1j (68B = 4.25 bpv):
+  norm         2B    rnorm        2B
+  qs         48B (128 × 3-bit)
+  signs      16B (128 × 1-bit)
+```
+
+**Split types** (128 elements = 32 outliers + 96 regulars):
+
+```
+tqk4_sj (66B = 4.13 bpv):
+  norm_hi      2B    norm_lo      2B    rnorm_hi     2B
+  qs_hi      20B (32 × 5-bit)
+  qs_lo      36B (96 × 3-bit)
+  signs_hi    4B (32 × 1-bit)
+
+tqk3_sj (62B = 3.88 bpv):
+  norm_hi      2B    norm_lo      2B    rnorm_hi     2B
+  qs_hi      16B (32 × 4-bit)
+  qs_lo      36B (96 × 3-bit)
+  signs_hi    4B (32 × 1-bit)
+
+tqk3b_sj (60B = 3.75 bpv):
+  norm_hi      2B    norm_lo      2B    rnorm_hi     2B    rnorm_lo     2B
+  qs_hi      12B (32 × 3-bit)
+  qs_lo      24B (96 × 2-bit)
+  signs_hi    4B (32 × 1-bit)
+  signs_lo   12B (96 × 1-bit)
+
+tqk2_sj (44B = 2.75 bpv):
+  norm_hi      2B    norm_lo      2B    rnorm_hi     2B    rnorm_lo     2B
+  qs_hi       8B (32 × 2-bit)
+  qs_lo      12B (96 × 1-bit)
+  signs_hi    4B (32 × 1-bit)
+  signs_lo   12B (96 × 1-bit)
+```
+
+**For comparison — standard types** (32 elements per block):
+
+```
+q4_0  (18B = 4.50 bpv):  scale 2B + 32×4-bit 16B
+q4_1  (20B = 5.00 bpv):  scale 2B + min 2B + 32×4-bit 16B
+q8_0  (34B = 8.50 bpv):  scale 2B + 32×8-bit 32B
+```
+
+The fp16 norms are overhead — at low bit rates they become significant (e.g. 8B of norms in tqk2_sj's 44B total = 18%).
+
 ## How it works
 
 ### 1. Hadamard rotation
