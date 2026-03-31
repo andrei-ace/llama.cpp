@@ -758,8 +758,10 @@ static __global__ void flash_attn_tile(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const int8_t * __restrict__ chmap) {
 #ifdef FLASH_ATTN_AVAILABLE
+    GGML_UNUSED(chmap);
 
     // Skip unused kernel variants for faster compilation:
 
