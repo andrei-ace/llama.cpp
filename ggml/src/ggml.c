@@ -905,7 +905,7 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .is_quantized             = false,
     },
     [GGML_TYPE_TQK_5HI_3LO_HAD] = {
-        .type_name                = "tqk3_0j",
+        .type_name                = "tqk3_sj",
         .blck_size                = TQK_BLOCK_SIZE,
         .type_size                = sizeof(block_tqk_5hi_3lo),
         .is_quantized             = true,
@@ -969,7 +969,7 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_had_prod4_d256_ref,
     },
     [GGML_TYPE_TQK_5HI_3LO_HAD_D256] = {
-        .type_name                = "tqk3_0_d256",
+        .type_name                = "tqk3_sj_d256",
         .blck_size                = TQK_BLOCK_SIZE_D256,
         .type_size                = sizeof(block_tqk_5hi_3lo_d256),
         .is_quantized             = true,
