@@ -2,6 +2,7 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
+#include "ggml-turbo-quant.h"
 #include "ggml-cuda/common.cuh"
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
@@ -87,11 +88,12 @@
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
 // ---------------------------------------------------------------------------
-// TurboQuant channel map storage (for 5hi_3lo_had calibrated type)
+// TurboQuant channel map storage (for split-type calibrated perms)
 // ---------------------------------------------------------------------------
 static int32_t * g_tq_channel_map_d = nullptr;  // device pointer
 static int       g_tq_chmap_n_layers = 0;
 static int       g_tq_chmap_n_heads = 0;
+static int       g_tq_chmap_dim = 0;            // head dimension (128 or 256)
 
 // Device-side pointers for FA kernel access to channel map
 __device__ const int32_t * tq_fa_channel_map_ptr = nullptr;
@@ -102,43 +104,53 @@ static void tq_update_device_pointers(const int32_t * dev_ptr, int n_kv_heads) {
     CUDA_CHECK(cudaMemcpyToSymbol(tq_fa_chmap_n_heads, &n_kv_heads, sizeof(n_kv_heads)));
 }
 
-// Default identity channel map: channels 0-31 = outlier, 32-127 = regular
-static void tq_ensure_default_channel_map(int n_layers, int n_heads) {
-    if (g_tq_channel_map_d != nullptr) return;
-    if (n_layers < 1) n_layers = 1;
-    if (n_heads < 1) n_heads = 1;
-
-    size_t sz = (size_t)n_layers * n_heads * 128 * sizeof(int32_t);
-    std::vector<int32_t> chmap(n_layers * n_heads * 128);
-    for (int l = 0; l < n_layers; l++) {
-        for (int h = 0; h < n_heads; h++) {
-            int32_t * row = chmap.data() + (l * n_heads + h) * 128;
-            for (int i = 0; i < 128; i++) row[i] = i; // identity permutation
-        }
-    }
-    CUDA_CHECK(cudaMalloc(&g_tq_channel_map_d, sz));
-    CUDA_CHECK(cudaMemcpy(g_tq_channel_map_d, chmap.data(), sz, cudaMemcpyHostToDevice));
-    g_tq_chmap_n_layers = n_layers;
-    g_tq_chmap_n_heads = n_heads;
-    tq_update_device_pointers(g_tq_channel_map_d, n_heads);
-}
-
-extern "C" void ggml_cuda_set_tq_channel_map(const int32_t * data, int n_layers, int n_kv_heads) {
+// Upload channel map data to device. Frees any existing map first.
+static void tq_cuda_upload_channel_map(const int32_t * data, int n_layers, int n_heads, int dim) {
     if (g_tq_channel_map_d) {
         CUDA_CHECK(cudaFree(g_tq_channel_map_d));
         g_tq_channel_map_d = nullptr;
     }
-    size_t sz = (size_t)n_layers * n_kv_heads * 128 * sizeof(int32_t);
+    size_t sz = (size_t)n_layers * n_heads * dim * sizeof(int32_t);
     CUDA_CHECK(cudaMalloc(&g_tq_channel_map_d, sz));
     CUDA_CHECK(cudaMemcpy(g_tq_channel_map_d, data, sz, cudaMemcpyHostToDevice));
     g_tq_chmap_n_layers = n_layers;
-    g_tq_chmap_n_heads = n_kv_heads;
-    tq_update_device_pointers(g_tq_channel_map_d, n_kv_heads);
+    g_tq_chmap_n_heads  = n_heads;
+    g_tq_chmap_dim      = dim;
+    tq_update_device_pointers(g_tq_channel_map_d, n_heads);
+}
+
+extern "C" void ggml_cuda_set_tq_channel_map(const int32_t * data, int n_layers, int n_kv_heads) {
+    tq_cuda_upload_channel_map(data, n_layers, n_kv_heads, 128);
 }
 
 int32_t * ggml_cuda_get_tq_channel_map_device(void) {
+    // Check if calibrated global channel map is available (built by tq_upload_channel_maps_to_devices)
+    int gl_n_layers = 0, gl_n_heads = 0;
+    const int * gl_chmap = tq_get_global_channel_map(&gl_n_layers, &gl_n_heads);
+    if (gl_chmap && gl_n_layers > 0 && gl_n_heads > 0) {
+        int dim = tq_get_head_dim();
+        if (!g_tq_channel_map_d ||
+            g_tq_chmap_n_layers != gl_n_layers ||
+            g_tq_chmap_n_heads  != gl_n_heads ||
+            g_tq_chmap_dim      != dim) {
+            tq_cuda_upload_channel_map(gl_chmap, gl_n_layers, gl_n_heads, dim);
+        }
+        return g_tq_channel_map_d;
+    }
+
+    // Fallback: create a default identity map large enough for realistic models
     if (!g_tq_channel_map_d) {
-        tq_ensure_default_channel_map(1, 1);
+        const int max_layers = 256;
+        const int max_heads  = 128;
+        const int dim        = 256; // must cover d=256 split types
+        std::vector<int32_t> chmap((size_t)max_layers * max_heads * dim);
+        for (int l = 0; l < max_layers; l++) {
+            for (int h = 0; h < max_heads; h++) {
+                int32_t * row = chmap.data() + ((size_t)l * max_heads + h) * dim;
+                for (int i = 0; i < dim; i++) row[i] = i; // identity permutation
+            }
+        }
+        tq_cuda_upload_channel_map(chmap.data(), max_layers, max_heads, dim);
     }
     return g_tq_channel_map_d;
 }

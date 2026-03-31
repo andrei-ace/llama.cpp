@@ -493,132 +493,58 @@ void get_rows_tq_had_prod4(
         src0_d, src1_d, dst_d, ne00, ne11, ne12, s1_, s2_, s3_, nb01, nb02, nb03, s10, s11, s12);
 }
 
-template <typename dst_t>
-void get_rows_tq_5hi_3lo_had(
-        const void * src0_d, const int32_t * src1_d, dst_t * dst_d,
-        int64_t ne00, size_t nb01, size_t nb02, size_t nb03,
-        int64_t ne10, int64_t ne11, int64_t ne12,
-        size_t nb10, size_t nb11, size_t nb12,
-        size_t nb1, size_t nb2, size_t nb3,
-        cudaStream_t stream) {
+// ---------------------------------------------------------------------------
+// Split-type get_rows — tensor-level dispatch (extracts layer_idx from name)
+// ---------------------------------------------------------------------------
 
-    const int64_t n_blocks = ne00 / 128;
-    const dim3 block_dims(n_blocks, 1, 1);
-    const dim3 grid_dims(ne10, 1, MIN(ne11 * ne12, (int64_t)UINT16_MAX));
-
-    const size_t s1_ = nb1 / sizeof(dst_t);
-    const size_t s2_ = nb2 / sizeof(dst_t);
-    const size_t s3_ = nb3 / sizeof(dst_t);
-    const size_t s10 = nb10 / sizeof(int32_t);
-    const size_t s11 = nb11 / sizeof(int32_t);
-    const size_t s12 = nb12 / sizeof(int32_t);
-
-    int32_t * chmap = ggml_cuda_get_tq_channel_map_device();
-    int n_kv_heads = ggml_cuda_get_tq_chmap_n_heads();
-    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / 128);
-
-    // TODO: extract layer_idx from tensor name — for now pass 0
-    int32_t layer_idx = 0;
-
-    k_get_rows_tq_5hi_3lo_had<<<grid_dims, block_dims, 0, stream>>>(
-        src0_d, src1_d, dst_d, chmap, n_kv_heads, layer_idx,
-        ne00, ne11, ne12, s1_, s2_, s3_, nb01, nb02, nb03, s10, s11, s12);
+// Helper: extract layer index from KV cache tensor name (e.g. "cache_k_l5")
+static int32_t tq_extract_layer_idx(const ggml_tensor * src0) {
+    // Walk through view chain to find root tensor with the name
+    const ggml_tensor * root = src0;
+    while (root->view_src) root = root->view_src;
+    const char * lp = strstr(root->name, "_l");
+    return lp ? (int32_t)atoi(lp + 2) : 0;
 }
 
-template <typename dst_t>
-void get_rows_tq_6hi_3lo_had(
-        const void * src0_d, const int32_t * src1_d, dst_t * dst_d,
-        int64_t ne00, size_t nb01, size_t nb02, size_t nb03,
-        int64_t ne10, int64_t ne11, int64_t ne12,
-        size_t nb10, size_t nb11, size_t nb12,
-        size_t nb1, size_t nb2, size_t nb3,
-        cudaStream_t stream) {
-
-    const int64_t n_blocks = ne00 / 128;
-    const dim3 block_dims(n_blocks, 1, 1);
-    const dim3 grid_dims(ne10, 1, MIN(ne11 * ne12, (int64_t)UINT16_MAX));
-
-    const size_t s1_ = nb1 / sizeof(dst_t);
-    const size_t s2_ = nb2 / sizeof(dst_t);
-    const size_t s3_ = nb3 / sizeof(dst_t);
-    const size_t s10 = nb10 / sizeof(int32_t);
-    const size_t s11 = nb11 / sizeof(int32_t);
-    const size_t s12 = nb12 / sizeof(int32_t);
-
-    int32_t * chmap = ggml_cuda_get_tq_channel_map_device();
-    int n_kv_heads = ggml_cuda_get_tq_chmap_n_heads();
-    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / 128);
-
-    int32_t layer_idx = 0;
-
-    k_get_rows_tq_6hi_3lo_had<<<grid_dims, block_dims, 0, stream>>>(
-        src0_d, src1_d, dst_d, chmap, n_kv_heads, layer_idx,
-        ne00, ne11, ne12, s1_, s2_, s3_, nb01, nb02, nb03, s10, s11, s12);
+#define DEFINE_TQ_SPLIT_GET_ROWS_OP(suffix, kernel_name) \
+void ggml_cuda_op_get_rows_tq_##suffix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) { \
+    const ggml_tensor * src0 = dst->src[0]; \
+    const ggml_tensor * src1 = dst->src[1]; \
+    GGML_ASSERT(src1->type == GGML_TYPE_I32); \
+    GGML_TENSOR_BINARY_OP_LOCALS \
+    cudaStream_t stream = ctx.stream(); \
+    int32_t layer_idx = tq_extract_layer_idx(src0); \
+    int32_t * chmap = ggml_cuda_get_tq_channel_map_device(); \
+    int n_kv_heads = ggml_cuda_get_tq_chmap_n_heads(); \
+    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / 128); \
+    const int64_t n_blocks = ne00 / 128; \
+    const dim3 block_dims(n_blocks, 1, 1); \
+    const dim3 grid_dims(ne10, 1, MIN(ne11 * ne12, (int64_t)UINT16_MAX)); \
+    const size_t s1_ = nb1 / ggml_type_size(dst->type); \
+    const size_t s2_ = nb2 / ggml_type_size(dst->type); \
+    const size_t s3_ = nb3 / ggml_type_size(dst->type); \
+    const size_t s10 = nb10 / sizeof(int32_t); \
+    const size_t s11 = nb11 / sizeof(int32_t); \
+    const size_t s12 = nb12 / sizeof(int32_t); \
+    if (dst->type == GGML_TYPE_F32) { \
+        kernel_name<<<grid_dims, block_dims, 0, stream>>>( \
+            src0->data, (const int32_t *)src1->data, (float *)dst->data, chmap, n_kv_heads, layer_idx, \
+            ne00, ne11, ne12, s1_, s2_, s3_, nb01, nb02, nb03, s10, s11, s12); \
+    } else if (dst->type == GGML_TYPE_F16) { \
+        kernel_name<<<grid_dims, block_dims, 0, stream>>>( \
+            src0->data, (const int32_t *)src1->data, (half *)dst->data, chmap, n_kv_heads, layer_idx, \
+            ne00, ne11, ne12, s1_, s2_, s3_, nb01, nb02, nb03, s10, s11, s12); \
+    } else { \
+        GGML_ABORT("unsupported dst type for TQ split get_rows"); \
+    } \
 }
 
-template <typename dst_t>
-void get_rows_tq_2hi_1lo_had(
-        const void * src0_d, const int32_t * src1_d, dst_t * dst_d,
-        int64_t ne00, size_t nb01, size_t nb02, size_t nb03,
-        int64_t ne10, int64_t ne11, int64_t ne12,
-        size_t nb10, size_t nb11, size_t nb12,
-        size_t nb1, size_t nb2, size_t nb3,
-        cudaStream_t stream) {
+DEFINE_TQ_SPLIT_GET_ROWS_OP(5hi_3lo_had, k_get_rows_tq_5hi_3lo_had)
+DEFINE_TQ_SPLIT_GET_ROWS_OP(6hi_3lo_had, k_get_rows_tq_6hi_3lo_had)
+DEFINE_TQ_SPLIT_GET_ROWS_OP(2hi_1lo_had, k_get_rows_tq_2hi_1lo_had)
+DEFINE_TQ_SPLIT_GET_ROWS_OP(3hi_2lo_had, k_get_rows_tq_3hi_2lo_had)
 
-    const int64_t n_blocks = ne00 / 128;
-    const dim3 block_dims(n_blocks, 1, 1);
-    const dim3 grid_dims(ne10, 1, MIN(ne11 * ne12, (int64_t)UINT16_MAX));
-
-    const size_t s1_ = nb1 / sizeof(dst_t);
-    const size_t s2_ = nb2 / sizeof(dst_t);
-    const size_t s3_ = nb3 / sizeof(dst_t);
-    const size_t s10 = nb10 / sizeof(int32_t);
-    const size_t s11 = nb11 / sizeof(int32_t);
-    const size_t s12 = nb12 / sizeof(int32_t);
-
-    int32_t * chmap = ggml_cuda_get_tq_channel_map_device();
-    int n_kv_heads = ggml_cuda_get_tq_chmap_n_heads();
-    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / 128);
-
-    int32_t layer_idx = 0;
-
-    k_get_rows_tq_2hi_1lo_had<<<grid_dims, block_dims, 0, stream>>>(
-        src0_d, src1_d, dst_d, chmap, n_kv_heads, layer_idx,
-        ne00, ne11, ne12, s1_, s2_, s3_, nb01, nb02, nb03, s10, s11, s12);
-}
-
-template <typename dst_t>
-void get_rows_tq_3hi_2lo_had(
-        const void * src0_d, const int32_t * src1_d, dst_t * dst_d,
-        int64_t ne00, size_t nb01, size_t nb02, size_t nb03,
-        int64_t ne10, int64_t ne11, int64_t ne12,
-        size_t nb10, size_t nb11, size_t nb12,
-        size_t nb1, size_t nb2, size_t nb3,
-        cudaStream_t stream) {
-
-    const int64_t n_blocks = ne00 / 128;
-    const dim3 block_dims(n_blocks, 1, 1);
-    const dim3 grid_dims(ne10, 1, MIN(ne11 * ne12, (int64_t)UINT16_MAX));
-
-    const size_t s1_ = nb1 / sizeof(dst_t);
-    const size_t s2_ = nb2 / sizeof(dst_t);
-    const size_t s3_ = nb3 / sizeof(dst_t);
-    const size_t s10 = nb10 / sizeof(int32_t);
-    const size_t s11 = nb11 / sizeof(int32_t);
-    const size_t s12 = nb12 / sizeof(int32_t);
-
-    int32_t * chmap = ggml_cuda_get_tq_channel_map_device();
-    int n_kv_heads = ggml_cuda_get_tq_chmap_n_heads();
-    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / 128);
-
-    int32_t layer_idx = 0;
-
-    k_get_rows_tq_3hi_2lo_had<<<grid_dims, block_dims, 0, stream>>>(
-        src0_d, src1_d, dst_d, chmap, n_kv_heads, layer_idx,
-        ne00, ne11, ne12, s1_, s2_, s3_, nb01, nb02, nb03, s10, s11, s12);
-}
-
-// Explicit template instantiations for all dst types used by get_rows_cuda (F32, I32, F16, BF16)
+// Explicit template instantiations for non-split types (still use template dispatch)
 #define INSTANTIATE_TQ_GET_ROWS(func) \
     template void func<float>(const void*, const int32_t*, float*, int64_t, size_t, size_t, size_t, int64_t, int64_t, int64_t, size_t, size_t, size_t, size_t, size_t, size_t, cudaStream_t); \
     template void func<half>(const void*, const int32_t*, half*, int64_t, size_t, size_t, size_t, int64_t, int64_t, int64_t, size_t, size_t, size_t, size_t, size_t, size_t, cudaStream_t); \
@@ -628,7 +554,3 @@ void get_rows_tq_3hi_2lo_had(
 INSTANTIATE_TQ_GET_ROWS(get_rows_tq_had_mse4)
 INSTANTIATE_TQ_GET_ROWS(get_rows_tq_had_prod5)
 INSTANTIATE_TQ_GET_ROWS(get_rows_tq_had_prod4)
-INSTANTIATE_TQ_GET_ROWS(get_rows_tq_5hi_3lo_had)
-INSTANTIATE_TQ_GET_ROWS(get_rows_tq_6hi_3lo_had)
-INSTANTIATE_TQ_GET_ROWS(get_rows_tq_2hi_1lo_had)
-INSTANTIATE_TQ_GET_ROWS(get_rows_tq_3hi_2lo_had)
