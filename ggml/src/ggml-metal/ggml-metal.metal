@@ -191,6 +191,59 @@ constexpr constant static float tq_c2_d192[2] = {
     -0.0576573838f,  0.0576573838f,
 };
 
+// ---------------------------------------------------------------------------
+// Structured rotation for non-power-of-2 lo-blocks (96=3×32, 192=3×64)
+// R = (I_3 ⊗ H_block) · P · (I_block ⊗ O_3) · D
+// ---------------------------------------------------------------------------
+
+constant float tq_O3[9] = {
+    0.5773502691896257f,  0.5773502691896257f,  0.5773502691896257f,
+    0.7071067811865476f,  0.0f,                -0.7071067811865476f,
+    0.4082482904638631f, -0.8164965809277261f,  0.4082482904638631f,
+};
+
+inline float tq_struct_sign(int i, int n) {
+    ulong seed = (n == 96) ? 0x5452534C4F393600ULL : 0x5452534C31393200ULL;
+    for (int k = 0; k <= i; k++) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+    }
+    return ((uint(seed >> 32)) & 1) ? -1.0f : 1.0f;
+}
+
+template<int N, int BLOCK>
+inline void tq_structured_rotate_lo(thread float * x) {
+    for (int i = 0; i < N; i++) x[i] *= tq_struct_sign(i, N);
+    for (int j = 0; j < BLOCK; j++) {
+        float a = x[j], b = x[BLOCK + j], c = x[2*BLOCK + j];
+        x[j]          = tq_O3[0]*a + tq_O3[1]*b + tq_O3[2]*c;
+        x[BLOCK + j]  = tq_O3[3]*a + tq_O3[4]*b + tq_O3[5]*c;
+        x[2*BLOCK + j]= tq_O3[6]*a + tq_O3[7]*b + tq_O3[8]*c;
+    }
+    float tmp[N];
+    for (int i = 0; i < N; i++) tmp[(35*i + 17) % N] = x[i];
+    for (int i = 0; i < N; i++) x[i] = tmp[i];
+    tq_fwht<BLOCK>(x);
+    tq_fwht<BLOCK>(x + BLOCK);
+    tq_fwht<BLOCK>(x + 2*BLOCK);
+}
+
+template<int N, int BLOCK>
+inline void tq_structured_unrotate_lo(thread float * x) {
+    tq_fwht<BLOCK>(x);
+    tq_fwht<BLOCK>(x + BLOCK);
+    tq_fwht<BLOCK>(x + 2*BLOCK);
+    float tmp[N];
+    for (int i = 0; i < N; i++) tmp[i] = x[(35*i + 17) % N];
+    for (int i = 0; i < N; i++) x[i] = tmp[i];
+    for (int j = 0; j < BLOCK; j++) {
+        float a = x[j], b = x[BLOCK + j], c = x[2*BLOCK + j];
+        x[j]          = tq_O3[0]*a + tq_O3[3]*b + tq_O3[6]*c;
+        x[BLOCK + j]  = tq_O3[1]*a + tq_O3[4]*b + tq_O3[7]*c;
+        x[2*BLOCK + j]= tq_O3[2]*a + tq_O3[5]*b + tq_O3[8]*c;
+    }
+    for (int i = 0; i < N; i++) x[i] *= tq_struct_sign(i, N);
+}
+
 // Bit unpacking: 3-bit and 4-bit from device memory
 inline int tq_up3(device const uint8_t * q, int j) {
     int bp = j * 3, bi = bp >> 3, sh = bp & 7;
@@ -1308,7 +1361,7 @@ void dequantize_2hi_1lo_had(device const block_tqk_2hi_1lo * xb, short il, threa
             reg_f[i/4][i%4] = norm_hi * tq_c4_d32[tq_up2(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 96.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 96.0f * float(xb->rnorm_lo);
             int lo_j = j - 32;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg_f[i/4][i%4] = norm_lo * tq_c2_d96[tq_up1(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -1327,7 +1380,7 @@ void dequantize_2hi_1lo_had_t4(device const block_tqk_2hi_1lo * xb, short il, th
             reg[i] = norm_hi * tq_c4_d32[tq_up2(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 96.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 96.0f * float(xb->rnorm_lo);
             int lo_j = j - 32;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg[i] = norm_lo * tq_c2_d96[tq_up1(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -1348,7 +1401,7 @@ void dequantize_3hi_2lo_had(device const block_tqk_3hi_2lo * xb, short il, threa
             reg_f[i/4][i%4] = norm_hi * tq_c8_d32[tq_up3(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 96.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 96.0f * float(xb->rnorm_lo);
             int lo_j = j - 32;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg_f[i/4][i%4] = norm_lo * tq_c4_d96[tq_up2(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -1367,7 +1420,7 @@ void dequantize_3hi_2lo_had_t4(device const block_tqk_3hi_2lo * xb, short il, th
             reg[i] = norm_hi * tq_c8_d32[tq_up3(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 96.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 96.0f * float(xb->rnorm_lo);
             int lo_j = j - 32;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg[i] = norm_lo * tq_c4_d96[tq_up2(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -1533,7 +1586,7 @@ void dequantize_2hi_1lo_had_d256(device const block_tqk_2hi_1lo_d256 * xb, short
             reg_f[i/4][i%4] = norm_hi * tq_c4_d64[tq_up2(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 192.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 192.0f * float(xb->rnorm_lo);
             int lo_j = j - 64;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg_f[i/4][i%4] = norm_lo * tq_c2_d192[tq_up1(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -1552,7 +1605,7 @@ void dequantize_2hi_1lo_had_d256_t4(device const block_tqk_2hi_1lo_d256 * xb, sh
             reg[i] = norm_hi * tq_c4_d64[tq_up2(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 192.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 192.0f * float(xb->rnorm_lo);
             int lo_j = j - 64;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg[i] = norm_lo * tq_c2_d192[tq_up1(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -1573,7 +1626,7 @@ void dequantize_3hi_2lo_had_d256(device const block_tqk_3hi_2lo_d256 * xb, short
             reg_f[i/4][i%4] = norm_hi * tq_c8_d64[tq_up3(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 192.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 192.0f * float(xb->rnorm_lo);
             int lo_j = j - 64;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg_f[i/4][i%4] = norm_lo * tq_c4_d192[tq_up2(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -1592,7 +1645,7 @@ void dequantize_3hi_2lo_had_d256_t4(device const block_tqk_3hi_2lo_d256 * xb, sh
             reg[i] = norm_hi * tq_c8_d64[tq_up3(xb->qs_hi, j)] + qjl * sign;
         } else {
             float norm_lo = float(xb->norm_lo);
-            float qjl_lo = 1.2533141f / 192.0f * float(xb->rnorm_lo);
+            float qjl_lo = 1.2533141f * 1.7320508f / 192.0f * float(xb->rnorm_lo);
             int lo_j = j - 64;
             float sign_lo = ((xb->signs_lo[lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f;
             reg[i] = norm_lo * tq_c4_d192[tq_up2(xb->qs_lo, lo_j)] + qjl_lo * sign_lo;
@@ -6248,6 +6301,7 @@ void kernel_flash_attn_ext_impl(
         device const char * tq_chmap, // per-head channel permutation [n_kv_heads][DK] (TQ_SPLIT only)
         threadgroup  half * shmem_f16,
         threadgroup  uint8_t * tq_perm, // DK-byte scratch for channel permutation (TQ_SPLIT only)
+        threadgroup  half * tq_rot_tmp, // per-simd-group scratch for structured rotation permutation
         uint3   tgpig,
         ushort  tiisg,
         ushort  sgitg) {
@@ -6344,15 +6398,44 @@ void kernel_flash_attn_ext_impl(
                 }
             }
         }
-        // Apply (DK/sub_block_size)×FWHT_sub to permuted Q
-        FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
-            const short j = jj*NSG + sgitg;
-            if (iq1 + j < args.ne01) {
-                threadgroup half * sq_j = (threadgroup half *)(sq + j*DK);
-                for (short blki = 0; blki < DK; blki += DK/4) {
-                    tq_fwht_shared<DK/4>(sq_j + blki, tiisg);
+        // Apply rotation: FWHT on hi, structured rotation on lo
+        // Serialized across simd groups (shared scratch tq_rot_tmp)
+        for (short sg = 0; sg < NSG; ++sg) {
+            FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+                const short j = jj*NSG + sg;
+                if (sgitg == sg && iq1 + j < args.ne01) {
+                    threadgroup half * sq_j = (threadgroup half *)(sq + j*DK);
+                    constexpr short lo_off = DK/4;
+                    constexpr short lo_n = DK - lo_off;
+                    constexpr short blk_dim = lo_n / 3;
+
+                    // Hi block: plain FWHT
+                    tq_fwht_shared<DK/4>(sq_j, tiisg);
+
+                    // Lo: steps 1+2 fused (sign + O_3 mix) → scratch
+                    for (short col = tiisg; col < blk_dim; col += NW) {
+                        float a = float(sq_j[lo_off + col])             * tq_struct_sign(col, lo_n);
+                        float b = float(sq_j[lo_off + blk_dim + col])   * tq_struct_sign(blk_dim + col, lo_n);
+                        float c = float(sq_j[lo_off + 2*blk_dim + col]) * tq_struct_sign(2*blk_dim + col, lo_n);
+                        tq_rot_tmp[col]             = half(tq_O3[0]*a + tq_O3[1]*b + tq_O3[2]*c);
+                        tq_rot_tmp[blk_dim + col]   = half(tq_O3[3]*a + tq_O3[4]*b + tq_O3[5]*c);
+                        tq_rot_tmp[2*blk_dim + col] = half(tq_O3[6]*a + tq_O3[7]*b + tq_O3[8]*c);
+                    }
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+                    // Lo: step 3 — permutation
+                    for (short i = tiisg; i < lo_n; i += NW) {
+                        sq_j[lo_off + (35*i + 17) % lo_n] = tq_rot_tmp[i];
+                    }
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+                    // Lo: step 4 — 3 × FWHT
+                    for (short blki = 0; blki < lo_n; blki += blk_dim) {
+                        tq_fwht_shared<DK/4>(sq_j + lo_off + blki, tiisg);
+                    }
                 }
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     } else {
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
@@ -6964,10 +7047,11 @@ kernel void kernel_flash_attn_ext(
         uint3   tgpig[[threadgroup_position_in_grid]],
         ushort  tiisg[[thread_index_in_simdgroup]],
         ushort  sgitg[[simdgroup_index_in_threadgroup]]) {
-    threadgroup uint8_t tq_perm_buf[DK]; // scratch for TQ_SPLIT channel permutation
+    threadgroup uint8_t tq_perm_buf[DK];
+    threadgroup half tq_rot_buf[DK]; // scratch for structured rotation permutation step
 
 #define FWD_TMPL q_t, q4_t, q8x8_t, k_t, k4x4_t, k8x8_t, v_t, v4x4_t, v8x8_t, qk_t, qk8x8_t, s_t, s2_t, s8x8_t, o_t, o4_t, o8x8_t, kd4x4_t, nl_k, deq_k, vd4x4_t, nl_v, deq_v, DK, DV, Q, C
-#define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, tq_chmap, shmem_f16, tq_perm_buf, tgpig, tiisg, sgitg
+#define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, tq_chmap, shmem_f16, tq_perm_buf, tq_rot_buf, tgpig, tiisg, sgitg
     switch (FC_flash_attn_ext_nsg) {
       // note: disabled cases to reduce library load time
       //case 1: kernel_flash_attn_ext_impl<FWD_TMPL, 1, TQ_FWHT, TQ_SPLIT, TQ_FWHT_O>(FWD_ARGS); break;
@@ -7253,6 +7337,8 @@ kernel void kernel_flash_attn_ext_vec(
     static_assert(DK % 32 == 0, "DK must be divisible by 32");
     static_assert(DV % 32 == 0, "DV must be divisible by 32");
 
+    threadgroup half tq_vec_tmp[DK]; // scratch for structured rotation permutation step
+
 #define NWG  (FC_flash_attn_ext_vec_nwg)
 #define NSG  (FC_flash_attn_ext_vec_nsg)
 
@@ -7318,11 +7404,36 @@ kernel void kernel_flash_attn_ext_vec(
                 sq_h[i] = 0;
             }
         }
-        // Apply (DK/sub_block_size)×FWHT_sub
+        // Apply rotation: FWHT on hi, structured rotation on lo
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (sgitg == 0 && iq1 < args.ne01) {
-            for (short blki = 0; blki < DK; blki += DK/4) {
-                tq_fwht_shared<DK/4>(sq_h + blki, tiisg);
+            constexpr short lo_off = DK/4;
+            constexpr short lo_n = DK - lo_off;
+            constexpr short blk_dim = lo_n / 3;
+
+            // Hi: plain FWHT
+            tq_fwht_shared<DK/4>(sq_h, tiisg);
+
+            // Lo: steps 1+2 fused (sign + O_3 mix)
+            for (short col = tiisg; col < blk_dim; col += NW) {
+                float a = float(sq_h[lo_off + col])             * tq_struct_sign(col, lo_n);
+                float b = float(sq_h[lo_off + blk_dim + col])   * tq_struct_sign(blk_dim + col, lo_n);
+                float c = float(sq_h[lo_off + 2*blk_dim + col]) * tq_struct_sign(2*blk_dim + col, lo_n);
+                tq_vec_tmp[col]             = half(tq_O3[0]*a + tq_O3[1]*b + tq_O3[2]*c);
+                tq_vec_tmp[blk_dim + col]   = half(tq_O3[3]*a + tq_O3[4]*b + tq_O3[5]*c);
+                tq_vec_tmp[2*blk_dim + col] = half(tq_O3[6]*a + tq_O3[7]*b + tq_O3[8]*c);
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Lo: step 3 — permutation
+            for (short i = tiisg; i < lo_n; i += NW) {
+                sq_h[lo_off + (35*i + 17) % lo_n] = tq_vec_tmp[i];
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Lo: step 4 — 3 × FWHT
+            for (short blki = 0; blki < lo_n; blki += blk_dim) {
+                tq_fwht_shared<DK/4>(sq_h + lo_off + blki, tiisg);
             }
         }
     } else {
@@ -10338,13 +10449,10 @@ kernel void kernel_get_rows_5hi_3lo_had(
     float qjl_s = 1.2533141f / 32.0f * rnorm_hi;
     for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
 
-    // Dequant lo: centroid lookup → inverse FWHT → scale
+    // Dequant lo: centroid lookup → scale → structured unrotate
     thread float lo[96];
-    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d96[tq_up3(blk->qs_lo, j)];
-    tq_fwht<32>(lo);
-    tq_fwht<32>(lo + 32);
-    tq_fwht<32>(lo + 64);
-    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
+    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d96[tq_up3(blk->qs_lo, j)] * norm_lo;
+    tq_structured_unrotate_lo<96, 32>(lo);
 
     // Inverse permutation: place channels back in original positions
     device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
@@ -10384,9 +10492,8 @@ kernel void kernel_get_rows_6hi_3lo_had(
     float qjl_s = 1.2533141f / 32.0f * rnorm_hi;
     for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
     thread float lo[96];
-    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d96[tq_up3(blk->qs_lo, j)];
-    tq_fwht<32>(lo); tq_fwht<32>(lo + 32); tq_fwht<32>(lo + 64);
-    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
+    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d96[tq_up3(blk->qs_lo, j)] * norm_lo;
+    tq_structured_unrotate_lo<96, 32>(lo);
     device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
     for (int j = 0; j < 32; j++)  out[perm[j]]      = hi[j];
     for (int j = 0; j < 96; j++)  out[perm[32 + j]]  = lo[j];
@@ -10419,7 +10526,7 @@ kernel void kernel_set_rows_6hi_3lo_had(
     for (int j = 0; j < 32; j++) hi_rot[j] = hi_raw[j];
     tq_fwht<32>(hi_rot);
     for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j];
-    tq_fwht<32>(lo_rot); tq_fwht<32>(lo_rot + 32); tq_fwht<32>(lo_rot + 64);
+    tq_structured_rotate_lo<96, 32>(lo_rot);
     float sum_hi = 0, sum_lo = 0;
     for (int j = 0; j < 32; j++) sum_hi += hi_rot[j]*hi_rot[j];
     for (int j = 0; j < 96; j++) sum_lo += lo_rot[j]*lo_rot[j];
@@ -10485,14 +10592,13 @@ kernel void kernel_get_rows_2hi_1lo_had(
     float qjl_s_hi = 1.2533141f / 32.0f * rnorm_hi;
     for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s_hi * corr_hi[j];
     thread float lo[96];
-    for (int j = 0; j < 96; j++) lo[j] = tq_c2_d96[tq_up1(blk->qs_lo, j)];
-    tq_fwht<32>(lo); tq_fwht<32>(lo+32); tq_fwht<32>(lo+64);
-    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
+    for (int j = 0; j < 96; j++) lo[j] = tq_c2_d96[tq_up1(blk->qs_lo, j)] * norm_lo;
     thread float corr_lo[96];
     for (int j = 0; j < 96; j++) corr_lo[j] = ((blk->signs_lo[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f;
     tq_fwht<32>(corr_lo); tq_fwht<32>(corr_lo+32); tq_fwht<32>(corr_lo+64);
-    float qjl_s_lo = 1.2533141f / 96.0f * rnorm_lo;
+    float qjl_s_lo = 1.2533141f * 1.7320508f / 96.0f * rnorm_lo;
     for (int j = 0; j < 96; j++) lo[j] += qjl_s_lo * corr_lo[j];
+    tq_structured_unrotate_lo<96, 32>(lo);
     device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
     for (int j = 0; j < 32; j++) out[perm[j]] = hi[j];
     for (int j = 0; j < 96; j++) out[perm[32+j]] = lo[j];
@@ -10517,7 +10623,7 @@ kernel void kernel_set_rows_2hi_1lo_had(
     for (int j = 0; j < 96; j++) lo_raw[j] = src[perm[32+j]];
     thread float hi_rot[32], lo_rot[96];
     for (int j = 0; j < 32; j++) hi_rot[j] = hi_raw[j]; tq_fwht<32>(hi_rot);
-    for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j]; tq_fwht<32>(lo_rot); tq_fwht<32>(lo_rot+32); tq_fwht<32>(lo_rot+64);
+    for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j]; tq_structured_rotate_lo<96, 32>(lo_rot);
     float sum_hi=0, sum_lo=0;
     for (int j=0;j<32;j++) sum_hi+=hi_rot[j]*hi_rot[j];
     for (int j=0;j<96;j++) sum_lo+=lo_rot[j]*lo_rot[j];
@@ -10542,10 +10648,9 @@ kernel void kernel_set_rows_2hi_1lo_had(
     for (int j=0;j<4;j++) blk->signs_hi[j]=0;
     for (int j=0;j<32;j++) { if (r_hi[j]>=0) blk->signs_hi[j/8]|=(uint8_t)(1<<(j%8)); }
     blk->rnorm_hi=half(sqrt(rn_hi));
-    // QJL on lo
+    // QJL on lo (residual in rotated space)
     thread float ylo[96]; for (int j=0;j<96;j++) ylo[j]=tq_c2_d96[tq_up1(blk->qs_lo,j)];
-    thread float lo_rec[96]; for (int j=0;j<96;j++) lo_rec[j]=ylo[j]; tq_fwht<32>(lo_rec); tq_fwht<32>(lo_rec+32); tq_fwht<32>(lo_rec+64);
-    thread float r_lo[96]; for (int j=0;j<96;j++) r_lo[j]=lo_raw[j]-norm_lo*lo_rec[j];
+    thread float r_lo[96]; for (int j=0;j<96;j++) r_lo[j]=lo_rot[j]-norm_lo*ylo[j];
     float rn_lo=0; for (int j=0;j<96;j++) rn_lo+=r_lo[j]*r_lo[j]; tq_fwht<32>(r_lo); tq_fwht<32>(r_lo+32); tq_fwht<32>(r_lo+64);
     for (int j=0;j<12;j++) blk->signs_lo[j]=0;
     for (int j=0;j<96;j++) { if (r_lo[j]>=0) blk->signs_lo[j/8]|=(uint8_t)(1<<(j%8)); }
@@ -10583,14 +10688,13 @@ kernel void kernel_get_rows_3hi_2lo_had(
     float qjl_s_hi = 1.2533141f / 32.0f * rnorm_hi;
     for (int j = 0; j < 32; j++) hi[j] = norm_hi * hi[j] + qjl_s_hi * corr_hi[j];
     thread float lo[96];
-    for (int j = 0; j < 96; j++) lo[j] = tq_c4_d96[tq_up2(blk->qs_lo, j)];
-    tq_fwht<32>(lo); tq_fwht<32>(lo+32); tq_fwht<32>(lo+64);
-    for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
+    for (int j = 0; j < 96; j++) lo[j] = tq_c4_d96[tq_up2(blk->qs_lo, j)] * norm_lo;
     thread float corr_lo[96];
     for (int j = 0; j < 96; j++) corr_lo[j] = ((blk->signs_lo[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f;
     tq_fwht<32>(corr_lo); tq_fwht<32>(corr_lo+32); tq_fwht<32>(corr_lo+64);
-    float qjl_s_lo = 1.2533141f / 96.0f * rnorm_lo;
+    float qjl_s_lo = 1.2533141f * 1.7320508f / 96.0f * rnorm_lo;
     for (int j = 0; j < 96; j++) lo[j] += qjl_s_lo * corr_lo[j];
+    tq_structured_unrotate_lo<96, 32>(lo);
     device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
     for (int j = 0; j < 32; j++) out[perm[j]] = hi[j];
     for (int j = 0; j < 96; j++) out[perm[32+j]] = lo[j];
@@ -10615,7 +10719,7 @@ kernel void kernel_set_rows_3hi_2lo_had(
     for (int j = 0; j < 96; j++) lo_raw[j] = src[perm[32+j]];
     thread float hi_rot[32], lo_rot[96];
     for (int j = 0; j < 32; j++) hi_rot[j] = hi_raw[j]; tq_fwht<32>(hi_rot);
-    for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j]; tq_fwht<32>(lo_rot); tq_fwht<32>(lo_rot+32); tq_fwht<32>(lo_rot+64);
+    for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j]; tq_structured_rotate_lo<96, 32>(lo_rot);
     float sum_hi=0, sum_lo=0;
     for (int j=0;j<32;j++) sum_hi+=hi_rot[j]*hi_rot[j];
     for (int j=0;j<96;j++) sum_lo+=lo_rot[j]*lo_rot[j];
@@ -10640,10 +10744,9 @@ kernel void kernel_set_rows_3hi_2lo_had(
     for (int j=0;j<4;j++) blk->signs_hi[j]=0;
     for (int j=0;j<32;j++) { if (r_hi[j]>=0) blk->signs_hi[j/8]|=(uint8_t)(1<<(j%8)); }
     blk->rnorm_hi=half(sqrt(rn_hi));
-    // QJL on lo
+    // QJL on lo (residual in rotated space)
     thread float ylo[96]; for (int j=0;j<96;j++) ylo[j]=tq_c4_d96[tq_up2(blk->qs_lo,j)];
-    thread float lo_rec[96]; for (int j=0;j<96;j++) lo_rec[j]=ylo[j]; tq_fwht<32>(lo_rec); tq_fwht<32>(lo_rec+32); tq_fwht<32>(lo_rec+64);
-    thread float r_lo[96]; for (int j=0;j<96;j++) r_lo[j]=lo_raw[j]-norm_lo*lo_rec[j];
+    thread float r_lo[96]; for (int j=0;j<96;j++) r_lo[j]=lo_rot[j]-norm_lo*ylo[j];
     float rn_lo=0; for (int j=0;j<96;j++) rn_lo+=r_lo[j]*r_lo[j]; tq_fwht<32>(r_lo); tq_fwht<32>(r_lo+32); tq_fwht<32>(r_lo+64);
     for (int j=0;j<12;j++) blk->signs_lo[j]=0;
     for (int j=0;j<96;j++) { if (r_lo[j]>=0) blk->signs_lo[j/8]|=(uint8_t)(1<<(j%8)); }
@@ -10685,9 +10788,7 @@ kernel void kernel_set_rows_5hi_3lo_had(
     for (int j = 0; j < 32; j++) hi_rot[j] = hi_raw[j];
     tq_fwht<32>(hi_rot);
     for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j];
-    tq_fwht<32>(lo_rot);
-    tq_fwht<32>(lo_rot + 32);
-    tq_fwht<32>(lo_rot + 64);
+    tq_structured_rotate_lo<96, 32>(lo_rot);
 
     // Norms
     float sum_hi = 0.0f, sum_lo = 0.0f;
@@ -11095,9 +11196,7 @@ kernel void kernel_set_rows_5hi_3lo_had_d256(
     for (int j = 0; j < 64; j++) hi_rot[j] = hi_raw[j];
     tq_fwht<64>(hi_rot);
     for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j];
-    tq_fwht<64>(lo_rot);
-    tq_fwht<64>(lo_rot + 64);
-    tq_fwht<64>(lo_rot + 128);
+    tq_structured_rotate_lo<192, 64>(lo_rot);
 
     // Norms
     float sum_hi = 0.0f, sum_lo = 0.0f;
@@ -11181,9 +11280,8 @@ kernel void kernel_get_rows_6hi_3lo_had_d256(
     float qjl_s = 1.2533141f / 64.0f * rnorm_hi;
     for (int j = 0; j < 64; j++) hi[j] = norm_hi * hi[j] + qjl_s * corr[j];
     thread float lo[192];
-    for (int j = 0; j < 192; j++) lo[j] = tq_c8_d192[tq_up3(blk->qs_lo, j)];
-    tq_fwht<64>(lo); tq_fwht<64>(lo + 64); tq_fwht<64>(lo + 128);
-    for (int j = 0; j < 192; j++) lo[j] *= norm_lo;
+    for (int j = 0; j < 192; j++) lo[j] = tq_c8_d192[tq_up3(blk->qs_lo, j)] * norm_lo;
+    tq_structured_unrotate_lo<192, 64>(lo);
     device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
     for (int j = 0; j < 64; j++)  out[perm[j]]      = hi[j];
     for (int j = 0; j < 192; j++) out[perm[64 + j]]  = lo[j];
@@ -11212,7 +11310,7 @@ kernel void kernel_set_rows_6hi_3lo_had_d256(
     for (int j = 0; j < 192; j++) lo_raw[j] = src[perm[64 + j]];
     thread float hi_rot[64], lo_rot[192];
     for (int j = 0; j < 64; j++) hi_rot[j] = hi_raw[j]; tq_fwht<64>(hi_rot);
-    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j]; tq_fwht<64>(lo_rot); tq_fwht<64>(lo_rot + 64); tq_fwht<64>(lo_rot + 128);
+    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j]; tq_structured_rotate_lo<192, 64>(lo_rot);
     float sum_hi = 0, sum_lo = 0;
     for (int j = 0; j < 64; j++)  sum_hi += hi_rot[j]*hi_rot[j];
     for (int j = 0; j < 192; j++) sum_lo += lo_rot[j]*lo_rot[j];
@@ -11280,14 +11378,13 @@ kernel void kernel_get_rows_2hi_1lo_had_d256(
     float qjl_s_hi = 1.2533141f / 64.0f * rnorm_hi;
     for (int j = 0; j < 64; j++) hi[j] = norm_hi * hi[j] + qjl_s_hi * corr_hi[j];
     thread float lo[192];
-    for (int j = 0; j < 192; j++) lo[j] = tq_c2_d192[tq_up1(blk->qs_lo, j)];
-    tq_fwht<64>(lo); tq_fwht<64>(lo+64); tq_fwht<64>(lo+128);
-    for (int j = 0; j < 192; j++) lo[j] *= norm_lo;
+    for (int j = 0; j < 192; j++) lo[j] = tq_c2_d192[tq_up1(blk->qs_lo, j)] * norm_lo;
     thread float corr_lo[192];
     for (int j = 0; j < 192; j++) corr_lo[j] = ((blk->signs_lo[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f;
     tq_fwht<64>(corr_lo); tq_fwht<64>(corr_lo+64); tq_fwht<64>(corr_lo+128);
-    float qjl_s_lo = 1.2533141f / 192.0f * rnorm_lo;
+    float qjl_s_lo = 1.2533141f * 1.7320508f / 192.0f * rnorm_lo;
     for (int j = 0; j < 192; j++) lo[j] += qjl_s_lo * corr_lo[j];
+    tq_structured_unrotate_lo<192, 64>(lo);
     device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
     for (int j = 0; j < 64; j++)  out[perm[j]] = hi[j];
     for (int j = 0; j < 192; j++) out[perm[64+j]] = lo[j];
@@ -11312,7 +11409,7 @@ kernel void kernel_set_rows_2hi_1lo_had_d256(
     for (int j = 0; j < 192; j++) lo_raw[j] = src[perm[64+j]];
     thread float hi_rot[64], lo_rot[192];
     for (int j = 0; j < 64; j++) hi_rot[j] = hi_raw[j]; tq_fwht<64>(hi_rot);
-    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j]; tq_fwht<64>(lo_rot); tq_fwht<64>(lo_rot+64); tq_fwht<64>(lo_rot+128);
+    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j]; tq_structured_rotate_lo<192, 64>(lo_rot);
     float sum_hi=0, sum_lo=0;
     for (int j=0;j<64;j++) sum_hi+=hi_rot[j]*hi_rot[j];
     for (int j=0;j<192;j++) sum_lo+=lo_rot[j]*lo_rot[j];
@@ -11337,10 +11434,9 @@ kernel void kernel_set_rows_2hi_1lo_had_d256(
     for (int j=0;j<8;j++) blk->signs_hi[j]=0;
     for (int j=0;j<64;j++) { if (r_hi[j]>=0) blk->signs_hi[j/8]|=(uint8_t)(1<<(j%8)); }
     blk->rnorm_hi=half(sqrt(rn_hi));
-    // QJL on lo
+    // QJL on lo (residual in rotated space)
     thread float ylo[192]; for (int j=0;j<192;j++) ylo[j]=tq_c2_d192[tq_up1(blk->qs_lo,j)];
-    thread float lo_rec[192]; for (int j=0;j<192;j++) lo_rec[j]=ylo[j]; tq_fwht<64>(lo_rec); tq_fwht<64>(lo_rec+64); tq_fwht<64>(lo_rec+128);
-    thread float r_lo[192]; for (int j=0;j<192;j++) r_lo[j]=lo_raw[j]-norm_lo*lo_rec[j];
+    thread float r_lo[192]; for (int j=0;j<192;j++) r_lo[j]=lo_rot[j]-norm_lo*ylo[j];
     float rn_lo=0; for (int j=0;j<192;j++) rn_lo+=r_lo[j]*r_lo[j]; tq_fwht<64>(r_lo); tq_fwht<64>(r_lo+64); tq_fwht<64>(r_lo+128);
     for (int j=0;j<24;j++) blk->signs_lo[j]=0;
     for (int j=0;j<192;j++) { if (r_lo[j]>=0) blk->signs_lo[j/8]|=(uint8_t)(1<<(j%8)); }
@@ -11377,14 +11473,13 @@ kernel void kernel_get_rows_3hi_2lo_had_d256(
     float qjl_s_hi = 1.2533141f / 64.0f * rnorm_hi;
     for (int j = 0; j < 64; j++) hi[j] = norm_hi * hi[j] + qjl_s_hi * corr_hi[j];
     thread float lo[192];
-    for (int j = 0; j < 192; j++) lo[j] = tq_c4_d192[tq_up2(blk->qs_lo, j)];
-    tq_fwht<64>(lo); tq_fwht<64>(lo+64); tq_fwht<64>(lo+128);
-    for (int j = 0; j < 192; j++) lo[j] *= norm_lo;
+    for (int j = 0; j < 192; j++) lo[j] = tq_c4_d192[tq_up2(blk->qs_lo, j)] * norm_lo;
     thread float corr_lo[192];
     for (int j = 0; j < 192; j++) corr_lo[j] = ((blk->signs_lo[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f;
     tq_fwht<64>(corr_lo); tq_fwht<64>(corr_lo+64); tq_fwht<64>(corr_lo+128);
-    float qjl_s_lo = 1.2533141f / 192.0f * rnorm_lo;
+    float qjl_s_lo = 1.2533141f * 1.7320508f / 192.0f * rnorm_lo;
     for (int j = 0; j < 192; j++) lo[j] += qjl_s_lo * corr_lo[j];
+    tq_structured_unrotate_lo<192, 64>(lo);
     device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
     for (int j = 0; j < 64; j++)  out[perm[j]] = hi[j];
     for (int j = 0; j < 192; j++) out[perm[64+j]] = lo[j];
@@ -11409,7 +11504,7 @@ kernel void kernel_set_rows_3hi_2lo_had_d256(
     for (int j = 0; j < 192; j++) lo_raw[j] = src[perm[64+j]];
     thread float hi_rot[64], lo_rot[192];
     for (int j = 0; j < 64; j++) hi_rot[j] = hi_raw[j]; tq_fwht<64>(hi_rot);
-    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j]; tq_fwht<64>(lo_rot); tq_fwht<64>(lo_rot+64); tq_fwht<64>(lo_rot+128);
+    for (int j = 0; j < 192; j++) lo_rot[j] = lo_raw[j]; tq_structured_rotate_lo<192, 64>(lo_rot);
     float sum_hi=0, sum_lo=0;
     for (int j=0;j<64;j++) sum_hi+=hi_rot[j]*hi_rot[j];
     for (int j=0;j<192;j++) sum_lo+=lo_rot[j]*lo_rot[j];
@@ -11434,10 +11529,9 @@ kernel void kernel_set_rows_3hi_2lo_had_d256(
     for (int j=0;j<8;j++) blk->signs_hi[j]=0;
     for (int j=0;j<64;j++) { if (r_hi[j]>=0) blk->signs_hi[j/8]|=(uint8_t)(1<<(j%8)); }
     blk->rnorm_hi=half(sqrt(rn_hi));
-    // QJL on lo
+    // QJL on lo (residual in rotated space)
     thread float ylo[192]; for (int j=0;j<192;j++) ylo[j]=tq_c4_d192[tq_up2(blk->qs_lo,j)];
-    thread float lo_rec[192]; for (int j=0;j<192;j++) lo_rec[j]=ylo[j]; tq_fwht<64>(lo_rec); tq_fwht<64>(lo_rec+64); tq_fwht<64>(lo_rec+128);
-    thread float r_lo[192]; for (int j=0;j<192;j++) r_lo[j]=lo_raw[j]-norm_lo*lo_rec[j];
+    thread float r_lo[192]; for (int j=0;j<192;j++) r_lo[j]=lo_rot[j]-norm_lo*ylo[j];
     float rn_lo=0; for (int j=0;j<192;j++) rn_lo+=r_lo[j]*r_lo[j]; tq_fwht<64>(r_lo); tq_fwht<64>(r_lo+64); tq_fwht<64>(r_lo+128);
     for (int j=0;j<24;j++) blk->signs_lo[j]=0;
     for (int j=0;j<192;j++) { if (r_lo[j]>=0) blk->signs_lo[j/8]|=(uint8_t)(1<<(j%8)); }
