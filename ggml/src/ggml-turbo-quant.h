@@ -54,6 +54,14 @@ void tq_upload_channel_maps_to_devices(void);
 // Returns NULL if not built. Layout: [n_layers][n_heads][head_dim] int32.
 const int * tq_get_global_channel_map(int * out_n_layers, int * out_n_heads);
 
+// Per-layer KV cache type recommendations (from calibration)
+// type_index: 0=tqk3_sj, 1=tqk3_sjj, 2=tqk4_sj, 3=q8_0
+void tq_set_layer_type_recommendations(const uint8_t * types, const float * outlier_pcts, int n_layers);
+int  tq_get_layer_type_index(int layer);           // returns type_index or -1 if not set
+float tq_get_layer_outlier_pct(int layer);          // returns outlier% or -1 if not set
+int  tq_get_n_recommended_layers(void);             // returns n_layers or 0 if not set
+void tq_free_layer_type_recommendations(void);
+
 // Layer/head context for quantize/dequant/vec_dot (thread-local)
 void tq_set_current_layer(int layer, int is_k);
 void tq_set_current_head(int head);

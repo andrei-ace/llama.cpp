@@ -298,6 +298,43 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "  layer %2d: %lld vectors\n", l, (long long)g_calib.counts[old_cidx]);
     }
 
+    // Compute outlier concentration per layer (averaged across heads)
+    std::vector<float> outlier_pct(n_kv_layers, 0.0f);
+    for (int l = 0; l < n_kv_layers; l++) {
+        int old_cidx = kv_cidx_map[l];
+        int64_t n = std::max(g_calib.counts[old_cidx], (int64_t)1);
+        double total_var = 0, hi_var = 0;
+        for (int h = 0; h < n_kv_heads; h++) {
+            size_t off = ((size_t)old_cidx * n_kv_heads + h) * head_dim;
+            const double * sv = g_calib.sum_val.data() + off;
+            const double * ss = g_calib.sum_sq.data()  + off;
+            const uint8_t * perm = all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim;
+            for (int d = 0; d < head_dim; d++) {
+                double var = ss[d] / n - (sv[d] / n) * (sv[d] / n);
+                if (var < 0) var = 0;
+                total_var += var;
+            }
+            for (int d = 0; d < n_hi; d++) {
+                int ch = perm[d];
+                double var = ss[ch] / n - (sv[ch] / n) * (sv[ch] / n);
+                if (var < 0) var = 0;
+                hi_var += var;
+            }
+        }
+        outlier_pct[l] = (float)(100.0 * hi_var / (total_var + 1e-30));
+    }
+
+    // Compute recommended types per layer
+    // Map: 0 = tqk3_sj, 1 = tqk3_sjj, 2 = tqk4_sj, 3 = q8_0
+    std::vector<uint8_t> layer_types(n_kv_layers);
+    for (int l = 0; l < n_kv_layers; l++) {
+        float pct = outlier_pct[l];
+        if (pct > 90.0f)      layer_types[l] = 3;  // q8_0 for extreme outliers
+        else if (pct > 65.0f)  layer_types[l] = 1;  // tqk3_sjj for moderate
+        else                    layer_types[l] = 0;  // tqk3_sj for uniform
+        fprintf(stderr, "  layer %2d: outlier=%.1f%% -> type %d\n", l, pct, layer_types[l]);
+    }
+
     // --stats: dump per-channel statistics to CSV for visualization
     if (!stats_path.empty()) {
         FILE * sf = fopen(stats_path.c_str(), "w");
@@ -391,12 +428,43 @@ int main(int argc, char ** argv) {
     fwrite(&pr, 4, 1, fp); fwrite(&nlm, 4, 1, fp);
     for (int il = 0; il < n_layer; il++) { int32_t idx = final_layer_map[il]; fwrite(&idx, 4, 1, fp); }
     fwrite(all_perms.data(), 1, all_perms.size(), fp);
+
+    // Append per-layer type recommendations (backward compatible — old readers stop at perms)
+    {
+        uint32_t type_magic = 0x54514C54; // "TQLT"
+        uint32_t n_type_entries = n_kv_layers;
+        fwrite(&type_magic, 4, 1, fp);
+        fwrite(&n_type_entries, 4, 1, fp);
+        fwrite(layer_types.data(), 1, n_kv_layers, fp);
+        fwrite(outlier_pct.data(), sizeof(float), n_kv_layers, fp);
+    }
     fclose(fp);
 
+    size_t type_section_size = 4 + 4 + n_kv_layers + n_kv_layers * sizeof(float);
     fprintf(stderr, "saved %zu bytes to '%s' (%d layers × %d heads × %d ch, %s)\n",
-            28 + n_layer*4 + all_perms.size(), output_path.c_str(),
+            28 + n_layer*4 + all_perms.size() + type_section_size, output_path.c_str(),
             n_kv_layers, n_kv_heads, head_dim, pre_rope ? "pre-RoPE" : "post-RoPE");
     fprintf(stderr, "outlier channels per head: %d (top %d%%)\n", n_hi, 100*n_hi/head_dim);
+
+    // Print per-layer type recommendation summary
+    {
+        int n_q8 = 0, n_sjj = 0, n_sj = 0;
+        float total_bpv = 0;
+        for (int l = 0; l < n_kv_layers; l++) {
+            float bpv;
+            switch (layer_types[l]) {
+                case 0: n_sj++;  bpv = 3.875f; break;
+                case 1: n_sjj++; bpv = 3.750f; break;
+                case 2: n_sj++;  bpv = 4.125f; break;
+                case 3: n_q8++;  bpv = 8.500f; break;
+                default: bpv = 4.0f; break;
+            }
+            total_bpv += bpv;
+        }
+        fprintf(stderr, "\nPer-layer type recommendation:\n");
+        fprintf(stderr, "  q8_0: %d layers, tqk3_sjj: %d layers, tqk3_sj: %d layers\n", n_q8, n_sjj, n_sj);
+        fprintf(stderr, "  Average K bpv: %.3f\n", total_bpv / n_kv_layers);
+    }
     fprintf(stderr, "sample layer 0, head 0: ");
     for (int i = 0; i < n_hi && i < 16; i++) fprintf(stderr, "%d ", all_perms[i]);
     if (n_hi > 16) fprintf(stderr, "...");

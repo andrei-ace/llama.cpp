@@ -182,6 +182,11 @@ static int tq_n_heads  = 0;
 static uint32_t * tq_k_outlier_mask = NULL;  // [n_layers * n_heads * words_per_head]
 static uint32_t * tq_v_outlier_mask = NULL;
 
+// Per-layer type recommendations from calibration
+static uint8_t * tq_layer_type_indices = NULL;  // [n_rec_layers] type index: 0=tqk3_sj, 1=tqk3_sjj, 2=tqk4_sj, 3=q8_0
+static float   * tq_layer_outlier_pcts = NULL;  // [n_rec_layers] outlier concentration %
+static int       tq_n_rec_layers       = 0;
+
 // Accessor macros for flat dynamic arrays
 #define TQ_MASK_K(l, h)     (tq_k_outlier_mask + ((l) * tq_n_heads + (h)) * (tq_head_dim / 32))
 #define TQ_MASK_V(l, h)     (tq_v_outlier_mask + ((l) * tq_n_heads + (h)) * (tq_head_dim / 32))
@@ -729,6 +734,44 @@ static void dequant_lo_mse(const uint8_t * qs, const float * c, int bits, int n_
 // ---------------------------------------------------------------------------
 // Public API: per-layer outlier calibration
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Per-layer type recommendations
+// ---------------------------------------------------------------------------
+
+void tq_set_layer_type_recommendations(const uint8_t * types, const float * outlier_pcts, int n_layers) {
+    tq_free_layer_type_recommendations();
+    if (n_layers <= 0 || !types) return;
+    tq_n_rec_layers = n_layers;
+    tq_layer_type_indices = (uint8_t *)malloc(n_layers);
+    memcpy(tq_layer_type_indices, types, n_layers);
+    if (outlier_pcts) {
+        tq_layer_outlier_pcts = (float *)malloc(n_layers * sizeof(float));
+        memcpy(tq_layer_outlier_pcts, outlier_pcts, n_layers * sizeof(float));
+    }
+}
+
+int tq_get_layer_type_index(int layer) {
+    if (!tq_layer_type_indices || layer < 0 || layer >= tq_n_rec_layers) return -1;
+    return (int)tq_layer_type_indices[layer];
+}
+
+float tq_get_layer_outlier_pct(int layer) {
+    if (!tq_layer_outlier_pcts || layer < 0 || layer >= tq_n_rec_layers) return -1.0f;
+    return tq_layer_outlier_pcts[layer];
+}
+
+int tq_get_n_recommended_layers(void) {
+    return tq_n_rec_layers;
+}
+
+void tq_free_layer_type_recommendations(void) {
+    free(tq_layer_type_indices);
+    free(tq_layer_outlier_pcts);
+    tq_layer_type_indices = NULL;
+    tq_layer_outlier_pcts = NULL;
+    tq_n_rec_layers = 0;
+}
 
 // ---------------------------------------------------------------------------
 

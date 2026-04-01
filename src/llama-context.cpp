@@ -2942,7 +2942,7 @@ llama_context * llama_init_from_model(
         params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
     }
 
-    if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO && ggml_is_quantized(params.type_k)) {
+    if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO && params.type_k != GGML_TYPE_TQK_AUTO && ggml_is_quantized(params.type_k)) {
         const uint32_t blck_size = ggml_blck_size(params.type_k);
         for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
             if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
@@ -2971,7 +2971,8 @@ llama_context * llama_init_from_model(
 
     // TurboQuant types require Flash Attention
     {
-        const bool tq_k = (params.type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_k <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256);
+        const bool tq_k = (params.type_k == GGML_TYPE_TQK_AUTO) ||
+                          (params.type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_k <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256);
         const bool tq_v = (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256);
         if (tq_k || tq_v) {
             if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {

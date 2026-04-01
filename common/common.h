@@ -551,6 +551,10 @@ struct common_params {
 
     std::string tq_perms_file; // TurboQuant channel permutation file (from tq-calibrate)
 
+    // Per-layer K cache types loaded from calibration (populated when -ctk tqk is used)
+    // Indexed by KV cache layer index (compacted, not model layer index)
+    std::vector<ggml_type> tq_layer_k_types;
+
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 
     // multimodal models (see tools/mtmd)

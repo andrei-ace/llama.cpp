@@ -10,6 +10,8 @@ extern "C" {
     void tq_init_outlier_masks(int n_layers, int n_heads, int head_dim);
     void tq_set_outlier_mask_from_perm(int layer, int head, const uint8_t * perm, int head_dim);
     void tq_free_outlier_masks(void);
+    int  tq_get_layer_type_index(int layer);
+    int  tq_get_n_recommended_layers(void);
 }
 
 #include <algorithm>
@@ -19,6 +21,19 @@ extern "C" {
 #include <limits>
 #include <map>
 #include <stdexcept>
+
+// Map per-layer type index from calibration to actual ggml_type
+// type_index: 0=tqk3_sj, 1=tqk3_sjj, 2=tqk4_sj, 3=q8_0
+static ggml_type tq_type_index_to_ggml(int type_index, uint32_t head_dim) {
+    const bool d256 = (head_dim == 256);
+    switch (type_index) {
+        case 0: return d256 ? GGML_TYPE_TQK_5HI_3LO_HAD_D256 : GGML_TYPE_TQK_5HI_3LO_HAD;   // tqk3_sj
+        case 1: return d256 ? GGML_TYPE_TQK_3HI_2LO_HAD_D256 : GGML_TYPE_TQK_3HI_2LO_HAD;   // tqk3_sjj
+        case 2: return d256 ? GGML_TYPE_TQK_6HI_3LO_HAD_D256 : GGML_TYPE_TQK_6HI_3LO_HAD;   // tqk4_sj
+        case 3: return GGML_TYPE_Q8_0;
+        default: return d256 ? GGML_TYPE_TQK_5HI_3LO_HAD_D256 : GGML_TYPE_TQK_5HI_3LO_HAD;  // fallback: tqk3_sj
+    }
+}
 
 //
 // llama_kv_cache
@@ -107,10 +122,11 @@ llama_kv_cache::llama_kv_cache(
     const bool is_mla = hparams.is_mla();
 
     // TurboQuant: auto-detect head dimension and remap types for d=256
+    const bool tqk_auto = (type_k == GGML_TYPE_TQK_AUTO);
     {
         const uint32_t head_dim = hparams.n_embd_head_k(0);
         tq_set_head_dim((int)head_dim);
-        if (head_dim == 256) {
+        if (!tqk_auto && head_dim == 256) {
             if (type_k == GGML_TYPE_TQK_HAD_MSE4)     type_k = GGML_TYPE_TQK_HAD_MSE4_D256;
             if (type_k == GGML_TYPE_TQK_HAD_PROD5)    type_k = GGML_TYPE_TQK_HAD_PROD5_D256;
             if (type_k == GGML_TYPE_TQK_HAD_PROD4)    type_k = GGML_TYPE_TQK_HAD_PROD4_D256;
@@ -119,9 +135,15 @@ llama_kv_cache::llama_kv_cache(
             if (type_k == GGML_TYPE_TQK_6HI_3LO_HAD_JJ)  type_k = GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256;
             if (type_k == GGML_TYPE_TQK_2HI_1LO_HAD)   type_k = GGML_TYPE_TQK_2HI_1LO_HAD_D256;
             if (type_k == GGML_TYPE_TQK_3HI_2LO_HAD)   type_k = GGML_TYPE_TQK_3HI_2LO_HAD_D256;
+        }
+        if (head_dim == 256) {
             if (type_v == GGML_TYPE_TQV_HAD_MSE4)      type_v = GGML_TYPE_TQV_HAD_MSE4_D256;
         }
     }
+
+    // For TQK_AUTO, build per-layer type lookup from calibration recommendations
+    const int n_rec = tqk_auto ? tq_get_n_recommended_layers() : 0;
+    uint32_t kv_layer_idx = 0; // tracks compacted KV layer index for type recommendations
 
     for (uint32_t il = 0; il < hparams.n_layer; il++) {
         if (!hparams.has_kv(il)) {
@@ -132,6 +154,24 @@ llama_kv_cache::llama_kv_cache(
         if (filter && !filter(il)) {
             LLAMA_LOG_DEBUG("%s: layer %3d: filtered\n", __func__, il);
             continue;
+        }
+
+        // Resolve per-layer K cache type for TQK_AUTO mode
+        ggml_type layer_type_k = type_k;
+        if (tqk_auto) {
+            const uint32_t head_dim = hparams.n_embd_head_k(0);
+            if ((int)kv_layer_idx < n_rec) {
+                int ti = tq_get_layer_type_index((int)kv_layer_idx);
+                layer_type_k = tq_type_index_to_ggml(ti, head_dim);
+                LLAMA_LOG_INFO("%s: layer %3d (kv %2d): K type = %s (type_idx=%d)\n",
+                        __func__, il, kv_layer_idx, ggml_type_name(layer_type_k), ti);
+            } else {
+                // Fallback: use tqk3_sj if recommendation index out of range
+                layer_type_k = tq_type_index_to_ggml(0, head_dim);
+                LLAMA_LOG_WARN("%s: layer %3d: no type recommendation, using %s\n",
+                        __func__, il, ggml_type_name(layer_type_k));
+            }
+            kv_layer_idx++;
         }
 
         // [TAG_V_CACHE_VARIABLE]
@@ -159,7 +199,7 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
         has_k && ggml_format_name(k, "cache_k_l%d", il);
@@ -225,7 +265,8 @@ llama_kv_cache::llama_kv_cache(
 
     // TurboQuant: generate rotation matrices and init outlier masks
     {
-        const bool uses_turbo = (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256)
+        const bool uses_turbo = tqk_auto
+                             || (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256)
                              || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256);
         if (uses_turbo && !hparams.no_alloc) {
             const uint32_t head_dim = hparams.n_embd_head_k(0);
@@ -311,9 +352,10 @@ llama_kv_cache::llama_kv_cache(
         const size_t memory_size_k = size_k_bytes();
         const size_t memory_size_v = size_v_bytes();
 
+        const char * k_type_str = tqk_auto ? "tqk (auto per-layer)" : ggml_type_name(type_k);
         LLAMA_LOG_INFO("%s: size = %7.2f MiB (%6u cells, %3d layers, %2u/%u seqs), K (%s): %7.2f MiB, V (%s): %7.2f MiB\n", __func__,
                 (float)(memory_size_k + memory_size_v) / (1024.0f * 1024.0f), kv_size, (int) layers.size(), n_seq_max, n_stream,
-                ggml_type_name(type_k), (float)memory_size_k / (1024.0f * 1024.0f),
+                k_type_str, (float)memory_size_k / (1024.0f * 1024.0f),
                 ggml_type_name(type_v), (float)memory_size_v / (1024.0f * 1024.0f));
     }
 

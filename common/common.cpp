@@ -10,6 +10,9 @@
 extern "C" {
     void tq_set_outlier_mask_from_perm(int layer, int head, const uint8_t * perm, int head_dim);
     void tq_upload_channel_maps_to_devices(void);
+    void tq_set_layer_type_recommendations(const uint8_t * types, const float * outlier_pcts, int n_layers);
+    int  tq_get_layer_type_index(int layer);
+    int  tq_get_n_recommended_layers(void);
 }
 
 #include <algorithm>
@@ -1230,6 +1233,57 @@ common_init_result::common_init_result(common_params & params) :
         cparams.n_samplers = pimpl->samplers_seq_config.size();
     }
 
+    // TurboQuant auto: pre-load per-layer type recommendations before context creation
+    // so the KV cache allocator can use per-layer types
+    if (cparams.type_k == GGML_TYPE_TQK_AUTO && !params.tq_perms_file.empty()) {
+        FILE * fp = fopen(params.tq_perms_file.c_str(), "rb");
+        if (!fp) {
+            LOG_ERR("%s: -ctk tqk requires --tq-perms file, failed to open '%s'\n",
+                    __func__, params.tq_perms_file.c_str());
+            return;
+        }
+        uint32_t magic, version, nl, nh, hd, pr, nlm;
+        fread(&magic,   4, 1, fp);
+        fread(&version, 4, 1, fp);
+        fread(&nl,      4, 1, fp);
+        fread(&nh,      4, 1, fp);
+        fread(&hd,      4, 1, fp);
+        fread(&pr,      4, 1, fp);
+        fread(&nlm,     4, 1, fp);
+
+        if (magic != 0x54515045 || version != 1) {
+            LOG_ERR("%s: invalid TQ perms file for auto mode\n", __func__);
+            fclose(fp);
+            return;
+        }
+        // Skip layer map and permutations to reach type section
+        fseek(fp, nlm * 4 + (size_t)nl * nh * hd, SEEK_CUR);
+
+        uint32_t type_magic = 0;
+        if (fread(&type_magic, 4, 1, fp) == 1 && type_magic == 0x54514C54) {
+            uint32_t n_entries = 0;
+            fread(&n_entries, 4, 1, fp);
+            std::vector<uint8_t> layer_type_indices(n_entries);
+            std::vector<float>   layer_outlier_pcts(n_entries);
+            fread(layer_type_indices.data(), 1, n_entries, fp);
+            fread(layer_outlier_pcts.data(), sizeof(float), n_entries, fp);
+
+            tq_set_layer_type_recommendations(
+                layer_type_indices.data(), layer_outlier_pcts.data(), (int)n_entries);
+
+            LOG_INF("%s: pre-loaded per-layer type recommendations (%u layers) for -ctk tqk\n",
+                    __func__, n_entries);
+        } else {
+            LOG_ERR("%s: -ctk tqk requires per-layer type recommendations in perms file (not found)\n", __func__);
+            fclose(fp);
+            return;
+        }
+        fclose(fp);
+    } else if (cparams.type_k == GGML_TYPE_TQK_AUTO && params.tq_perms_file.empty()) {
+        LOG_ERR("%s: -ctk tqk requires --tq-perms file with per-layer type recommendations\n", __func__);
+        return;
+    }
+
     llama_context * lctx = llama_init_from_model(model, cparams);
     if (lctx == NULL) {
         LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());
@@ -1304,6 +1358,24 @@ common_init_result_ptr common_init_from_params(common_params & params) {
                 // Read permutations and apply
                 std::vector<uint8_t> all_perms((size_t)nl * nh * hd);
                 fread(all_perms.data(), 1, all_perms.size(), fp);
+
+                // Try to read per-layer type recommendations (optional, backward compatible)
+                uint32_t type_magic = 0;
+                if (fread(&type_magic, 4, 1, fp) == 1 && type_magic == 0x54514C54) {
+                    uint32_t n_entries = 0;
+                    fread(&n_entries, 4, 1, fp);
+                    std::vector<uint8_t> layer_type_indices(n_entries);
+                    std::vector<float>   layer_outlier_pcts(n_entries);
+                    fread(layer_type_indices.data(), 1, n_entries, fp);
+                    fread(layer_outlier_pcts.data(), sizeof(float), n_entries, fp);
+
+                    // Store in global turbo-quant state
+                    tq_set_layer_type_recommendations(
+                        layer_type_indices.data(), layer_outlier_pcts.data(), (int)n_entries);
+
+                    LOG_INF("%s: loaded per-layer type recommendations (%u layers)\n",
+                            __func__, n_entries);
+                }
                 fclose(fp);
 
                 // tq_init_outlier_masks was already called in KV cache constructor

@@ -401,6 +401,10 @@ const std::vector<ggml_type> kv_cache_types = {
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {
+    // Special case: "tqk" maps to per-layer auto-select from calibration
+    if (s == "tqk") {
+        return GGML_TYPE_TQK_AUTO;
+    }
     for (const auto & type : kv_cache_types) {
         if (ggml_type_name(type) == s) {
             return type;
@@ -412,8 +416,9 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
 static std::string get_all_kv_cache_types() {
     std::ostringstream msg;
     for (const auto & type : kv_cache_types) {
-        msg << ggml_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
+        msg << ggml_type_name(type) << ", ";
     }
+    msg << "tqk";  // per-layer auto-select from calibration
     return msg.str();
 }
 
