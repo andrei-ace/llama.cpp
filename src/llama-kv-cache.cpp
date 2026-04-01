@@ -115,6 +115,9 @@ llama_kv_cache::llama_kv_cache(
             if (type_k == GGML_TYPE_TQK_HAD_PROD5)    type_k = GGML_TYPE_TQK_HAD_PROD5_D256;
             if (type_k == GGML_TYPE_TQK_HAD_PROD4)    type_k = GGML_TYPE_TQK_HAD_PROD4_D256;
             if (type_k == GGML_TYPE_TQK_5HI_3LO_HAD)  type_k = GGML_TYPE_TQK_5HI_3LO_HAD_D256;
+            if (type_k == GGML_TYPE_TQK_6HI_3LO_HAD)  type_k = GGML_TYPE_TQK_6HI_3LO_HAD_D256;
+            if (type_k == GGML_TYPE_TQK_2HI_1LO_HAD)   type_k = GGML_TYPE_TQK_2HI_1LO_HAD_D256;
+            if (type_k == GGML_TYPE_TQK_3HI_2LO_HAD)   type_k = GGML_TYPE_TQK_3HI_2LO_HAD_D256;
             if (type_v == GGML_TYPE_TQV_HAD_MSE4)      type_v = GGML_TYPE_TQV_HAD_MSE4_D256;
         }
     }
@@ -221,8 +224,8 @@ llama_kv_cache::llama_kv_cache(
 
     // TurboQuant: generate rotation matrices and init outlier masks
     {
-        const bool uses_turbo = (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQK_3HI_2LO_HAD)
-                             || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQK_3HI_2LO_HAD);
+        const bool uses_turbo = (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQK_3HI_2LO_HAD_D256)
+                             || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQK_3HI_2LO_HAD_D256);
         if (uses_turbo && !hparams.no_alloc) {
             const uint32_t head_dim = hparams.n_embd_head_k(0);
             const uint32_t d = (head_dim == 256) ? 256 : 128;
@@ -294,9 +297,12 @@ llama_kv_cache::llama_kv_cache(
             }
 
             // Init outlier masks with identity permutation (default)
-            tq_init_outlier_masks((int)layers.size(), (int)n_kv_heads, (int)d);
-            LLAMA_LOG_INFO("%s: TurboQuant outlier masks initialized (%zu layers, %u heads, d=%u)\n",
-                    __func__, layers.size(), n_kv_heads, d);
+            // Use total model layers (not KV cache layers) so model-layer indices work
+            // directly when loading calibration permutations — important for hybrid models
+            // where only a subset of layers have attention.
+            tq_init_outlier_masks((int)hparams.n_layer, (int)n_kv_heads, (int)d);
+            LLAMA_LOG_INFO("%s: TurboQuant outlier masks initialized (%u layers, %u heads, d=%u)\n",
+                    __func__, hparams.n_layer, n_kv_heads, d);
         }
     }
 

@@ -1183,11 +1183,17 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_MSE4_D256 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
                                     op->src[1]->type == GGML_TYPE_TQK_HAD_PROD4_D256 ||
-                                    op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256);
+                                    op->src[1]->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_6HI_3LO_HAD_D256 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_2HI_1LO_HAD_D256 ||
+                                    op->src[1]->type == GGML_TYPE_TQK_3HI_2LO_HAD_D256);
                     bool is_ok_v = (op->src[2]->type == GGML_TYPE_F16 ||
                                     op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4 ||
-                                    op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4_D256 ||
-                                    op->src[2]->type == GGML_TYPE_Q4_0);
+                                    op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4_D256);
+                    // q4_0 V only has FA templates for d=128 TQ K types
+                    if (op->src[2]->type == GGML_TYPE_Q4_0 && op->src[1]->ne[0] <= 128) {
+                        is_ok_v = true;
+                    }
                     if (!(is_tq_k && is_ok_v)) {
                         return false;
                     }
@@ -1218,6 +1224,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 op->src[0]->type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
                 op->src[0]->type == GGML_TYPE_TQK_HAD_PROD4_D256 ||
                 op->src[0]->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
+                op->src[0]->type == GGML_TYPE_TQK_6HI_3LO_HAD_D256 ||
+                op->src[0]->type == GGML_TYPE_TQK_2HI_1LO_HAD_D256 ||
+                op->src[0]->type == GGML_TYPE_TQK_3HI_2LO_HAD_D256 ||
                 op->src[0]->type == GGML_TYPE_TQV_HAD_MSE4_D256) {
                 return false;
             }
@@ -1308,6 +1317,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_TQK_HAD_PROD5_D256:
                     case GGML_TYPE_TQK_HAD_PROD4_D256:
                     case GGML_TYPE_TQK_5HI_3LO_HAD_D256:
+                    case GGML_TYPE_TQK_6HI_3LO_HAD_D256:
+                    case GGML_TYPE_TQK_2HI_1LO_HAD_D256:
+                    case GGML_TYPE_TQK_3HI_2LO_HAD_D256:
                     case GGML_TYPE_TQV_HAD_MSE4_D256:
                         return true;
                     default:

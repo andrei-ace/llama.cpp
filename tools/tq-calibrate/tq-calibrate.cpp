@@ -212,13 +212,30 @@ int main(int argc, char ** argv) {
     const int n_layer    = llama_model_n_layer(model);
     const int n_kv_heads = llama_model_n_head_kv(model);
     const int n_q_heads  = llama_model_n_head(model);
-    const int head_dim   = llama_model_n_embd(model) / n_q_heads;
+    // Detect head_dim from GGUF metadata (attention.key_length) — more reliable
+    // than n_embd/n_q_heads which fails for models with non-standard head dims (e.g. Qwen3.5)
+    int head_dim = 0;
+    {
+        char arch[64] = {0};
+        llama_model_meta_val_str(model, "general.architecture", arch, sizeof(arch));
+        if (arch[0]) {
+            char key[256], val[64];
+            snprintf(key, sizeof(key), "%s.attention.key_length", arch);
+            if (llama_model_meta_val_str(model, key, val, sizeof(val)) > 0) {
+                head_dim = atoi(val);
+            }
+        }
+        if (head_dim <= 0) {
+            head_dim = llama_model_n_embd(model) / n_q_heads;
+        }
+    }
 
     fprintf(stderr, "model: %d layers, %d KV heads, %d Q heads (GQA %d:1), head_dim=%d\n",
             n_layer, n_kv_heads, n_q_heads, n_q_heads/n_kv_heads, head_dim);
 
     const char * metric_str = metric == METRIC_MAG ? "mag" : metric == METRIC_VAR ? "var" : "both";
 
+    // Initially assume all layers have KV — will filter after forward pass
     auto has_kv = [&](int) -> bool { return true; };
     g_calib.init(n_layer, n_kv_heads, head_dim, pre_rope, metric, has_kv);
 
@@ -250,32 +267,50 @@ int main(int argc, char ** argv) {
     }
     fprintf(stderr, "\n");
 
+    // For hybrid models, some layers may not have attention (count == 0).
+    // Rebuild layer_map to only include layers that accumulated data.
+    int n_kv_layers = 0;
+    std::vector<int32_t> final_layer_map(n_layer, -1);
+    std::vector<int> kv_cidx_map; // old calibration index -> new compacted index
+    for (int il = 0; il < n_layer; il++) {
+        int cidx = g_calib.layer_map[il];
+        if (cidx >= 0 && g_calib.counts[cidx] > 0) {
+            final_layer_map[il] = n_kv_layers;
+            kv_cidx_map.push_back(cidx);
+            n_kv_layers++;
+        }
+    }
+    if (n_kv_layers < g_calib.n_layers) {
+        fprintf(stderr, "hybrid model: %d/%d layers have KV attention\n", n_kv_layers, g_calib.n_layers);
+    }
+
     fprintf(stderr, "computing permutations...\n");
     const int n_hi = head_dim / 4;
-    std::vector<uint8_t> all_perms((size_t)g_calib.n_layers * n_kv_heads * head_dim);
+    std::vector<uint8_t> all_perms((size_t)n_kv_layers * n_kv_heads * head_dim);
 
-    for (int l = 0; l < g_calib.n_layers; l++) {
+    for (int l = 0; l < n_kv_layers; l++) {
+        int old_cidx = kv_cidx_map[l];
         for (int h = 0; h < n_kv_heads; h++) {
-            g_calib.compute_perm(l, h, all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim);
+            g_calib.compute_perm(old_cidx, h, all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim);
         }
-        fprintf(stderr, "  layer %2d: %lld vectors\n", l, (long long)g_calib.counts[l]);
+        fprintf(stderr, "  layer %2d: %lld vectors\n", l, (long long)g_calib.counts[old_cidx]);
     }
 
     FILE * fp = fopen(output_path.c_str(), "wb");
     if (!fp) { fprintf(stderr, "error: failed to open '%s'\n", output_path.c_str()); return 1; }
     uint32_t magic = 0x54515045, version = 1;
-    uint32_t nl = g_calib.n_layers, nh = n_kv_heads, hd = head_dim;
+    uint32_t nl = n_kv_layers, nh = n_kv_heads, hd = head_dim;
     uint32_t pr = pre_rope ? 1 : 0, nlm = n_layer;
     fwrite(&magic, 4, 1, fp); fwrite(&version, 4, 1, fp);
     fwrite(&nl, 4, 1, fp); fwrite(&nh, 4, 1, fp); fwrite(&hd, 4, 1, fp);
     fwrite(&pr, 4, 1, fp); fwrite(&nlm, 4, 1, fp);
-    for (int il = 0; il < n_layer; il++) { int32_t idx = g_calib.layer_map[il]; fwrite(&idx, 4, 1, fp); }
+    for (int il = 0; il < n_layer; il++) { int32_t idx = final_layer_map[il]; fwrite(&idx, 4, 1, fp); }
     fwrite(all_perms.data(), 1, all_perms.size(), fp);
     fclose(fp);
 
     fprintf(stderr, "saved %zu bytes to '%s' (%d layers × %d heads × %d ch, %s)\n",
             28 + n_layer*4 + all_perms.size(), output_path.c_str(),
-            g_calib.n_layers, n_kv_heads, head_dim, pre_rope ? "pre-RoPE" : "post-RoPE");
+            n_kv_layers, n_kv_heads, head_dim, pre_rope ? "pre-RoPE" : "post-RoPE");
     fprintf(stderr, "outlier channels per head: %d (top %d%%)\n", n_hi, 100*n_hi/head_dim);
     fprintf(stderr, "sample layer 0, head 0: ");
     for (int i = 0; i < n_hi && i < 16; i++) fprintf(stderr, "%d ", all_perms[i]);
