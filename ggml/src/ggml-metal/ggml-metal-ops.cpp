@@ -1141,6 +1141,7 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
         src_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
         src_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
         src_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ ||
+        src_type == GGML_TYPE_TQK_5R3_SJ ||
         src_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
         src_type == GGML_TYPE_TQK_3HI_2LO_HAD ||
         src_type == GGML_TYPE_TQV_HAD_MSE4 ||
@@ -1157,6 +1158,7 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
         if (src_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             src_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
             src_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ ||
+            src_type == GGML_TYPE_TQK_5R3_SJ ||
             src_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
             src_type == GGML_TYPE_TQK_3HI_2LO_HAD ||
             src_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
@@ -1170,7 +1172,8 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
                                   src_type == GGML_TYPE_TQK_2HI_1LO_HAD_D256 ||
                                   src_type == GGML_TYPE_TQK_3HI_2LO_HAD_D256);
             const int block_size = is_d256 ? 256 : 128;
-            const char * name = (src_type == GGML_TYPE_TQK_6HI_3LO_HAD) ? "kernel_get_rows_6hi_3lo_had" :
+            const char * name = (src_type == GGML_TYPE_TQK_5R3_SJ) ? "kernel_get_rows_5r3_sj" :
+                (src_type == GGML_TYPE_TQK_6HI_3LO_HAD) ? "kernel_get_rows_6hi_3lo_had" :
                 (src_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ) ? "kernel_get_rows_6hi_3lo_had_jj" :
                 (src_type == GGML_TYPE_TQK_2HI_1LO_HAD) ? "kernel_get_rows_2hi_1lo_had" :
                 (src_type == GGML_TYPE_TQK_3HI_2LO_HAD) ? "kernel_get_rows_3hi_2lo_had" :
@@ -1318,6 +1321,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
         dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
         dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ ||
+        dst_type == GGML_TYPE_TQK_5R3_SJ ||
         dst_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
         dst_type == GGML_TYPE_TQK_3HI_2LO_HAD ||
         dst_type == GGML_TYPE_TQV_HAD_MSE4 ||
@@ -1333,6 +1337,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         if (dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ ||
+            dst_type == GGML_TYPE_TQK_5R3_SJ ||
             dst_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
             dst_type == GGML_TYPE_TQK_3HI_2LO_HAD ||
             dst_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
@@ -1361,6 +1366,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
                             dst_type == GGML_TYPE_TQK_5HI_3LO_HAD     ? "kernel_set_rows_5hi_3lo_had_i32" :
                             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD     ? "kernel_set_rows_6hi_3lo_had_i32" :
                             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ  ? "kernel_set_rows_6hi_3lo_had_jj_i32" :
+                            dst_type == GGML_TYPE_TQK_5R3_SJ           ? "kernel_set_rows_5r3_sj_i32" :
                             dst_type == GGML_TYPE_TQK_2HI_1LO_HAD     ? "kernel_set_rows_2hi_1lo_had_i32" :
                             dst_type == GGML_TYPE_TQK_3HI_2LO_HAD     ? "kernel_set_rows_3hi_2lo_had_i32" :
                             dst_type == GGML_TYPE_TQK_HAD_MSE4_D256    ? "kernel_set_rows_had_mse4_d256_i32" :
@@ -1401,6 +1407,7 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         if (dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ ||
+            dst_type == GGML_TYPE_TQK_5R3_SJ ||
             dst_type == GGML_TYPE_TQK_2HI_1LO_HAD ||
             dst_type == GGML_TYPE_TQK_3HI_2LO_HAD ||
             dst_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||

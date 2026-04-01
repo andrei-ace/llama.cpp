@@ -160,6 +160,7 @@ struct tq_test_type {
 static const tq_test_type tq_split_types[] = {
     { GGML_TYPE_TQK_5HI_3LO_HAD,  "tqk3_sj"  },
     { GGML_TYPE_TQK_6HI_3LO_HAD,  "tqk4_sj"  },
+    { GGML_TYPE_TQK_5R3_SJ,       "tqk5r3_sj" },
     { GGML_TYPE_TQK_3HI_2LO_HAD,  "tqk3_sjj" },
     { GGML_TYPE_TQK_2HI_1LO_HAD,  "tqk2_sjj" },
     { GGML_TYPE_TQK_6HI_3LO_HAD_JJ, "tqk4_sjj" },
@@ -438,6 +439,12 @@ static int test_sj_no_qjl_lo(void) {
            sizeof(block_tqk_6hi_3lo), ok ? "PASS" : "FAIL");
     if (!ok) failures++;
 
+    // tqk5r3_sj: 3*half + 20 + 12 + 36 = 74 bytes
+    ok = sizeof(block_tqk_5r3_sj) == 74;
+    printf("  tqk5r3_sj struct size: %zu (expected 74): %s\n",
+           sizeof(block_tqk_5r3_sj), ok ? "PASS" : "FAIL");
+    if (!ok) failures++;
+
     // tqk4_sjj: 4*half + 20 + 36 + 4 + 12 = 80 bytes
     ok = sizeof(block_tqk_6hi_3lo_jj) == 80;
     printf("  tqk4_sjj struct size: %zu (expected 80): %s\n",
@@ -542,11 +549,12 @@ static int test_bpv_naming(void) {
     };
 
     const bpv_check checks[] = {
-        { GGML_TYPE_TQK_5HI_3LO_HAD,    "tqk3_sj",  3.875f },  // 62*8/128
-        { GGML_TYPE_TQK_6HI_3LO_HAD,    "tqk4_sj",  4.125f },  // 66*8/128
-        { GGML_TYPE_TQK_3HI_2LO_HAD,    "tqk3_sjj", 3.750f },  // 60*8/128
-        { GGML_TYPE_TQK_2HI_1LO_HAD,    "tqk2_sjj", 2.750f },  // 44*8/128
-        { GGML_TYPE_TQK_6HI_3LO_HAD_JJ, "tqk4_sjj", 5.000f },  // 80*8/128
+        { GGML_TYPE_TQK_5HI_3LO_HAD,    "tqk3_sj",   3.875f },  // 62*8/128
+        { GGML_TYPE_TQK_6HI_3LO_HAD,    "tqk4_sj",   4.125f },  // 66*8/128
+        { GGML_TYPE_TQK_5R3_SJ,         "tqk5r3_sj", 4.625f },  // 74*8/128
+        { GGML_TYPE_TQK_3HI_2LO_HAD,    "tqk3_sjj",  3.750f },  // 60*8/128
+        { GGML_TYPE_TQK_2HI_1LO_HAD,    "tqk2_sjj",  2.750f },  // 44*8/128
+        { GGML_TYPE_TQK_6HI_3LO_HAD_JJ, "tqk4_sjj",  5.000f },  // 80*8/128
     };
 
     for (const auto & c : checks) {

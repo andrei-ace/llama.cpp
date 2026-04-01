@@ -1348,6 +1348,44 @@ void dequantize_6hi_3lo_had_t4(device const block_tqk_6hi_3lo * xb, short il, th
     }
 }
 
+// 5r3_sj (tqk5r3_sj): 5-bit MSE + 3-bit residual on hi, 3-bit MSE on lo (no QJL)
+template <typename type4x4>
+void dequantize_5r3_sj(device const block_tqk_5r3_sj * xb, short il, thread type4x4 & reg) {
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        if (j < 32) {
+            float norm_hi = float(xb->norm_hi);
+            float rnorm2  = float(xb->rnorm2_hi);
+            int v1 = tq_up5(xb->qs_hi, j);
+            int v2 = tq_up3(xb->qs_hi2, j);
+            reg_f[i/4][i%4] = norm_hi * tq_c32_d32[v1] + rnorm2 * tq_c8_d32[v2];
+        } else {
+            float norm_lo = float(xb->norm_lo);
+            int lo_j = j - 32;
+            reg_f[i/4][i%4] = norm_lo * tq_c8_d96[tq_up3(xb->qs_lo, lo_j)];
+        }
+    }
+    reg = (type4x4) reg_f;
+}
+template <typename type4>
+void dequantize_5r3_sj_t4(device const block_tqk_5r3_sj * xb, short il, thread type4 & reg) {
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        if (j < 32) {
+            float norm_hi = float(xb->norm_hi);
+            float rnorm2  = float(xb->rnorm2_hi);
+            int v1 = tq_up5(xb->qs_hi, j);
+            int v2 = tq_up3(xb->qs_hi2, j);
+            reg[i] = norm_hi * tq_c32_d32[v1] + rnorm2 * tq_c8_d32[v2];
+        } else {
+            float norm_lo = float(xb->norm_lo);
+            int lo_j = j - 32;
+            reg[i] = norm_lo * tq_c8_d96[tq_up3(xb->qs_lo, lo_j)];
+        }
+    }
+}
+
 // 6hi_3lo_jj_had (tqk4_sjj): 5-bit MSE + QJL on hi, 3-bit MSE + QJL on lo
 template <typename type4x4>
 void dequantize_6hi_3lo_jj_had(device const block_tqk_6hi_3lo_jj * xb, short il, thread type4x4 & reg) {
@@ -7263,6 +7301,10 @@ template [[host_name("kernel_flash_attn_ext_tqk3_sj_q4_0_dk128_dv128")]] kernel 
 template [[host_name("kernel_flash_attn_ext_tqk4_sj_f16_dk128_dv128")]]        kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_6hi_3lo, 8, dequantize_6hi_3lo_had, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
 template [[host_name("kernel_flash_attn_ext_tqk4_sj_tqv4_0_dk128_dv128")]]     kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_6hi_3lo, 8, dequantize_6hi_3lo_had, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true, false, true>;
 template [[host_name("kernel_flash_attn_ext_tqk4_sj_q4_0_dk128_dv128")]]       kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_6hi_3lo, 8, dequantize_6hi_3lo_had, block_q4_0, 2, dequantize_q4_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// TQK 5r3_sj (tqk5r3_sj) FA — 5-bit+3-bit residual hi, 3-bit lo, no QJL
+template [[host_name("kernel_flash_attn_ext_tqk5r3_sj_f16_dk128_dv128")]]      kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5r3_sj, 8, dequantize_5r3_sj, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk5r3_sj_tqv4_0_dk128_dv128")]]   kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5r3_sj, 8, dequantize_5r3_sj, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true, false, true>;
+template [[host_name("kernel_flash_attn_ext_tqk5r3_sj_q4_0_dk128_dv128")]]     kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_5r3_sj, 8, dequantize_5r3_sj, block_q4_0, 2, dequantize_q4_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
 // TQK 6hi_3lo_jj (tqk4_sjj) FA — uses block_tqk_6hi_3lo_jj with QJL on both hi and lo
 template [[host_name("kernel_flash_attn_ext_tqk4_sjj_f16_dk128_dv128")]]       kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_6hi_3lo_jj, 8, dequantize_6hi_3lo_jj_had, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true, true>;
 template [[host_name("kernel_flash_attn_ext_tqk4_sjj_tqv4_0_dk128_dv128")]]    kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_6hi_3lo_jj, 8, dequantize_6hi_3lo_jj_had, block_tqv_had_mse4, 8, dequantize_had_mse4, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true, true, true>;
@@ -8015,6 +8057,10 @@ template [[host_name("kernel_flash_attn_ext_vec_tqk3_sj_q4_0_dk128_dv128")]] ker
 template [[host_name("kernel_flash_attn_ext_vec_tqk4_sj_f16_dk128_dv128")]]        kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_6hi_3lo, 32, dequantize_6hi_3lo_had_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tqk4_sj_tqv4_0_dk128_dv128")]]     kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_6hi_3lo, 32, dequantize_6hi_3lo_had_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true, false, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tqk4_sj_q4_0_dk128_dv128")]]       kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_6hi_3lo, 32, dequantize_6hi_3lo_had_t4, block_q4_0, 8, dequantize_q4_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+// TQK 5r3_sj (tqk5r3_sj) vec FA — 5-bit+3-bit residual hi, 3-bit lo, no QJL
+template [[host_name("kernel_flash_attn_ext_vec_tqk5r3_sj_f16_dk128_dv128")]]      kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5r3_sj, 32, dequantize_5r3_sj_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk5r3_sj_tqv4_0_dk128_dv128")]]   kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5r3_sj, 32, dequantize_5r3_sj_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true, false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tqk5r3_sj_q4_0_dk128_dv128")]]     kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_5r3_sj, 32, dequantize_5r3_sj_t4, block_q4_0, 8, dequantize_q4_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
 // TQK 6hi_3lo_jj (tqk4_sjj) vec FA — shares dequant with tqk4_sj
 template [[host_name("kernel_flash_attn_ext_vec_tqk4_sjj_f16_dk128_dv128")]]       kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_6hi_3lo_jj, 32, dequantize_6hi_3lo_jj_had_t4, half4, 1, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tqk4_sjj_tqv4_0_dk128_dv128")]]    kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_6hi_3lo_jj, 32, dequantize_6hi_3lo_jj_had_t4, block_tqv_had_mse4, 32, dequantize_had_mse4_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true, true, true>;
@@ -10605,6 +10651,43 @@ kernel void kernel_get_rows_6hi_3lo_had(
     for (int j = 0; j < 96; j++)  out[perm[32 + j]]  = lo[j];
 }
 
+// 5r3_sj (tqk5r3_sj): get_rows (5-bit+3-bit residual hi, 3-bit lo, no QJL)
+[[host_name("kernel_get_rows_5r3_sj")]]
+kernel void kernel_get_rows_5r3_sj(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void    * src0,
+        device const void    * src1,
+        device       float   * dst,
+        device const int32_t * tq_chmap,
+        constant int32_t & tq_layer_idx,
+        constant int32_t & tq_n_kv_heads,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 128) return;
+    device const block_tqk_5r3_sj * blk = (device const block_tqk_5r3_sj *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + iblk) * 128;
+    float norm_hi = float(blk->norm_hi), norm_lo = float(blk->norm_lo), rnorm2 = float(blk->rnorm2_hi);
+    // Hi: two-pass centroid dequant in rotated space, then inverse FWHT-32
+    thread float hi[32];
+    for (int j = 0; j < 32; j++) {
+        hi[j] = norm_hi * tq_c32_d32[tq_up5(blk->qs_hi, j)] + rnorm2 * tq_c8_d32[tq_up3(blk->qs_hi2, j)];
+    }
+    tq_fwht<32>(hi);
+    // Lo: 3-bit MSE, bare 3×FWHT inverse
+    thread float lo[96];
+    for (int j = 0; j < 96; j++) lo[j] = tq_c8_d96[tq_up3(blk->qs_lo, j)] * norm_lo;
+    tq_fwht<32>(lo); tq_fwht<32>(lo + 32); tq_fwht<32>(lo + 64);
+    device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 32; j++)  out[perm[j]]      = hi[j];
+    for (int j = 0; j < 96; j++)  out[perm[32 + j]]  = lo[j];
+}
+
 // 6hi_3lo_had_jj (tqk4_sjj): get_rows (dequant with calibrated channel map, QJL on both hi and lo)
 [[host_name("kernel_get_rows_6hi_3lo_had_jj")]]
 kernel void kernel_get_rows_6hi_3lo_had_jj(
@@ -10711,6 +10794,75 @@ kernel void kernel_set_rows_6hi_3lo_had(
     for (int j=0;j<4;j++) blk->signs_hi[j]=0;
     for (int j=0;j<32;j++) { if (r_hi[j]>=0) blk->signs_hi[j/8]|=(uint8_t)(1<<(j%8)); }
     blk->rnorm_hi = half(sqrt(rnorm_sq));
+}
+
+// 5r3_sj: set_rows (tqk5r3_sj — 5-bit MSE + 3-bit residual on hi, 3-bit MSE on lo, no QJL)
+[[host_name("kernel_set_rows_5r3_sj_i32")]]
+kernel void kernel_set_rows_5r3_sj(
+        constant ggml_metal_kargs_set_rows & args,
+        device const void  * src0,
+        device const void  * src1,
+        device       void  * dst,
+        device const int32_t * tq_chmap,
+        constant int32_t & tq_layer_idx,
+        constant int32_t & tq_n_kv_heads,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i   = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    const int64_t i1 = ((const device int32_t *)((const device char *)src1 + i*args.nb10 + i02%args.ne11*args.nb11 + i03%args.ne12*args.nb12))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.nk0) return;
+    device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk*128;
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + iblk) * 128;
+    thread float hi_raw[32], lo_raw[96];
+    for (int j = 0; j < 32; j++)  hi_raw[j] = src[perm[j]];
+    for (int j = 0; j < 96; j++)  lo_raw[j] = src[perm[32 + j]];
+    thread float hi_rot[32], lo_rot[96];
+    for (int j = 0; j < 32; j++) hi_rot[j] = hi_raw[j];
+    tq_fwht<32>(hi_rot);
+    for (int j = 0; j < 96; j++) lo_rot[j] = lo_raw[j];
+    tq_fwht<32>(lo_rot); tq_fwht<32>(lo_rot + 32); tq_fwht<32>(lo_rot + 64);
+    float sum_hi = 0, sum_lo = 0;
+    for (int j = 0; j < 32; j++) sum_hi += hi_rot[j]*hi_rot[j];
+    for (int j = 0; j < 96; j++) sum_lo += lo_rot[j]*lo_rot[j];
+    float norm_hi = sqrt(sum_hi), norm_lo = sqrt(sum_lo);
+    device block_tqk_5r3_sj * blk = (device block_tqk_5r3_sj *)
+        ((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk;
+    blk->norm_hi = half(norm_hi); blk->norm_lo = half(norm_lo); blk->rnorm2_hi = half(0.0f);
+    if (norm_hi == 0 && norm_lo == 0) {
+        for (int j = 0; j < 20; j++) blk->qs_hi[j] = 0;
+        for (int j = 0; j < 12; j++) blk->qs_hi2[j] = 0;
+        for (int j = 0; j < 36; j++) blk->qs_lo[j] = 0;
+        return;
+    }
+    float inv_hi = (norm_hi > 1e-12f) ? 1.0f/norm_hi : 0, inv_lo = (norm_lo > 1e-12f) ? 1.0f/norm_lo : 0;
+    // First pass: 5-bit MSE on hi
+    for (int j = 0; j < 20; j++) blk->qs_hi[j] = 0;
+    for (int j = 0; j < 32; j++) {
+        int idx = tq_nearest(hi_rot[j]*inv_hi, tq_c32_d32, 32);
+        int bp = j*5, bi = bp/8, sh = bp%8;
+        blk->qs_hi[bi] |= (uint8_t)((idx & 0x1F) << sh);
+        if (sh > 3) blk->qs_hi[bi+1] |= (uint8_t)((idx & 0x1F) >> (8 - sh));
+    }
+    // Compute residual in rotated space
+    thread float r1[32];
+    float rnorm_sq = 0;
+    for (int j = 0; j < 32; j++) {
+        int bp=j*5,bi=bp/8,sh=bp%8; int v=blk->qs_hi[bi]>>sh; if(sh>3) v|=blk->qs_hi[bi+1]<<(8-sh);
+        r1[j] = hi_rot[j] - norm_hi * tq_c32_d32[v & 0x1F];
+        rnorm_sq += r1[j]*r1[j];
+    }
+    float rnorm2 = sqrt(rnorm_sq);
+    float inv_rn = (rnorm2 > 1e-12f) ? 1.0f/rnorm2 : 0;
+    // Second pass: 3-bit MSE on residual
+    for (int j = 0; j < 12; j++) blk->qs_hi2[j] = 0;
+    for (int j = 0; j < 32; j++) tq_pk3((device uint8_t *)blk->qs_hi2, j, tq_nearest(r1[j]*inv_rn, tq_c8_d32, 8));
+    blk->rnorm2_hi = half(rnorm2);
+    // Lo: 3-bit MSE
+    for (int j = 0; j < 36; j++) blk->qs_lo[j] = 0;
+    for (int j = 0; j < 96; j++) tq_pk3((device uint8_t *)blk->qs_lo, j, tq_nearest(lo_rot[j]*inv_lo, tq_c8_d96, 8));
 }
 
 // 6hi_3lo_had_jj: set_rows (tqk4_sjj — 5-bit MSE + QJL on hi, 3-bit MSE + QJL on lo)

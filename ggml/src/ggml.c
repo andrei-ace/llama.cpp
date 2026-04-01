@@ -1054,6 +1054,14 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .type_size                = 0,
         .is_quantized             = false,
     },
+    [GGML_TYPE_TQK_5R3_SJ] = {
+        .type_name                = "tqk5r3_sj",
+        .blck_size                = TQK_BLOCK_SIZE,
+        .type_size                = sizeof(block_tqk_5r3_sj),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_5r3_sj,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_5r3_sj_ref,
+    },
 };
 
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {

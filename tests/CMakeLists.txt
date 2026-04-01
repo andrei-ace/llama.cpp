@@ -257,6 +257,10 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-tq-roundtrip.cpp)
 endif()
 
+# TurboQuant architecture search — research tools, not CI tests
+llama_build(test-tq-architecture-search.cpp)
+llama_build(test-tq-architecture-search2.cpp)
+
 # libmtmd
 set(LLAMA_TEST_NAME test-mtmd-c-api)
 llama_build_and_test(test-mtmd-c-api.c)

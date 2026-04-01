@@ -256,7 +256,9 @@ llama_kv_cache::llama_kv_cache(
     {
         const bool uses_turbo = tqk_auto
                              || (type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && type_k <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256)
-                             || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256);
+                             || (type_k == GGML_TYPE_TQK_5R3_SJ)
+                             || (type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && type_v <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256)
+                             || (type_v == GGML_TYPE_TQK_5R3_SJ);
         if (uses_turbo && !hparams.no_alloc) {
             const uint32_t head_dim = hparams.n_embd_head_k(0);
             const uint32_t d = (head_dim == 256) ? 256 : 128;

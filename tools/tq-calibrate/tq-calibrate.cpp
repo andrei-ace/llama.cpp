@@ -328,10 +328,14 @@ int main(int argc, char ** argv) {
     std::vector<int32_t> layer_types(n_kv_layers);
     for (int l = 0; l < n_kv_layers; l++) {
         float pct = outlier_pct[l];
-        (void)pct;
-        layer_types[l] = GGML_TYPE_Q8_0;
+        // Three tiers: extreme (>90%) = q8_0, moderate (53-90%) = TQ_MID_TYPE, uniform (<53%) = q8_0
+#ifndef TQ_MID_TYPE
+#define TQ_MID_TYPE GGML_TYPE_Q8_0
+#endif
+        if (pct > 90.0f)       layer_types[l] = GGML_TYPE_Q8_0;       // extreme: keep q8_0
+        else if (pct >= 53.0f)  layer_types[l] = TQ_MID_TYPE;          // moderate: test candidate
+        else                    layer_types[l] = GGML_TYPE_Q8_0;       // uniform: keep q8_0
         fprintf(stderr, "  layer %2d: outlier=%.1f%% -> %s\n", l, pct, ggml_type_name((ggml_type)layer_types[l]));
-        fprintf(stderr, "  layer %2d: outlier=%.1f%% -> type %d\n", l, pct, layer_types[l]);
     }
 
     // --stats: dump per-channel statistics to CSV for visualization
