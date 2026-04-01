@@ -392,22 +392,26 @@ typedef struct {
     ggml_half norm_hi;                       // 2 bytes: outlier subset L2 norm
     ggml_half norm_lo;                       // 2 bytes: regular subset L2 norm
     ggml_half rnorm_hi;                      // 2 bytes: outlier QJL residual norm
+    ggml_half rnorm_lo;                      // 2 bytes: regular QJL residual norm
     uint8_t   qs_hi[64 * 4 / 8];            // 32 bytes: 4-bit indices (outliers)
     uint8_t   qs_lo[192 * 3 / 8];           // 72 bytes: 3-bit indices (regulars)
     uint8_t   signs_hi[64 / 8];             // 8 bytes: 1-bit signs (outliers)
+    uint8_t   signs_lo[192 / 8];            // 24 bytes: 1-bit signs (regulars)
 } block_tqk_5hi_3lo_d256;
-static_assert(sizeof(block_tqk_5hi_3lo_d256) == 118, "wrong block_tqk_5hi_3lo_d256 size");
+static_assert(sizeof(block_tqk_5hi_3lo_d256) == 144, "wrong block_tqk_5hi_3lo_d256 size");
 
-// TQK 6hi_3lo d=256: 64/192 split, 5-bit MSE + QJL on outliers, 3-bit MSE on regulars
+// TQK 6hi_3lo d=256: 64/192 split, 5-bit MSE + QJL on outliers, 3-bit MSE + QJL on regulars
 typedef struct {
     ggml_half norm_hi;                                 // 2 bytes
     ggml_half norm_lo;                                 // 2 bytes
     ggml_half rnorm_hi;                                // 2 bytes: QJL residual norm (outliers)
+    ggml_half rnorm_lo;                                // 2 bytes: QJL residual norm (regulars)
     uint8_t   qs_hi[TQK_N_OUTLIER_D256 * 5 / 8];      // 40 bytes: 5-bit MSE (64 outliers)
     uint8_t   qs_lo[TQK_N_REGULAR_D256 * 3 / 8];      // 72 bytes: 3-bit MSE (192 regulars)
     uint8_t   signs_hi[TQK_N_OUTLIER_D256 / 8];        // 8 bytes: QJL signs (outliers)
+    uint8_t   signs_lo[TQK_N_REGULAR_D256 / 8];        // 24 bytes: QJL signs (regulars)
 } block_tqk_6hi_3lo_d256;
-static_assert(sizeof(block_tqk_6hi_3lo_d256) == 126, "wrong block_tqk_6hi_3lo_d256 size");
+static_assert(sizeof(block_tqk_6hi_3lo_d256) == 152, "wrong block_tqk_6hi_3lo_d256 size");
 
 // TQK 2hi_1lo d=256: 64/192 split, 2-bit MSE + QJL on outliers, 1-bit MSE + QJL on regulars
 typedef struct {
