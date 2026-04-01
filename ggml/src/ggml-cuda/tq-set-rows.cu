@@ -312,18 +312,13 @@ static __global__ void k_set_rows_tq_2hi_1lo_had(
     }
     dst_block->rnorm_hi = __float2half(sqrtf(rn_hi));
 
-    // QJL on lo residual
-    float ylo[96];
-    for (int j = 0; j < 96; j++) ylo[j] = tq_c2_d96[tq_up1(dst_block->qs_lo, j)];
-    tq_fwht_local<32>(ylo);
-    tq_fwht_local<32>(ylo + 32);
-    tq_fwht_local<32>(ylo + 64);
+    // QJL on lo residual (per-element sign in rotated space, no FWHT)
     float r_lo[96];
     float rn_lo = 0.0f;
-    for (int j = 0; j < 96; j++) { r_lo[j] = lo_raw[j] - norm_lo * ylo[j]; rn_lo += r_lo[j] * r_lo[j]; }
-    tq_fwht_local<32>(r_lo);
-    tq_fwht_local<32>(r_lo + 32);
-    tq_fwht_local<32>(r_lo + 64);
+    for (int j = 0; j < 96; j++) {
+        r_lo[j] = lo_rot[j] - norm_lo * tq_c2_d96[tq_up1(dst_block->qs_lo, j)];
+        rn_lo += r_lo[j] * r_lo[j];
+    }
     for (int j = 0; j < 96; j++) {
         if (r_lo[j] >= 0.0f) dst_block->signs_lo[j / 8] |= (uint8_t)(1 << (j % 8));
     }
@@ -428,18 +423,13 @@ static __global__ void k_set_rows_tq_3hi_2lo_had(
     }
     dst_block->rnorm_hi = __float2half(sqrtf(rn_hi));
 
-    // QJL on lo residual
-    float ylo[96];
-    for (int j = 0; j < 96; j++) ylo[j] = tq_c4_d96[tq_up2(dst_block->qs_lo, j)];
-    tq_fwht_local<32>(ylo);
-    tq_fwht_local<32>(ylo + 32);
-    tq_fwht_local<32>(ylo + 64);
+    // QJL on lo residual (per-element sign in rotated space, no FWHT)
     float r_lo[96];
     float rn_lo = 0.0f;
-    for (int j = 0; j < 96; j++) { r_lo[j] = lo_raw[j] - norm_lo * ylo[j]; rn_lo += r_lo[j] * r_lo[j]; }
-    tq_fwht_local<32>(r_lo);
-    tq_fwht_local<32>(r_lo + 32);
-    tq_fwht_local<32>(r_lo + 64);
+    for (int j = 0; j < 96; j++) {
+        r_lo[j] = lo_rot[j] - norm_lo * tq_c4_d96[tq_up2(dst_block->qs_lo, j)];
+        rn_lo += r_lo[j] * r_lo[j];
+    }
     for (int j = 0; j < 96; j++) {
         if (r_lo[j] >= 0.0f) dst_block->signs_lo[j / 8] |= (uint8_t)(1 << (j % 8));
     }

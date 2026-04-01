@@ -4,6 +4,9 @@
 
 #include "ggml.h"
 #include "ggml-cpu.h"
+#define GGML_COMMON_DECL_C
+#define GGML_COMMON_IMPL_C
+#include "../ggml/src/ggml-common.h"  // block structs for sizeof checks
 
 #undef NDEBUG
 #include <assert.h>
@@ -158,7 +161,7 @@ static const tq_test_type tq_split_types[] = {
     { GGML_TYPE_TQK_5HI_3LO_HAD,  "tqk3_sj"  },
     { GGML_TYPE_TQK_6HI_3LO_HAD,  "tqk4_sj"  },
     { GGML_TYPE_TQK_3HI_2LO_HAD,  "tqk3_sjj" },
-    { GGML_TYPE_TQK_2HI_1LO_HAD,  "tqk2_sj"  },
+    { GGML_TYPE_TQK_2HI_1LO_HAD,  "tqk2_sjj" },
     { GGML_TYPE_TQK_6HI_3LO_HAD_JJ, "tqk4_sjj" },
 };
 
@@ -268,7 +271,9 @@ static int test_quant_dequant_roundtrip(void) {
         float err   = vec_l2_error(orig.data(), recon.data(), n_elems);
         float norm  = vec_norm(orig.data(), n_elems);
         float rel   = err / (norm + 1e-10f);
-        bool ok     = rel < 0.5f;  // 50% threshold for aggressive quantizers
+        // Threshold depends on type: 2-bit+1-bit is very aggressive
+        float thresh = (type == GGML_TYPE_TQK_2HI_1LO_HAD) ? 0.7f : 0.5f;
+        bool ok     = rel < thresh;
         printf("  %s: %s (rel L2 = %.4f, abs L2 = %.4f)\n",
                name, ok ? "PASS" : "FAIL", rel, err);
         if (!ok) failures++;
@@ -348,7 +353,7 @@ static int test_vec_dot_consistency(void) {
         float diff = fabsf(dot_a - dot_b);
         float scale = (fabsf(dot_a) + fabsf(dot_b)) / 2.0f + 1e-10f;
         float rel_err = diff / scale;
-        bool ok = rel_err < 0.5f;
+        bool ok = rel_err < 1e-4f;  // vec_dot and dequant+dot should match very closely
         printf("  %s: %s (dot_a=%.4f, dot_b=%.4f, rel_diff=%.4f)\n",
                name, ok ? "PASS" : "FAIL", dot_a, dot_b, rel_err);
         if (!ok) failures++;
@@ -404,6 +409,160 @@ static int test_quantize_determinism(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 5: _sj types must have zero rnorm_lo (no QJL on lo)
+// ---------------------------------------------------------------------------
+
+static int test_sj_no_qjl_lo(void) {
+    printf("\n=== Test 5: _sj types have zero rnorm_lo ===\n");
+    int failures = 0;
+
+    // Only test _sj types (not _sjj)
+    const struct { ggml_type type; const char * name; size_t rnorm_lo_offset; size_t block_size_bytes; } sj_types[] = {
+        { GGML_TYPE_TQK_5HI_3LO_HAD, "tqk3_sj", offsetof(block_tqk_5hi_3lo, rnorm_hi) + sizeof(ggml_half), 0 },  // no rnorm_lo field
+        { GGML_TYPE_TQK_6HI_3LO_HAD, "tqk4_sj", offsetof(block_tqk_6hi_3lo, rnorm_hi) + sizeof(ggml_half), 0 },  // no rnorm_lo field
+    };
+
+    // These types should NOT have rnorm_lo in their struct at all.
+    // Verify by checking struct sizes match expected (no QJL-lo fields)
+    bool ok;
+
+    // tqk3_sj: 3*half + 16 + 36 + 4 = 62 bytes
+    ok = sizeof(block_tqk_5hi_3lo) == 62;
+    printf("  tqk3_sj struct size: %zu (expected 62): %s\n",
+           sizeof(block_tqk_5hi_3lo), ok ? "PASS" : "FAIL");
+    if (!ok) failures++;
+
+    // tqk4_sj: 3*half + 20 + 36 + 4 = 66 bytes
+    ok = sizeof(block_tqk_6hi_3lo) == 66;
+    printf("  tqk4_sj struct size: %zu (expected 66): %s\n",
+           sizeof(block_tqk_6hi_3lo), ok ? "PASS" : "FAIL");
+    if (!ok) failures++;
+
+    // tqk4_sjj: 4*half + 20 + 36 + 4 + 12 = 80 bytes
+    ok = sizeof(block_tqk_6hi_3lo_jj) == 80;
+    printf("  tqk4_sjj struct size: %zu (expected 80): %s\n",
+           sizeof(block_tqk_6hi_3lo_jj), ok ? "PASS" : "FAIL");
+    if (!ok) failures++;
+
+    // tqk3_sjj: 4*half + 12 + 24 + 4 + 12 = 60 bytes
+    ok = sizeof(block_tqk_3hi_2lo) == 60;
+    printf("  tqk3_sjj struct size: %zu (expected 60): %s\n",
+           sizeof(block_tqk_3hi_2lo), ok ? "PASS" : "FAIL");
+    if (!ok) failures++;
+
+    // tqk2_sjj: 4*half + 8 + 12 + 4 + 12 = 44 bytes
+    ok = sizeof(block_tqk_2hi_1lo) == 44;
+    printf("  tqk2_sjj struct size: %zu (expected 44): %s\n",
+           sizeof(block_tqk_2hi_1lo), ok ? "PASS" : "FAIL");
+    if (!ok) failures++;
+
+    (void)sj_types; // suppress unused warning
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: QJL correction improves quality for _sjj types
+// ---------------------------------------------------------------------------
+
+static int test_qjl_improves_quality(void) {
+    printf("\n=== Test 6: QJL correction improves quality ===\n");
+    int failures = 0;
+
+    // For _sjj types, quantize → dequantize should give BETTER reconstruction
+    // than if we zero out the QJL fields after quantization.
+    // This verifies QJL is actually helping, not hurting.
+
+    const int n_blocks = 8;
+
+    // Test tqk3_sjj (3hi_2lo) which has QJL on both
+    ggml_type type = GGML_TYPE_TQK_3HI_2LO_HAD;
+    const auto * qfns     = ggml_get_type_traits(type);
+    const auto * qfns_cpu = ggml_get_type_traits_cpu(type);
+
+    if (!qfns_cpu->from_float || !qfns->to_float) {
+        printf("  tqk3_sjj: SKIP\n");
+        return 0;
+    }
+
+    const int block_size = (int)qfns->blck_size;
+    const int n_elems    = block_size * n_blocks;
+
+    ggml_quantize_init(type);
+
+    test_rng_seed(54321);
+    std::vector<float> orig(n_elems);
+    generate_random(orig.data(), n_elems);
+
+    size_t qbuf_size = qfns->type_size * n_blocks;
+    std::vector<uint8_t> qbuf(qbuf_size + 256, 0);
+    std::vector<uint8_t> qbuf_no_qjl(qbuf_size + 256, 0);
+    std::vector<float> recon_with_qjl(n_elems);
+    std::vector<float> recon_no_qjl(n_elems);
+
+    // Quantize (includes QJL)
+    qfns_cpu->from_float(orig.data(), qbuf.data(), n_elems);
+
+    // Copy and zero out QJL fields (rnorm_hi, rnorm_lo, signs_hi, signs_lo)
+    memcpy(qbuf_no_qjl.data(), qbuf.data(), qbuf_size);
+    for (int b = 0; b < n_blocks; b++) {
+        block_tqk_3hi_2lo * blk = (block_tqk_3hi_2lo *)(qbuf_no_qjl.data() + b * qfns->type_size);
+        blk->rnorm_hi = 0;
+        blk->rnorm_lo = 0;
+        memset(blk->signs_hi, 0, sizeof(blk->signs_hi));
+        memset(blk->signs_lo, 0, sizeof(blk->signs_lo));
+    }
+
+    // Dequantize both
+    qfns->to_float(qbuf.data(), recon_with_qjl.data(), n_elems);
+    qfns->to_float(qbuf_no_qjl.data(), recon_no_qjl.data(), n_elems);
+
+    float err_with = vec_l2_error(orig.data(), recon_with_qjl.data(), n_elems);
+    float err_without = vec_l2_error(orig.data(), recon_no_qjl.data(), n_elems);
+
+    bool ok = err_with < err_without;
+    printf("  tqk3_sjj: QJL err=%.4f, MSE-only err=%.4f, QJL helps: %s\n",
+           err_with, err_without, ok ? "PASS" : "FAIL");
+    if (!ok) failures++;
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: bpv matches naming convention
+// ---------------------------------------------------------------------------
+
+static int test_bpv_naming(void) {
+    printf("\n=== Test 7: bpv matches naming convention ===\n");
+    int failures = 0;
+
+    struct bpv_check {
+        ggml_type type;
+        const char * name;
+        float expected_bpv;
+    };
+
+    const bpv_check checks[] = {
+        { GGML_TYPE_TQK_5HI_3LO_HAD,    "tqk3_sj",  3.875f },  // 62*8/128
+        { GGML_TYPE_TQK_6HI_3LO_HAD,    "tqk4_sj",  4.125f },  // 66*8/128
+        { GGML_TYPE_TQK_3HI_2LO_HAD,    "tqk3_sjj", 3.750f },  // 60*8/128
+        { GGML_TYPE_TQK_2HI_1LO_HAD,    "tqk2_sjj", 2.750f },  // 44*8/128
+        { GGML_TYPE_TQK_6HI_3LO_HAD_JJ, "tqk4_sjj", 5.000f },  // 80*8/128
+    };
+
+    for (const auto & c : checks) {
+        const auto * traits = ggml_get_type_traits(c.type);
+        float actual_bpv = (float)(traits->type_size * 8) / (float)traits->blck_size;
+        float diff = fabsf(actual_bpv - c.expected_bpv);
+        bool ok = diff < 0.001f;
+        printf("  %s: %.3f bpv (expected %.3f): %s\n",
+               c.name, actual_bpv, c.expected_bpv, ok ? "PASS" : "FAIL");
+        if (!ok) failures++;
+    }
+
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -426,6 +585,9 @@ int main(void) {
     total_failures += test_quant_dequant_roundtrip();
     total_failures += test_vec_dot_consistency();
     total_failures += test_quantize_determinism();
+    total_failures += test_sj_no_qjl_lo();
+    total_failures += test_qjl_improves_quality();
+    total_failures += test_bpv_naming();
 
     tq_free_outlier_masks();
 

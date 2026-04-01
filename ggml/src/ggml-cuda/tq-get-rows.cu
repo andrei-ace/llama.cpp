@@ -321,22 +321,17 @@ static __global__ void k_get_rows_tq_2hi_1lo_had(
         float qjl_s_hi = QJL_SCALE_32 * rnorm_hi;
         for (int j = 0; j < 32; j++) hi[j] += qjl_s_hi * corr_hi[j];
 
-        // Decode lo: 1-bit centroid lookup → 3×inverse FWHT → scale
+        // Decode lo: 1-bit centroid lookup, scale + QJL correction in rotated space, then unrotate
         float lo[96];
-        for (int j = 0; j < 96; j++) lo[j] = tq_c2_d96[tq_up1(blk->qs_lo, j)];
+        for (int j = 0; j < 96; j++) lo[j] = tq_c2_d96[tq_up1(blk->qs_lo, j)] * norm_lo;
+        float qjl_s_lo = QJL_SCALE_96 * rnorm_lo;
+        for (int j = 0; j < 96; j++) {
+            float sign = tq_sign_bit(blk->signs_lo, j);
+            lo[j] += qjl_s_lo * sign;
+        }
         tq_fwht_local<32>(lo);
         tq_fwht_local<32>(lo + 32);
         tq_fwht_local<32>(lo + 64);
-        for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
-
-        // QJL correction on lo
-        float corr_lo[96];
-        for (int j = 0; j < 96; j++) corr_lo[j] = tq_sign_bit(blk->signs_lo, j);
-        tq_fwht_local<32>(corr_lo);
-        tq_fwht_local<32>(corr_lo + 32);
-        tq_fwht_local<32>(corr_lo + 64);
-        float qjl_s_lo = QJL_SCALE_96 * rnorm_lo;
-        for (int j = 0; j < 96; j++) lo[j] += qjl_s_lo * corr_lo[j];
 
         // Inverse-permute via channel map and write
         const int64_t base = block_in_row * 128;
@@ -393,22 +388,17 @@ static __global__ void k_get_rows_tq_3hi_2lo_had(
         float qjl_s_hi = QJL_SCALE_32 * rnorm_hi;
         for (int j = 0; j < 32; j++) hi[j] += qjl_s_hi * corr_hi[j];
 
-        // Decode lo: 2-bit centroid lookup → 3×inverse FWHT → scale
+        // Decode lo: 2-bit centroid lookup, scale + QJL correction in rotated space, then unrotate
         float lo[96];
-        for (int j = 0; j < 96; j++) lo[j] = tq_c4_d96[tq_up2(blk->qs_lo, j)];
+        for (int j = 0; j < 96; j++) lo[j] = tq_c4_d96[tq_up2(blk->qs_lo, j)] * norm_lo;
+        float qjl_s_lo = QJL_SCALE_96 * rnorm_lo;
+        for (int j = 0; j < 96; j++) {
+            float sign = tq_sign_bit(blk->signs_lo, j);
+            lo[j] += qjl_s_lo * sign;
+        }
         tq_fwht_local<32>(lo);
         tq_fwht_local<32>(lo + 32);
         tq_fwht_local<32>(lo + 64);
-        for (int j = 0; j < 96; j++) lo[j] *= norm_lo;
-
-        // QJL correction on lo
-        float corr_lo[96];
-        for (int j = 0; j < 96; j++) corr_lo[j] = tq_sign_bit(blk->signs_lo, j);
-        tq_fwht_local<32>(corr_lo);
-        tq_fwht_local<32>(corr_lo + 32);
-        tq_fwht_local<32>(corr_lo + 64);
-        float qjl_s_lo = QJL_SCALE_96 * rnorm_lo;
-        for (int j = 0; j < 96; j++) lo[j] += qjl_s_lo * corr_lo[j];
 
         // Inverse-permute via channel map and write
         const int64_t base = block_in_row * 128;

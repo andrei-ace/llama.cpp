@@ -443,6 +443,25 @@ static float qjl_asymmetric_dot_block3(const float * q, int block_dim,
     return 1.2533141f / (float)m * rnorm * sum;
 }
 
+// Direct per-element sign quantization in rotated space (no FWHT).
+// Used for lo QJL where block-diagonal FWHT is not applicable.
+static float qjl_forward_direct(const float * r, uint8_t * signs, int m) {
+    float rnorm_sq = 0;
+    for (int j = 0; j < m; j++) rnorm_sq += r[j] * r[j];
+    memset(signs, 0, (m + 7) / 8);
+    for (int j = 0; j < m; j++) {
+        if (r[j] >= 0.0f) signs[j/8] |= (uint8_t)(1 << (j%8));
+    }
+    return sqrtf(rnorm_sq);
+}
+
+static void qjl_inverse_direct(const uint8_t * signs, float rnorm, float * corr, int m) {
+    float scale = 1.2533141f / (float)m * rnorm;
+    for (int i = 0; i < m; i++) {
+        corr[i] = ((signs[i/8] >> (i%8)) & 1) ? scale : -scale;
+    }
+}
+
 // Fast variant when q is already FWHT-rotated — O(m) dot with signs
 static float qjl_asymmetric_dot_rotated(const float * q_rot, int m,
                                          const uint8_t * signs, float rnorm) {
@@ -934,12 +953,14 @@ static float tq_qjl_hi_residual(const float * hi_raw, float norm_hi,
 }
 
 // Shared: QJL on lo residual in original space (unrotate centroids, compute residual)
+// Uses per-element sign quantization (no FWHT) for CPU/GPU compatibility.
 static float tq_qjl_lo_orig_residual(const float * lo_raw, float norm_lo,
                                         const uint8_t * qs_lo,
                                         const float * centroids,
                                         int (*up)(const uint8_t *, int),
                                         int n_lo, int n_hi,
                                         uint8_t * signs_lo) {
+    (void)n_hi;
     float ylo[TQ_DIM_LO_MAX];
     for (int j = 0; j < n_lo; j++) ylo[j] = centroids[up(qs_lo, j)];
     float lo_rec[TQ_DIM_LO_MAX];
@@ -947,19 +968,21 @@ static float tq_qjl_lo_orig_residual(const float * lo_raw, float norm_lo,
     tq_structured_unrotate_lo(lo_rec, n_lo);
     float r_lo[TQ_DIM_LO_MAX];
     for (int j = 0; j < n_lo; j++) r_lo[j] = lo_raw[j] - norm_lo * lo_rec[j];
-    return qjl_forward_block3(r_lo, signs_lo, n_hi);
+    return qjl_forward_direct(r_lo, signs_lo, n_lo);
 }
 
 // Shared: QJL on lo residual in rotated space (residual = lo_rot - norm * centroids)
+// Uses per-element sign quantization (no FWHT) for CPU/GPU compatibility.
 static float tq_qjl_lo_rot_residual(const float * lo_rot, float norm_lo,
                                        const uint8_t * qs_lo,
                                        const float * centroids,
                                        int (*up)(const uint8_t *, int),
                                        int n_lo, int n_hi,
                                        uint8_t * signs_lo) {
+    (void)n_hi;
     float r_lo[TQ_DIM_LO_MAX];
     for (int j = 0; j < n_lo; j++) r_lo[j] = lo_rot[j] - norm_lo * centroids[up(qs_lo, j)];
-    return qjl_forward_block3(r_lo, signs_lo, n_hi);
+    return qjl_forward_direct(r_lo, signs_lo, n_lo);
 }
 
 // Shared dequant: hi (inverse FWHT + QJL correction in original space)
@@ -976,29 +999,17 @@ static void tq_dequant_hi_had_qjl(const uint8_t * qs_hi, const float * centroids
     for (int j = 0; j < n_hi; j++) hi_orig[j] += corr_hi[j];
 }
 
-// Shared dequant: lo with QJL in original space (unrotate, scale, add correction)
-static void tq_dequant_lo_had_qjl_orig(const uint8_t * qs_lo, const float * centroids,
-                                          int (*up)(const uint8_t *, int),
-                                          int n_lo, int n_hi, float norm_lo,
-                                          const uint8_t * signs_lo, float rnorm_lo,
-                                          float * lo_orig) {
-    for (int j = 0; j < n_lo; j++) lo_orig[j] = centroids[up(qs_lo, j)];
-    tq_structured_unrotate_lo(lo_orig, n_lo);
-    for (int j = 0; j < n_lo; j++) lo_orig[j] *= norm_lo;
-    float corr_lo[TQ_DIM_LO_MAX];
-    qjl_inverse_block3(signs_lo, rnorm_lo, corr_lo, n_hi);
-    for (int j = 0; j < n_lo; j++) lo_orig[j] += corr_lo[j];
-}
-
 // Shared dequant: lo with QJL in rotated space (scale + correction, then unrotate)
+// Uses per-element sign correction (no FWHT) for CPU/GPU compatibility.
 static void tq_dequant_lo_had_qjl_rot(const uint8_t * qs_lo, const float * centroids,
                                          int (*up)(const uint8_t *, int),
                                          int n_lo, int n_hi, float norm_lo,
                                          const uint8_t * signs_lo, float rnorm_lo,
                                          float * lo_orig) {
+    (void)n_hi;
     for (int j = 0; j < n_lo; j++) lo_orig[j] = centroids[up(qs_lo, j)] * norm_lo;
     float corr_lo[TQ_DIM_LO_MAX];
-    qjl_inverse_block3(signs_lo, rnorm_lo, corr_lo, n_hi);
+    qjl_inverse_direct(signs_lo, rnorm_lo, corr_lo, n_lo);
     for (int j = 0; j < n_lo; j++) lo_orig[j] += corr_lo[j];
     tq_structured_unrotate_lo(lo_orig, n_lo);
 }
@@ -1709,7 +1720,7 @@ void ggml_vec_dot_tqk_6hi_3lo_had_jj_f32(int n, float * GGML_RESTRICT s, size_t 
             x[i].qs_hi, centroids_32_d32, up5, x[i].qs_lo, centroids_8_d96, up3,
             norm_hi, norm_lo, hi_raw, lo_raw, q_rot_hi, q_rot_lo);
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot_block3(q_rot_lo, TQ_DIM_HI, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        float qjl_lo = qjl_asymmetric_dot_rotated(q_rot_lo, TQ_DIM_LO, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
         sumf += mse_dot + qjl_hi + qjl_lo;
     }
     *s = sumf;
@@ -1740,7 +1751,7 @@ void quantize_row_tqk_2hi_1lo_had_ref(const float * GGML_RESTRICT x, block_tqk_2
         tq_mse_quant(hi_rot, inv_hi, TQ_DIM_HI, centroids_4_d32, 4, pk2, y[i].qs_hi, sizeof(y[i].qs_hi));
         tq_mse_quant(lo_rot, inv_lo, TQ_DIM_LO, centroids_2_d96, 2, pk1, y[i].qs_lo, sizeof(y[i].qs_lo));
         y[i].rnorm_hi = GGML_FP32_TO_FP16(tq_qjl_hi_residual(hi_raw, norm_hi, y[i].qs_hi, centroids_4_d32, up2, TQ_DIM_HI, QJL_SEED_32, y[i].signs_hi));
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(tq_qjl_lo_orig_residual(lo_raw, norm_lo, y[i].qs_lo, centroids_2_d96, up1, TQ_DIM_LO, TQ_DIM_HI, y[i].signs_lo));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(tq_qjl_lo_rot_residual(lo_rot, norm_lo, y[i].qs_lo, centroids_2_d96, up1, TQ_DIM_LO, TQ_DIM_HI, y[i].signs_lo));
     }
 }
 
@@ -1753,7 +1764,7 @@ void dequantize_row_tqk_2hi_1lo_had(const block_tqk_2hi_1lo * GGML_RESTRICT x, f
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
         float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
         tq_dequant_hi_had_qjl(x[i].qs_hi, centroids_4_d32, up2, TQ_DIM_HI, norm_hi, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), QJL_SEED_32, hi_orig);
-        tq_dequant_lo_had_qjl_orig(x[i].qs_lo, centroids_2_d96, up1, TQ_DIM_LO, TQ_DIM_HI, norm_lo, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), lo_orig);
+        tq_dequant_lo_had_qjl_rot(x[i].qs_lo, centroids_2_d96, up1, TQ_DIM_LO, TQ_DIM_HI, norm_lo, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), lo_orig);
         tq_merge_channels(hi_orig, lo_orig, y + i * TQK_BLOCK_SIZE);
     }
 }
@@ -1776,7 +1787,7 @@ void ggml_vec_dot_tqk_2hi_1lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs,
             x[i].qs_hi, centroids_4_d32, up2, x[i].qs_lo, centroids_2_d96, up1,
             norm_hi, norm_lo, hi_raw, lo_raw, q_rot_hi, q_rot_lo);
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot_block3(q_rot_lo, TQ_DIM_HI, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        float qjl_lo = qjl_asymmetric_dot_rotated(q_rot_lo, TQ_DIM_LO, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
         sumf += mse_dot + qjl_hi + qjl_lo;
     }
     *s = sumf;
@@ -1807,7 +1818,7 @@ void quantize_row_tqk_3hi_2lo_had_ref(const float * GGML_RESTRICT x, block_tqk_3
         tq_mse_quant(hi_rot, inv_hi, TQ_DIM_HI, centroids_8_d32, 8, pk3, y[i].qs_hi, sizeof(y[i].qs_hi));
         tq_mse_quant(lo_rot, inv_lo, TQ_DIM_LO, centroids_4_d96, 4, pk2, y[i].qs_lo, sizeof(y[i].qs_lo));
         y[i].rnorm_hi = GGML_FP32_TO_FP16(tq_qjl_hi_residual(hi_raw, norm_hi, y[i].qs_hi, centroids_8_d32, up3, TQ_DIM_HI, QJL_SEED_32, y[i].signs_hi));
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(tq_qjl_lo_orig_residual(lo_raw, norm_lo, y[i].qs_lo, centroids_4_d96, up2, TQ_DIM_LO, TQ_DIM_HI, y[i].signs_lo));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(tq_qjl_lo_rot_residual(lo_rot, norm_lo, y[i].qs_lo, centroids_4_d96, up2, TQ_DIM_LO, TQ_DIM_HI, y[i].signs_lo));
     }
 }
 
@@ -1820,7 +1831,7 @@ void dequantize_row_tqk_3hi_2lo_had(const block_tqk_3hi_2lo * GGML_RESTRICT x, f
         float norm_hi = GGML_FP16_TO_FP32(x[i].norm_hi), norm_lo = GGML_FP16_TO_FP32(x[i].norm_lo);
         float hi_orig[TQ_DIM_HI], lo_orig[TQ_DIM_LO];
         tq_dequant_hi_had_qjl(x[i].qs_hi, centroids_8_d32, up3, TQ_DIM_HI, norm_hi, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), QJL_SEED_32, hi_orig);
-        tq_dequant_lo_had_qjl_orig(x[i].qs_lo, centroids_4_d96, up2, TQ_DIM_LO, TQ_DIM_HI, norm_lo, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), lo_orig);
+        tq_dequant_lo_had_qjl_rot(x[i].qs_lo, centroids_4_d96, up2, TQ_DIM_LO, TQ_DIM_HI, norm_lo, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), lo_orig);
         tq_merge_channels(hi_orig, lo_orig, y + i * TQK_BLOCK_SIZE);
     }
 }
@@ -1843,7 +1854,7 @@ void ggml_vec_dot_tqk_3hi_2lo_had_f32(int n, float * GGML_RESTRICT s, size_t bs,
             x[i].qs_hi, centroids_8_d32, up3, x[i].qs_lo, centroids_4_d96, up2,
             norm_hi, norm_lo, hi_raw, lo_raw, q_rot_hi, q_rot_lo);
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQ_DIM_HI, QJL_SEED_32, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot_block3(q_rot_lo, TQ_DIM_HI, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        float qjl_lo = qjl_asymmetric_dot_rotated(q_rot_lo, TQ_DIM_LO, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
         sumf += mse_dot + qjl_hi + qjl_lo;
     }
     *s = sumf;
@@ -2519,7 +2530,7 @@ void quantize_row_tqk_6hi_3lo_had_jj_d256_ref(const float * GGML_RESTRICT x, blo
         // QJL on lo residual — in rotated space
         float r_lo[TQK_N_REGULAR_D256];
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) r_lo[j] = lo_rot[j] - norm_lo * centroids_8_d192[up3(y[i].qs_lo, j)];
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward_block3(r_lo, y[i].signs_lo, TQK_N_OUTLIER_D256));
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward_direct(r_lo, y[i].signs_lo, TQK_N_REGULAR_D256));
     }
 }
 
@@ -2544,7 +2555,7 @@ void dequantize_row_tqk_6hi_3lo_had_jj_d256(const block_tqk_6hi_3lo_jj_d256 * GG
         float lo_orig[TQK_N_REGULAR_D256];
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] = ylo[j] * norm_lo;
         float corr_lo[TQK_N_REGULAR_D256];
-        qjl_inverse_block3(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_OUTLIER_D256);
+        qjl_inverse_direct(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_REGULAR_D256);
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] += corr_lo[j];
         tq_structured_unrotate_lo(lo_orig, TQK_N_REGULAR_D256);
         // Merge
@@ -2586,7 +2597,7 @@ void ggml_vec_dot_tqk_6hi_3lo_had_jj_d256_f32(int n, float * GGML_RESTRICT s, si
         for (int j = 0; j < TQK_N_OUTLIER_D256; j++) mse_dot_hi += q_rot_hi[j]*centroids_32_d64[up5(x[i].qs_hi, j)];
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) mse_dot_lo += q_rot_lo[j]*centroids_8_d192[up3(x[i].qs_lo, j)];
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQK_N_OUTLIER_D256, QJL_SEED_64, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot_block3(q_rot_lo, TQK_N_OUTLIER_D256, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        float qjl_lo = qjl_asymmetric_dot_rotated(q_rot_lo, TQK_N_REGULAR_D256, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
         sumf += mse_dot_hi*norm_hi + mse_dot_lo*norm_lo + qjl_hi + qjl_lo;
     }
     *s = sumf;
@@ -2634,12 +2645,9 @@ void quantize_row_tqk_2hi_1lo_had_d256_ref(const float * GGML_RESTRICT x, block_
         float hi_rec[TQK_N_OUTLIER_D256]; memcpy(hi_rec, yhi, sizeof(hi_rec)); tq_fwht(hi_rec, TQK_N_OUTLIER_D256);
         float r_hi[TQK_N_OUTLIER_D256]; for (int j = 0; j < TQK_N_OUTLIER_D256; j++) r_hi[j] = hi_raw[j] - norm_hi*hi_rec[j];
         y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQK_N_OUTLIER_D256, QJL_SEED_64));
-        float ylo[TQK_N_REGULAR_D256];
-        for (int j = 0; j < TQK_N_REGULAR_D256; j++) ylo[j] = centroids_2_d192[up1(y[i].qs_lo, j)];
-        float lo_rec[TQK_N_REGULAR_D256]; memcpy(lo_rec, ylo, sizeof(lo_rec));
-        tq_structured_unrotate_lo(lo_rec, TQK_N_REGULAR_D256);
-        float r_lo[TQK_N_REGULAR_D256]; for (int j = 0; j < TQK_N_REGULAR_D256; j++) r_lo[j] = lo_raw[j] - norm_lo*lo_rec[j];
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward_block3(r_lo, y[i].signs_lo, TQK_N_OUTLIER_D256));
+        float r_lo[TQK_N_REGULAR_D256];
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) r_lo[j] = lo_rot[j] - norm_lo * centroids_2_d192[up1(y[i].qs_lo, j)];
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward_direct(r_lo, y[i].signs_lo, TQK_N_REGULAR_D256));
     }
 }
 
@@ -2655,16 +2663,16 @@ void dequantize_row_tqk_2hi_1lo_had_d256(const block_tqk_2hi_1lo_d256 * GGML_RES
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) ylo[j] = centroids_2_d192[up1(x[i].qs_lo, j)];
         float hi_orig[TQK_N_OUTLIER_D256], lo_orig[TQK_N_REGULAR_D256];
         memcpy(hi_orig, yhi, sizeof(hi_orig)); tq_fwht(hi_orig, TQK_N_OUTLIER_D256);
-        memcpy(lo_orig, ylo, sizeof(lo_orig));
-        tq_structured_unrotate_lo(lo_orig, TQK_N_REGULAR_D256);
         for (int j = 0; j < TQK_N_OUTLIER_D256; j++) hi_orig[j] *= norm_hi;
-        for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] *= norm_lo;
         float corr_hi[TQK_N_OUTLIER_D256];
         qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQK_N_OUTLIER_D256, QJL_SEED_64);
         for (int j = 0; j < TQK_N_OUTLIER_D256; j++) hi_orig[j] += corr_hi[j];
+        // Lo: scale + QJL correction in rotated space, then unrotate
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] = ylo[j] * norm_lo;
         float corr_lo[TQK_N_REGULAR_D256];
-        qjl_inverse_block3(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_OUTLIER_D256);
+        qjl_inverse_direct(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_REGULAR_D256);
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] += corr_lo[j];
+        tq_structured_unrotate_lo(lo_orig, TQK_N_REGULAR_D256);
         float * out = y + i * TQK_BLOCK_SIZE_D256;
         const uint32_t * mask = TQ_MASK_K(tq_cur_layer, tq_cur_head);
         { int oi = 0, ri = 0;
@@ -2703,7 +2711,7 @@ void ggml_vec_dot_tqk_2hi_1lo_had_d256_f32(int n, float * GGML_RESTRICT s, size_
         for (int j = 0; j < TQK_N_OUTLIER_D256; j++) mse_dot_hi += q_rot_hi[j]*centroids_4_d64[up2(x[i].qs_hi, j)];
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) mse_dot_lo += q_rot_lo[j]*centroids_2_d192[up1(x[i].qs_lo, j)];
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQK_N_OUTLIER_D256, QJL_SEED_64, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot_block3(q_rot_lo, TQK_N_OUTLIER_D256, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        float qjl_lo = qjl_asymmetric_dot_rotated(q_rot_lo, TQK_N_REGULAR_D256, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
         sumf += mse_dot_hi*norm_hi + mse_dot_lo*norm_lo + qjl_hi + qjl_lo;
     }
     *s = sumf;
@@ -2751,12 +2759,9 @@ void quantize_row_tqk_3hi_2lo_had_d256_ref(const float * GGML_RESTRICT x, block_
         float hi_rec[TQK_N_OUTLIER_D256]; memcpy(hi_rec, yhi, sizeof(hi_rec)); tq_fwht(hi_rec, TQK_N_OUTLIER_D256);
         float r_hi[TQK_N_OUTLIER_D256]; for (int j = 0; j < TQK_N_OUTLIER_D256; j++) r_hi[j] = hi_raw[j] - norm_hi*hi_rec[j];
         y[i].rnorm_hi = GGML_FP32_TO_FP16(qjl_forward(r_hi, y[i].signs_hi, TQK_N_OUTLIER_D256, QJL_SEED_64));
-        float ylo[TQK_N_REGULAR_D256];
-        for (int j = 0; j < TQK_N_REGULAR_D256; j++) ylo[j] = centroids_4_d192[up2(y[i].qs_lo, j)];
-        float lo_rec[TQK_N_REGULAR_D256]; memcpy(lo_rec, ylo, sizeof(lo_rec));
-        tq_structured_unrotate_lo(lo_rec, TQK_N_REGULAR_D256);
-        float r_lo[TQK_N_REGULAR_D256]; for (int j = 0; j < TQK_N_REGULAR_D256; j++) r_lo[j] = lo_raw[j] - norm_lo*lo_rec[j];
-        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward_block3(r_lo, y[i].signs_lo, TQK_N_OUTLIER_D256));
+        float r_lo[TQK_N_REGULAR_D256];
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) r_lo[j] = lo_rot[j] - norm_lo * centroids_4_d192[up2(y[i].qs_lo, j)];
+        y[i].rnorm_lo = GGML_FP32_TO_FP16(qjl_forward_direct(r_lo, y[i].signs_lo, TQK_N_REGULAR_D256));
     }
 }
 
@@ -2772,16 +2777,16 @@ void dequantize_row_tqk_3hi_2lo_had_d256(const block_tqk_3hi_2lo_d256 * GGML_RES
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) ylo[j] = centroids_4_d192[up2(x[i].qs_lo, j)];
         float hi_orig[TQK_N_OUTLIER_D256], lo_orig[TQK_N_REGULAR_D256];
         memcpy(hi_orig, yhi, sizeof(hi_orig)); tq_fwht(hi_orig, TQK_N_OUTLIER_D256);
-        memcpy(lo_orig, ylo, sizeof(lo_orig));
-        tq_structured_unrotate_lo(lo_orig, TQK_N_REGULAR_D256);
         for (int j = 0; j < TQK_N_OUTLIER_D256; j++) hi_orig[j] *= norm_hi;
-        for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] *= norm_lo;
         float corr_hi[TQK_N_OUTLIER_D256];
         qjl_inverse(x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi), corr_hi, TQK_N_OUTLIER_D256, QJL_SEED_64);
         for (int j = 0; j < TQK_N_OUTLIER_D256; j++) hi_orig[j] += corr_hi[j];
+        // Lo: scale + QJL correction in rotated space, then unrotate
+        for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] = ylo[j] * norm_lo;
         float corr_lo[TQK_N_REGULAR_D256];
-        qjl_inverse_block3(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_OUTLIER_D256);
+        qjl_inverse_direct(x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo), corr_lo, TQK_N_REGULAR_D256);
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) lo_orig[j] += corr_lo[j];
+        tq_structured_unrotate_lo(lo_orig, TQK_N_REGULAR_D256);
         float * out = y + i * TQK_BLOCK_SIZE_D256;
         const uint32_t * mask = TQ_MASK_K(tq_cur_layer, tq_cur_head);
         { int oi = 0, ri = 0;
@@ -2820,7 +2825,7 @@ void ggml_vec_dot_tqk_3hi_2lo_had_d256_f32(int n, float * GGML_RESTRICT s, size_
         for (int j = 0; j < TQK_N_OUTLIER_D256; j++) mse_dot_hi += q_rot_hi[j]*centroids_8_d64[up3(x[i].qs_hi, j)];
         for (int j = 0; j < TQK_N_REGULAR_D256; j++) mse_dot_lo += q_rot_lo[j]*centroids_4_d192[up2(x[i].qs_lo, j)];
         float qjl_hi = qjl_asymmetric_dot(hi_raw, TQK_N_OUTLIER_D256, QJL_SEED_64, x[i].signs_hi, GGML_FP16_TO_FP32(x[i].rnorm_hi));
-        float qjl_lo = qjl_asymmetric_dot_block3(q_rot_lo, TQK_N_OUTLIER_D256, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
+        float qjl_lo = qjl_asymmetric_dot_rotated(q_rot_lo, TQK_N_REGULAR_D256, x[i].signs_lo, GGML_FP16_TO_FP32(x[i].rnorm_lo));
         sumf += mse_dot_hi*norm_hi + mse_dot_lo*norm_lo + qjl_hi + qjl_lo;
     }
     *s = sumf;
