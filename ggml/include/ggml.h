@@ -442,11 +442,13 @@ extern "C" {
         GGML_TYPE_TQV_HAD_MSE4_D256    = 59, // tqv4_0_d256:  4.06 bpv, d=256 variant
         GGML_TYPE_TQK_6HI_3LO_HAD     = 60, // tqk4_sj:      4.13 bpv, 32/96 split, 5-bit+QJL hi / 3-bit lo
         GGML_TYPE_TQK_2HI_1LO_HAD     = 61, // tqk2_sj:      2.75 bpv, 32/96 split, 2-bit+QJL hi / 1-bit+QJL lo
-        GGML_TYPE_TQK_3HI_2LO_HAD     = 62, // tqk3b_sj:     3.75 bpv, 32/96 split, 3-bit+QJL hi / 2-bit+QJL lo
+        GGML_TYPE_TQK_3HI_2LO_HAD     = 62, // tqk3_sjj:     3.75 bpv, 32/96 split, 3-bit+QJL hi / 2-bit+QJL lo
         GGML_TYPE_TQK_6HI_3LO_HAD_D256 = 63, // tqk4_sj_d256:  3.94 bpv, d=256, 64/192 split, 5-bit+QJL hi / 3-bit lo
         GGML_TYPE_TQK_2HI_1LO_HAD_D256 = 64, // tqk2_sj_d256:  2.50 bpv, d=256, 64/192 split, 2-bit+QJL hi / 1-bit+QJL lo
-        GGML_TYPE_TQK_3HI_2LO_HAD_D256 = 65, // tqk3b_sj_d256: 3.50 bpv, d=256, 64/192 split, 3-bit+QJL hi / 2-bit+QJL lo
-        GGML_TYPE_COUNT     = 66,
+        GGML_TYPE_TQK_3HI_2LO_HAD_D256 = 65, // tqk3_sjj_d256: 3.50 bpv, d=256, 64/192 split, 3-bit+QJL hi / 2-bit+QJL lo
+        GGML_TYPE_TQK_6HI_3LO_HAD_JJ     = 66, // tqk4_sjj:     4.13 bpv, 32/96 split, 5-bit+QJL hi / 3-bit+QJL lo
+        GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256 = 67, // tqk4_sjj_d256: 3.94 bpv, d=256, 64/192 split, 5-bit+QJL hi / 3-bit+QJL lo
+        GGML_TYPE_COUNT     = 68,
     };
 
     // precision

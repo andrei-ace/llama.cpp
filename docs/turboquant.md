@@ -23,7 +23,7 @@ These split channels into 32 outliers and 96 regulars based on calibrated per-la
 |---|---|---|---|
 | `tqk4_sj` | 4.13 | 5-bit MSE + 1-bit QJL | 3-bit MSE |
 | `tqk3_sj` | 3.88 | 4-bit MSE + 1-bit QJL | 3-bit MSE |
-| `tqk3b_sj` | 3.75 | 3-bit MSE + 1-bit QJL | 2-bit MSE + 1-bit QJL |
+| `tqk3_sjj` | 3.75 | 3-bit MSE + 1-bit QJL | 2-bit MSE + 1-bit QJL |
 | `tqk2_sj` | 2.75 | 2-bit MSE + 1-bit QJL | 1-bit MSE + 1-bit QJL |
 
 Naming convention: `tqk{approx_bpv}_{variant}` where `s` = split, `j` = QJL correction.
@@ -65,7 +65,7 @@ tqk3_sj (62B = 3.88 bpv):
   qs_lo      36B (96 × 3-bit)
   signs_hi    4B (32 × 1-bit)
 
-tqk3b_sj (60B = 3.75 bpv):
+tqk3_sjj (60B = 3.75 bpv):
   norm_hi      2B    norm_lo      2B    rnorm_hi     2B    rnorm_lo     2B
   qs_hi      12B (32 × 3-bit)
   qs_lo      24B (96 × 2-bit)
@@ -205,7 +205,7 @@ llama-bench -m model.gguf -ctk tqk4_sj -ctv tqv4_0 -fa 1 -t 10
 | Low (Mistral, Llama 3.1) | `tqk4_0 + tqv4_0` | 4.13 | No calibration needed, fastest |
 | Medium (Qwen3) | `tqk4_sj + tqv4_0` | 4.13 | Calibration helps slightly |
 | High (Qwen 2.5) | `tqk4_sj + tqv4_0` | 4.13 | Calibration essential — 21x better than q4_0 |
-| Memory-constrained | `tqk3b_sj + tqv4_0` | 3.94 | Aggressive but usable on robust models |
+| Memory-constrained | `tqk3_sjj + tqv4_0` | 3.94 | Aggressive but usable on robust models |
 
 ## Benchmark summary
 

@@ -18,7 +18,7 @@ Benchmark results for TurboQuant KV cache quantization types on CUDA, comparing 
 
 - **Perplexity**: WikiText-2 test set, context 512, 3 chunks
 - **Speed**: `llama-bench` with pp512 (prompt processing) and tg128 (text generation), flash attention enabled, full GPU offload (`-ngl 99`)
-- **Calibration**: Split types (tqk3_sj, tqk4_sj, tqk3b_sj, tqk2_sj) calibrated on Penn Treebank (PTB) train set using `llama-tq-calibrate -m model.gguf -f ptb/ptb.train.txt -o perms.bin -n 32000 -c 2048 --pre-rope`. The calibration identifies per-layer per-head outlier channels by accumulating K channel magnitudes over 32k tokens with context window 2048, using pre-RoPE activations. Non-split types and standard types need no calibration.
+- **Calibration**: Split types (tqk3_sj, tqk4_sj, tqk3_sjj, tqk2_sj) calibrated on Penn Treebank (PTB) train set using `llama-tq-calibrate -m model.gguf -f ptb/ptb.train.txt -o perms.bin -n 32000 -c 2048 --pre-rope`. The calibration identifies per-layer per-head outlier channels by accumulating K channel magnitudes over 32k tokens with context window 2048, using pre-RoPE activations. Non-split types and standard types need no calibration.
 - All TQ K types paired with tqv4_0 V cache (4.13 bpv). Standard types use matching V types.
 
 ## Results
@@ -34,7 +34,7 @@ Benchmark results for TurboQuant KV cache quantization types on CUDA, comparing 
 | tqk4_1j | 4.25 | 11.53 | +20.4% |
 | tqk4_sj | 4.13 | 9.65 | +0.7% |
 | tqk3_sj | 3.88 | 10.28 | +7.3% |
-| tqk3b_sj | 3.75 | 13.51 | +41.0% |
+| tqk3_sjj | 3.75 | 13.51 | +41.0% |
 | tqk2_sj | 2.75 | 97.81 | — |
 
 ### Throughput
@@ -49,7 +49,7 @@ After warp-shuffle FWHT optimization (see below):
 | tqk4_1j | 4.25 | 1879 | 39% | 84 | 71% |
 | tqk5_0j | 5.25 | 1693 | 35% | 81 | 69% |
 | tqk4_0 | 4.13 | 1713 | 35% | 77 | 65% |
-| tqk3b_sj | 3.75 | 1488 | 31% | 82 | 69% |
+| tqk3_sjj | 3.75 | 1488 | 31% | 82 | 69% |
 | tqk3_sj | 3.88 | 1399 | 29% | 83 | 70% |
 | tqk4_sj | 4.13 | 1328 | 27% | 80 | 68% |
 | tqk2_sj | 2.75 | 994 | 21% | 82 | 69% |
@@ -67,7 +67,7 @@ The FA Q pre-rotation was rewritten to use `__shfl_xor_sync()` warp shuffles ins
 | Type | Before pp512 | After pp512 | Speedup |
 |------|-------------|-------------|---------|
 | tqk2_sj | 821 | 994 | **+21%** |
-| tqk3b_sj | 1357 | 1488 | **+10%** |
+| tqk3_sjj | 1357 | 1488 | **+10%** |
 | tqk3_sj | 1291 | 1399 | **+8%** |
 | tqk4_sj | 1267 | 1328 | **+5%** |
 | tqk4_0 | 1682 | 1713 | **+2%** |
@@ -86,7 +86,7 @@ The FA Q pre-rotation was rewritten to use `__shfl_xor_sync()` warp shuffles ins
 
 ### d=128 Types (fully implemented)
 
-| Operation | tqk4_0 | tqk5_0j | tqk4_1j | tqk3_sj | tqk4_sj | tqk3b_sj | tqk2_sj | tqv4_0 |
+| Operation | tqk4_0 | tqk5_0j | tqk4_1j | tqk3_sj | tqk4_sj | tqk3_sjj | tqk2_sj | tqv4_0 |
 |-----------|--------|---------|---------|---------|---------|----------|---------|--------|
 | get_rows | yes | yes | yes | yes | yes | yes | yes | yes |
 | set_rows | yes | yes | yes | yes | yes | yes | yes | yes |

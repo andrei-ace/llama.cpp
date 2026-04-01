@@ -302,21 +302,31 @@ typedef struct {
 static_assert(sizeof(block_tqk_had_prod4) == 2*sizeof(ggml_half) + TQK_BLOCK_SIZE*3/8 + TQK_BLOCK_SIZE/8, "wrong tqk_had_prod4 block size");
 // Total: 68 bytes for 128 elements = 4.25 bpv
 
-// TQK 5hi_3lo: 32/96 split, 4-bit MSE + 1-bit QJL on outliers, 3-bit MSE + 1-bit QJL on regulars
+// TQK 5hi_3lo: 32/96 split, 4-bit MSE + 1-bit QJL on outliers, 3-bit MSE on regulars (tqk3_sj)
 typedef struct {
     ggml_half norm_hi;                                 // 2 bytes: outlier subset L2 norm
     ggml_half norm_lo;                                 // 2 bytes: regular subset L2 norm
     ggml_half rnorm_hi;                                // 2 bytes: outlier QJL residual norm
-    ggml_half rnorm_lo;                                // 2 bytes: regular QJL residual norm
     uint8_t   qs_hi[TQK_N_OUTLIER * 4 / 8];           // 16 bytes
     uint8_t   qs_lo[TQK_N_REGULAR * 3 / 8];           // 36 bytes
     uint8_t   signs_hi[TQK_N_OUTLIER / 8];            // 4 bytes
-    uint8_t   signs_lo[TQK_N_REGULAR / 8];            // 12 bytes
 } block_tqk_5hi_3lo;
-static_assert(sizeof(block_tqk_5hi_3lo) == 4*sizeof(ggml_half) + TQK_N_OUTLIER*4/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8 + TQK_N_REGULAR/8, "wrong tqk_5hi_3lo block size");
-// Total: 76 bytes for 128 elements = 4.75 bpv
+static_assert(sizeof(block_tqk_5hi_3lo) == 3*sizeof(ggml_half) + TQK_N_OUTLIER*4/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8, "wrong tqk_5hi_3lo block size");
+// Total: 62 bytes for 128 elements = 3.875 bpv
 
-// TQK 6hi_3lo: 32/96 split, 5-bit MSE + 1-bit QJL on outliers, 3-bit MSE + 1-bit QJL on regulars
+// TQK 6hi_3lo: 32/96 split, 5-bit MSE + 1-bit QJL on outliers, 3-bit MSE on regulars (tqk4_sj)
+typedef struct {
+    ggml_half norm_hi;                                 // 2 bytes
+    ggml_half norm_lo;                                 // 2 bytes
+    ggml_half rnorm_hi;                                // 2 bytes
+    uint8_t   qs_hi[TQK_N_OUTLIER * 5 / 8];           // 20 bytes: 5-bit MSE
+    uint8_t   qs_lo[TQK_N_REGULAR * 3 / 8];           // 36 bytes: 3-bit MSE
+    uint8_t   signs_hi[TQK_N_OUTLIER / 8];            // 4 bytes
+} block_tqk_6hi_3lo;
+static_assert(sizeof(block_tqk_6hi_3lo) == 3*sizeof(ggml_half) + TQK_N_OUTLIER*5/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8, "wrong tqk_6hi_3lo block size");
+// Total: 66 bytes for 128 elements = 4.125 bpv
+
+// TQK 6hi_3lo_jj: same MSE as 6hi_3lo but with QJL on BOTH hi and lo (tqk4_sjj)
 typedef struct {
     ggml_half norm_hi;                                 // 2 bytes
     ggml_half norm_lo;                                 // 2 bytes
@@ -326,8 +336,8 @@ typedef struct {
     uint8_t   qs_lo[TQK_N_REGULAR * 3 / 8];           // 36 bytes: 3-bit MSE
     uint8_t   signs_hi[TQK_N_OUTLIER / 8];            // 4 bytes
     uint8_t   signs_lo[TQK_N_REGULAR / 8];            // 12 bytes
-} block_tqk_6hi_3lo;
-static_assert(sizeof(block_tqk_6hi_3lo) == 4*sizeof(ggml_half) + TQK_N_OUTLIER*5/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8 + TQK_N_REGULAR/8, "wrong tqk_6hi_3lo block size");
+} block_tqk_6hi_3lo_jj;
+static_assert(sizeof(block_tqk_6hi_3lo_jj) == 4*sizeof(ggml_half) + TQK_N_OUTLIER*5/8 + TQK_N_REGULAR*3/8 + TQK_N_OUTLIER/8 + TQK_N_REGULAR/8, "wrong tqk_6hi_3lo_jj block size");
 // Total: 80 bytes for 128 elements = 5.0 bpv
 
 // TQK 2hi_1lo: 32/96 split, 2-bit MSE + 1-bit QJL on outliers, 1-bit MSE + 1-bit QJL on regulars
@@ -388,30 +398,43 @@ typedef struct {
 } block_tqk_had_prod4_d256;
 static_assert(sizeof(block_tqk_had_prod4_d256) == 132, "wrong block_tqk_had_prod4_d256 size");
 
+// TQK 5hi_3lo d=256: 64/192 split, 4-bit MSE + QJL on outliers, 3-bit MSE on regulars (tqk3_sj_d256)
 typedef struct {
-    ggml_half norm_hi;                       // 2 bytes: outlier subset L2 norm
-    ggml_half norm_lo;                       // 2 bytes: regular subset L2 norm
-    ggml_half rnorm_hi;                      // 2 bytes: outlier QJL residual norm
-    ggml_half rnorm_lo;                      // 2 bytes: regular QJL residual norm
-    uint8_t   qs_hi[64 * 4 / 8];            // 32 bytes: 4-bit indices (outliers)
-    uint8_t   qs_lo[192 * 3 / 8];           // 72 bytes: 3-bit indices (regulars)
-    uint8_t   signs_hi[64 / 8];             // 8 bytes: 1-bit signs (outliers)
-    uint8_t   signs_lo[192 / 8];            // 24 bytes: 1-bit signs (regulars)
+    ggml_half norm_hi;                       // 2 bytes
+    ggml_half norm_lo;                       // 2 bytes
+    ggml_half rnorm_hi;                      // 2 bytes
+    uint8_t   qs_hi[64 * 4 / 8];            // 32 bytes
+    uint8_t   qs_lo[192 * 3 / 8];           // 72 bytes
+    uint8_t   signs_hi[64 / 8];             // 8 bytes
 } block_tqk_5hi_3lo_d256;
-static_assert(sizeof(block_tqk_5hi_3lo_d256) == 144, "wrong block_tqk_5hi_3lo_d256 size");
+static_assert(sizeof(block_tqk_5hi_3lo_d256) == 118, "wrong block_tqk_5hi_3lo_d256 size");
+// Total: 118 bytes for 256 elements = 3.6875 bpv
 
-// TQK 6hi_3lo d=256: 64/192 split, 5-bit MSE + QJL on outliers, 3-bit MSE + QJL on regulars
+// TQK 6hi_3lo d=256: 64/192 split, 5-bit MSE + QJL on outliers, 3-bit MSE on regulars (tqk4_sj_d256)
 typedef struct {
     ggml_half norm_hi;                                 // 2 bytes
     ggml_half norm_lo;                                 // 2 bytes
-    ggml_half rnorm_hi;                                // 2 bytes: QJL residual norm (outliers)
-    ggml_half rnorm_lo;                                // 2 bytes: QJL residual norm (regulars)
-    uint8_t   qs_hi[TQK_N_OUTLIER_D256 * 5 / 8];      // 40 bytes: 5-bit MSE (64 outliers)
-    uint8_t   qs_lo[TQK_N_REGULAR_D256 * 3 / 8];      // 72 bytes: 3-bit MSE (192 regulars)
-    uint8_t   signs_hi[TQK_N_OUTLIER_D256 / 8];        // 8 bytes: QJL signs (outliers)
-    uint8_t   signs_lo[TQK_N_REGULAR_D256 / 8];        // 24 bytes: QJL signs (regulars)
+    ggml_half rnorm_hi;                                // 2 bytes
+    uint8_t   qs_hi[TQK_N_OUTLIER_D256 * 5 / 8];      // 40 bytes
+    uint8_t   qs_lo[TQK_N_REGULAR_D256 * 3 / 8];      // 72 bytes
+    uint8_t   signs_hi[TQK_N_OUTLIER_D256 / 8];        // 8 bytes
 } block_tqk_6hi_3lo_d256;
-static_assert(sizeof(block_tqk_6hi_3lo_d256) == 152, "wrong block_tqk_6hi_3lo_d256 size");
+static_assert(sizeof(block_tqk_6hi_3lo_d256) == 126, "wrong block_tqk_6hi_3lo_d256 size");
+// Total: 126 bytes for 256 elements = 3.9375 bpv
+
+// TQK 6hi_3lo_jj d=256: same MSE but QJL on BOTH (tqk4_sjj_d256)
+typedef struct {
+    ggml_half norm_hi;                                 // 2 bytes
+    ggml_half norm_lo;                                 // 2 bytes
+    ggml_half rnorm_hi;                                // 2 bytes
+    ggml_half rnorm_lo;                                // 2 bytes
+    uint8_t   qs_hi[TQK_N_OUTLIER_D256 * 5 / 8];      // 40 bytes
+    uint8_t   qs_lo[TQK_N_REGULAR_D256 * 3 / 8];      // 72 bytes
+    uint8_t   signs_hi[TQK_N_OUTLIER_D256 / 8];        // 8 bytes
+    uint8_t   signs_lo[TQK_N_REGULAR_D256 / 8];        // 24 bytes
+} block_tqk_6hi_3lo_jj_d256;
+static_assert(sizeof(block_tqk_6hi_3lo_jj_d256) == 152, "wrong block_tqk_6hi_3lo_jj_d256 size");
+// Total: 152 bytes for 256 elements = 4.75 bpv
 
 // TQK 2hi_1lo d=256: 64/192 split, 2-bit MSE + QJL on outliers, 1-bit MSE + QJL on regulars
 typedef struct {

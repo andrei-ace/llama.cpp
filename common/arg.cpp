@@ -390,6 +390,7 @@ const std::vector<ggml_type> kv_cache_types = {
     // TurboQuant K cache types
     GGML_TYPE_TQK_5HI_3LO_HAD,
     GGML_TYPE_TQK_6HI_3LO_HAD,
+    GGML_TYPE_TQK_6HI_3LO_HAD_JJ,
     GGML_TYPE_TQK_2HI_1LO_HAD,
     GGML_TYPE_TQK_3HI_2LO_HAD,
     GGML_TYPE_TQK_HAD_MSE4,

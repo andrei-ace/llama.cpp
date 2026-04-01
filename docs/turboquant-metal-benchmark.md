@@ -26,7 +26,7 @@ This model has extreme sensitivity to KV cache quantization — uniform types be
 | f16+f16 | 16.00 | 7.78 | baseline |
 | q8_0+q8_0 | 8.50 | 7.78 | 0% |
 | **tqk4_sj+tqv4_0** | **4.13** | **328** | — |
-| tqk3b_sj+tqv4_0 | 3.94 | 964 | — |
+| tqk3_sjj+tqv4_0 | 3.94 | 964 | — |
 | tqk4_0+tqv4_0 | 4.13 | 5069 | — |
 | q4_0+q4_0 | 4.50 | 6820 | — |
 | q4_1+q4_1 | 5.00 | 12256 | — |
@@ -41,7 +41,7 @@ This model has extreme sensitivity to KV cache quantization — uniform types be
 | q4_1+q4_1 | 5.00 | 485 | 49.6 |
 | tqk4_0+tqv4_0 | 4.13 | 483 | 44.1 |
 | tqk4_sj+tqv4_0 | 4.13 | 471 | 37.2 |
-| tqk3b_sj+tqv4_0 | 3.94 | 471 | 34.6 |
+| tqk3_sjj+tqv4_0 | 3.94 | 471 | 34.6 |
 
 ## Qwen 2.5 7B Instruct (Q8_0 weights, 7.54 GiB)
 
@@ -52,7 +52,7 @@ This model has extreme sensitivity to KV cache quantization — uniform types be
 | f16+f16 | 16.00 | 7.52 | baseline |
 | q8_0+q8_0 | 8.50 | 7.53 | +0.1% |
 | **tqk4_sj+tqv4_0** | **4.13** | **323** | — |
-| tqk3b_sj+tqv4_0 | 3.94 | 994 | — |
+| tqk3_sjj+tqv4_0 | 3.94 | 994 | — |
 | q4_0+q4_0 | 4.50 | 7020 | — |
 | q4_1+q4_1 | 5.00 | 12351 | — |
 
@@ -98,7 +98,7 @@ Qwen3 is robust to KV quantization — all types produce usable results. The spl
 | tqk5_0j+tqv4_0 | 5.25 | 11.44 | +4.8% |
 | tqk3_sj+tqv4_0 | 3.88 | 11.97 | +9.6% |
 | tqk4_1j+tqv4_0 | 4.25 | 12.38 | +13% |
-| tqk3b_sj+tqv4_0 | 3.75 | 13.71 | +26% |
+| tqk3_sjj+tqv4_0 | 3.75 | 13.71 | +26% |
 | tqk2_sj+tqv4_0 | 2.75 | 131.6 | — |
 
 ### Throughput
@@ -112,7 +112,7 @@ Qwen3 is robust to KV quantization — all types produce usable results. The spl
 | tqk4_0+tqv4_0 | 4.13 | 459 | 26.3 |
 | tqk4_sj+tqv4_0 | 4.13 | 445 | 23.2 |
 | tqk3_sj+tqv4_0 | 3.88 | 445 | 23.6 |
-| tqk3b_sj+tqv4_0 | 3.75 | 443 | 22.0 |
+| tqk3_sjj+tqv4_0 | 3.75 | 443 | 22.0 |
 
 ## Notes
 
@@ -126,7 +126,7 @@ Qwen3 is robust to KV quantization — all types produce usable results. The spl
 
 ### d=128 Types (fully implemented)
 
-| Operation | tqk4_0 | tqk5_0j | tqk4_1j | tqk3_sj | tqk4_sj | tqk3b_sj | tqk2_sj | tqv4_0 |
+| Operation | tqk4_0 | tqk5_0j | tqk4_1j | tqk3_sj | tqk4_sj | tqk3_sjj | tqk2_sj | tqv4_0 |
 |-----------|--------|---------|---------|---------|---------|----------|---------|--------|
 | get_rows | yes | yes | yes | yes | yes | yes | yes | yes |
 | set_rows | yes | yes | yes | yes | yes | yes | yes | yes |
