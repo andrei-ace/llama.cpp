@@ -11511,6 +11511,50 @@ kernel void kernel_get_rows_6hi_3lo_had_d256(
     for (int j = 0; j < 192; j++) out[perm[64 + j]]  = lo[j];
 }
 
+// 6hi_3lo_had_jj_d256 (tqk4_sjj_d256): get_rows (dequant with calibrated channel map, QJL on both hi and lo)
+[[host_name("kernel_get_rows_6hi_3lo_had_jj_d256")]]
+kernel void kernel_get_rows_6hi_3lo_had_jj_d256(
+        constant ggml_metal_kargs_get_rows & args,
+        device const void    * src0,
+        device const void    * src1,
+        device       float   * dst,
+        device const int32_t * tq_chmap,
+        constant int32_t & tq_layer_idx,
+        constant int32_t & tq_n_kv_heads,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]]) {
+    const int i10 = tgpig.x; const int i02 = tgpig.y; const int i03 = tgpig.z;
+    const int64_t r = ((const device int64_t *)((const device char *)src1 + i10*args.nb10))[0];
+    const int iblk = tiitg;
+    if (iblk >= args.ne00 / 256) return;
+    device const block_tqk_6hi_3lo_jj_d256 * blk = (device const block_tqk_6hi_3lo_jj_d256 *)
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk;
+    device const int32_t * perm = tq_chmap + (tq_layer_idx * tq_n_kv_heads + iblk) * 256;
+    float norm_hi = float(blk->norm_hi), norm_lo = float(blk->norm_lo);
+    float rnorm_hi = float(blk->rnorm_hi), rnorm_lo = float(blk->rnorm_lo);
+    // Hi: 5-bit MSE + QJL (FWHT-projected signs)
+    thread float hi[64];
+    for (int j = 0; j < 64; j++) hi[j] = tq_c32_d64[tq_up5(blk->qs_hi, j)];
+    tq_fwht<64>(hi);
+    thread float corr_hi[64];
+    for (int j = 0; j < 64; j++) corr_hi[j] = ((blk->signs_hi[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+    tq_fwht<64>(corr_hi);
+    float qjl_s_hi = 1.2533141f / 64.0f * rnorm_hi;
+    for (int j = 0; j < 64; j++) hi[j] = norm_hi * hi[j] + qjl_s_hi * corr_hi[j];
+    // Lo: 3-bit MSE + QJL (per-element sign correction, no FWHT on corr)
+    thread float lo[192];
+    for (int j = 0; j < 192; j++) lo[j] = tq_c8_d192[tq_up3(blk->qs_lo, j)] * norm_lo;
+    float qjl_s_lo = 1.2533141f / 192.0f * rnorm_lo;
+    for (int j = 0; j < 192; j++) {
+        float sign = ((blk->signs_lo[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f;
+        lo[j] += qjl_s_lo * sign;
+    }
+    tq_structured_unrotate_lo<192, 64>(lo);
+    device float * out = dst + (i10*args.ne00 + iblk*256) + i02*args.nb2/4 + i03*args.nb3/4;
+    for (int j = 0; j < 64; j++)  out[perm[j]]      = hi[j];
+    for (int j = 0; j < 192; j++) out[perm[64 + j]]  = lo[j];
+}
+
 // 6hi_3lo_had_d256: set_rows (5-bit hi + QJL, 3-bit lo, channel map — no QJL on lo)
 [[host_name("kernel_set_rows_6hi_3lo_had_d256_i32")]]
 kernel void kernel_set_rows_6hi_3lo_had_d256(

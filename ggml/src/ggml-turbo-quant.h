@@ -55,9 +55,9 @@ void tq_upload_channel_maps_to_devices(void);
 const int * tq_get_global_channel_map(int * out_n_layers, int * out_n_heads);
 
 // Per-layer KV cache type recommendations (from calibration)
-// type_index: 0=tqk3_sj, 1=tqk3_sjj, 2=tqk4_sj, 3=q8_0
-void tq_set_layer_type_recommendations(const uint8_t * types, const float * outlier_pcts, int n_layers);
-int  tq_get_layer_type_index(int layer);           // returns type_index or -1 if not set
+// Stores ggml_type values directly — no mapping table needed at runtime
+void tq_set_layer_type_recommendations(const int32_t * types, const float * outlier_pcts, int n_layers);
+int  tq_get_layer_type(int layer);                  // returns ggml_type or -1 if not set
 float tq_get_layer_outlier_pct(int layer);          // returns outlier% or -1 if not set
 int  tq_get_n_recommended_layers(void);             // returns n_layers or 0 if not set
 void tq_free_layer_type_recommendations(void);

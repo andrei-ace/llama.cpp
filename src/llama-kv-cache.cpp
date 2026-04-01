@@ -10,7 +10,7 @@ extern "C" {
     void tq_init_outlier_masks(int n_layers, int n_heads, int head_dim);
     void tq_set_outlier_mask_from_perm(int layer, int head, const uint8_t * perm, int head_dim);
     void tq_free_outlier_masks(void);
-    int  tq_get_layer_type_index(int layer);
+    int  tq_get_layer_type(int layer);
     int  tq_get_n_recommended_layers(void);
 }
 
@@ -22,18 +22,7 @@ extern "C" {
 #include <map>
 #include <stdexcept>
 
-// Map per-layer type index from calibration to actual ggml_type
-// type_index: 0=tqk3_sj, 1=tqk3_sjj, 2=tqk4_sj, 3=q8_0
-static ggml_type tq_type_index_to_ggml(int type_index, uint32_t head_dim) {
-    const bool d256 = (head_dim == 256);
-    switch (type_index) {
-        case 0: return d256 ? GGML_TYPE_TQK_5HI_3LO_HAD_D256 : GGML_TYPE_TQK_5HI_3LO_HAD;   // tqk3_sj
-        case 1: return d256 ? GGML_TYPE_TQK_3HI_2LO_HAD_D256 : GGML_TYPE_TQK_3HI_2LO_HAD;   // tqk3_sjj
-        case 2: return d256 ? GGML_TYPE_TQK_6HI_3LO_HAD_D256 : GGML_TYPE_TQK_6HI_3LO_HAD;   // tqk4_sj
-        case 3: return GGML_TYPE_Q8_0;
-        default: return d256 ? GGML_TYPE_TQK_5HI_3LO_HAD_D256 : GGML_TYPE_TQK_5HI_3LO_HAD;  // fallback: tqk3_sj
-    }
-}
+// No mapping table — calibration file stores ggml_type values directly
 
 //
 // llama_kv_cache
@@ -159,15 +148,15 @@ llama_kv_cache::llama_kv_cache(
         // Resolve per-layer K cache type for TQK_AUTO mode
         ggml_type layer_type_k = type_k;
         if (tqk_auto) {
-            const uint32_t head_dim = hparams.n_embd_head_k(0);
             if ((int)kv_layer_idx < n_rec) {
-                int ti = tq_get_layer_type_index((int)kv_layer_idx);
-                layer_type_k = tq_type_index_to_ggml(ti, head_dim);
-                LLAMA_LOG_INFO("%s: layer %3d (kv %2d): K type = %s (type_idx=%d)\n",
-                        __func__, il, kv_layer_idx, ggml_type_name(layer_type_k), ti);
+                int gt = tq_get_layer_type((int)kv_layer_idx);
+                if (gt >= 0) {
+                    layer_type_k = (ggml_type)gt;
+                }
+                LLAMA_LOG_INFO("%s: layer %3d (kv %2d): K type = %s\n",
+                        __func__, il, kv_layer_idx, ggml_type_name(layer_type_k));
             } else {
-                // Fallback: use tqk3_sj if recommendation index out of range
-                layer_type_k = tq_type_index_to_ggml(0, head_dim);
+                layer_type_k = GGML_TYPE_TQK_5HI_3LO_HAD;  // fallback: tqk3_sj
                 LLAMA_LOG_WARN("%s: layer %3d: no type recommendation, using %s\n",
                         __func__, il, ggml_type_name(layer_type_k));
             }

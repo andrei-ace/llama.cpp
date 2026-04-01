@@ -1170,14 +1170,13 @@ int ggml_metal_op_get_rows(ggml_metal_op_t ctx, int idx) {
                                   src_type == GGML_TYPE_TQK_2HI_1LO_HAD_D256 ||
                                   src_type == GGML_TYPE_TQK_3HI_2LO_HAD_D256);
             const int block_size = is_d256 ? 256 : 128;
-            // tqk4_sjj shares get_rows with tqk4_sj (QJL-lo correction auto-zeros when rnorm_lo=0)
-            const char * name = (src_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
-                                 src_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ) ? "kernel_get_rows_6hi_3lo_had" :
+            const char * name = (src_type == GGML_TYPE_TQK_6HI_3LO_HAD) ? "kernel_get_rows_6hi_3lo_had" :
+                (src_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ) ? "kernel_get_rows_6hi_3lo_had_jj" :
                 (src_type == GGML_TYPE_TQK_2HI_1LO_HAD) ? "kernel_get_rows_2hi_1lo_had" :
                 (src_type == GGML_TYPE_TQK_3HI_2LO_HAD) ? "kernel_get_rows_3hi_2lo_had" :
                 (src_type == GGML_TYPE_TQK_5HI_3LO_HAD_D256) ? "kernel_get_rows_5hi_3lo_had_d256" :
-                (src_type == GGML_TYPE_TQK_6HI_3LO_HAD_D256 ||
-                 src_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256) ? "kernel_get_rows_6hi_3lo_had_d256" :
+                (src_type == GGML_TYPE_TQK_6HI_3LO_HAD_D256) ? "kernel_get_rows_6hi_3lo_had_d256" :
+                (src_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256) ? "kernel_get_rows_6hi_3lo_had_jj_d256" :
                 (src_type == GGML_TYPE_TQK_2HI_1LO_HAD_D256) ? "kernel_get_rows_2hi_1lo_had_d256" :
                 (src_type == GGML_TYPE_TQK_3HI_2LO_HAD_D256) ? "kernel_get_rows_3hi_2lo_had_d256" :
                 "kernel_get_rows_5hi_3lo_had";

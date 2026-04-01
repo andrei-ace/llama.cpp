@@ -10,8 +10,8 @@
 extern "C" {
     void tq_set_outlier_mask_from_perm(int layer, int head, const uint8_t * perm, int head_dim);
     void tq_upload_channel_maps_to_devices(void);
-    void tq_set_layer_type_recommendations(const uint8_t * types, const float * outlier_pcts, int n_layers);
-    int  tq_get_layer_type_index(int layer);
+    void tq_set_layer_type_recommendations(const int32_t * types, const float * outlier_pcts, int n_layers);
+    int  tq_get_layer_type(int layer);
     int  tq_get_n_recommended_layers(void);
 }
 
@@ -1263,9 +1263,9 @@ common_init_result::common_init_result(common_params & params) :
         if (fread(&type_magic, 4, 1, fp) == 1 && type_magic == 0x54514C54) {
             uint32_t n_entries = 0;
             fread(&n_entries, 4, 1, fp);
-            std::vector<uint8_t> layer_type_indices(n_entries);
+            std::vector<int32_t> layer_type_indices(n_entries);
             std::vector<float>   layer_outlier_pcts(n_entries);
-            fread(layer_type_indices.data(), 1, n_entries, fp);
+            fread(layer_type_indices.data(), sizeof(int32_t), n_entries, fp);
             fread(layer_outlier_pcts.data(), sizeof(float), n_entries, fp);
 
             tq_set_layer_type_recommendations(
@@ -1364,9 +1364,9 @@ common_init_result_ptr common_init_from_params(common_params & params) {
                 if (fread(&type_magic, 4, 1, fp) == 1 && type_magic == 0x54514C54) {
                     uint32_t n_entries = 0;
                     fread(&n_entries, 4, 1, fp);
-                    std::vector<uint8_t> layer_type_indices(n_entries);
+                    std::vector<int32_t> layer_type_indices(n_entries);
                     std::vector<float>   layer_outlier_pcts(n_entries);
-                    fread(layer_type_indices.data(), 1, n_entries, fp);
+                    fread(layer_type_indices.data(), sizeof(int32_t), n_entries, fp);
                     fread(layer_outlier_pcts.data(), sizeof(float), n_entries, fp);
 
                     // Store in global turbo-quant state

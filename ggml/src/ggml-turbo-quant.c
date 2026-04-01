@@ -183,7 +183,7 @@ static uint32_t * tq_k_outlier_mask = NULL;  // [n_layers * n_heads * words_per_
 static uint32_t * tq_v_outlier_mask = NULL;
 
 // Per-layer type recommendations from calibration
-static uint8_t * tq_layer_type_indices = NULL;  // [n_rec_layers] type index: 0=tqk3_sj, 1=tqk3_sjj, 2=tqk4_sj, 3=q8_0
+static int32_t * tq_layer_type_indices = NULL;  // [n_rec_layers] ggml_type values directly
 static float   * tq_layer_outlier_pcts = NULL;  // [n_rec_layers] outlier concentration %
 static int       tq_n_rec_layers       = 0;
 
@@ -739,19 +739,19 @@ static void dequant_lo_mse(const uint8_t * qs, const float * c, int bits, int n_
 // Per-layer type recommendations
 // ---------------------------------------------------------------------------
 
-void tq_set_layer_type_recommendations(const uint8_t * types, const float * outlier_pcts, int n_layers) {
+void tq_set_layer_type_recommendations(const int32_t * types, const float * outlier_pcts, int n_layers) {
     tq_free_layer_type_recommendations();
     if (n_layers <= 0 || !types) return;
     tq_n_rec_layers = n_layers;
-    tq_layer_type_indices = (uint8_t *)malloc(n_layers);
-    memcpy(tq_layer_type_indices, types, n_layers);
+    tq_layer_type_indices = (int32_t *)malloc(n_layers * sizeof(int32_t));
+    memcpy(tq_layer_type_indices, types, n_layers * sizeof(int32_t));
     if (outlier_pcts) {
         tq_layer_outlier_pcts = (float *)malloc(n_layers * sizeof(float));
         memcpy(tq_layer_outlier_pcts, outlier_pcts, n_layers * sizeof(float));
     }
 }
 
-int tq_get_layer_type_index(int layer) {
+int tq_get_layer_type(int layer) {
     if (!tq_layer_type_indices || layer < 0 || layer >= tq_n_rec_layers) return -1;
     return (int)tq_layer_type_indices[layer];
 }
