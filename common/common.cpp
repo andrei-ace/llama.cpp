@@ -13,6 +13,9 @@ extern "C" {
     void tq_set_layer_type_recommendations(const int32_t * types, const float * outlier_pcts, int n_layers);
     int  tq_get_layer_type(int layer);
     int  tq_get_n_recommended_layers(void);
+    void tq_flex_configure(int split, int hi_bits, int lo_bits, int hi_res_bits, int qjl_hi, int qjl_lo);
+    int  tq_flex_get_block_bytes(void);
+    void ggml_type_set_size(enum ggml_type type, size_t size);
 }
 
 #include <algorithm>
@@ -1282,6 +1285,28 @@ common_init_result::common_init_result(common_params & params) :
     } else if (cparams.type_k == GGML_TYPE_TQK_AUTO && params.tq_perms_file.empty()) {
         LOG_ERR("%s: -ctk tqk requires --tq-perms file with per-layer type recommendations\n", __func__);
         return;
+    }
+
+    // TQK_FLEX: configure runtime parameters and patch type_size before context creation
+    if (cparams.type_k == GGML_TYPE_TQK_FLEX) {
+        tq_flex_configure(
+            params.tq_flex_split,
+            params.tq_flex_hi_bits,
+            params.tq_flex_lo_bits,
+            params.tq_flex_hi_res_bits,
+            params.tq_flex_qjl_hi,
+            params.tq_flex_qjl_lo);
+        int blk_bytes = tq_flex_get_block_bytes();
+        if (blk_bytes <= 0) {
+            LOG_ERR("%s: tqk_flex: invalid block size %d (check --tq-hi-bits, --tq-lo-bits)\n", __func__, blk_bytes);
+            return;
+        }
+        ggml_type_set_size(GGML_TYPE_TQK_FLEX, (size_t)blk_bytes);
+        float bpv = 8.0f * (float)blk_bytes / 128.0f;
+        LOG_INF("%s: tqk_flex configured: split=%d hi=%d lo=%d res=%d qjl_hi=%d qjl_lo=%d | %d bytes/block (%.2f bpv)\n",
+                __func__, params.tq_flex_split, params.tq_flex_hi_bits, params.tq_flex_lo_bits,
+                params.tq_flex_hi_res_bits, params.tq_flex_qjl_hi, params.tq_flex_qjl_lo,
+                blk_bytes, bpv);
     }
 
     llama_context * lctx = llama_init_from_model(model, cparams);

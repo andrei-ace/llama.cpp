@@ -263,6 +263,9 @@ llama_build(test-tq-architecture-search2.cpp)
 llama_build(test-tq-analyze-extreme.cpp)
 llama_build(test-tq-analyze-moderate.cpp)
 llama_build(test-tq-analyze-uniform.cpp)
+llama_build(test-tq-lo-sweep.cpp)
+llama_build(test-tq-softmax-analysis.cpp)
+llama_build(test-tq-inner-product-analysis.cpp)
 
 # libmtmd
 set(LLAMA_TEST_NAME test-mtmd-c-api)

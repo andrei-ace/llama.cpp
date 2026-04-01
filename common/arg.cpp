@@ -399,6 +399,8 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_TQK_HAD_PROD4,
     // TurboQuant V cache type
     GGML_TYPE_TQV_HAD_MSE4,
+    // TurboQuant flex (runtime-configurable testing type)
+    GGML_TYPE_TQK_FLEX,
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {
@@ -2040,6 +2042,52 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "TurboQuant channel permutation file (from llama-tq-calibrate)",
         [](common_params & params, const std::string & value) {
             params.tq_perms_file = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--tq-split"},
+        "TQK_FLEX: enable 32/96 channel split (requires --tq-perms). Default: no split",
+        [](common_params & params) {
+            params.tq_flex_split = 1;
+        }
+    ));
+    add_opt(common_arg(
+        {"--tq-hi-bits"}, "N",
+        string_format("TQK_FLEX: MSE bits for hi (or full vector if no split). Range: 1-8 (default: %d)", params.tq_flex_hi_bits),
+        [](common_params & params, int value) {
+            params.tq_flex_hi_bits = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--tq-lo-bits"}, "N",
+        string_format("TQK_FLEX: MSE bits for lo (only with --tq-split). Range: 1-8 (default: %d)", params.tq_flex_lo_bits),
+        [](common_params & params, int value) {
+            params.tq_flex_lo_bits = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--tq-hi-res-bits"}, "N",
+        string_format("TQK_FLEX: residual pass bits on hi. 0 = no residual (default: %d)", params.tq_flex_hi_res_bits),
+        [](common_params & params, int value) {
+            params.tq_flex_hi_res_bits = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--tq-qjl"}, "MODE",
+        "TQK_FLEX: QJL mode. Values: none, hi, both (default: none)",
+        [](common_params & params, const std::string & value) {
+            if (value == "none") {
+                params.tq_flex_qjl_hi = 0;
+                params.tq_flex_qjl_lo = 0;
+            } else if (value == "hi") {
+                params.tq_flex_qjl_hi = 1;
+                params.tq_flex_qjl_lo = 0;
+            } else if (value == "both") {
+                params.tq_flex_qjl_hi = 1;
+                params.tq_flex_qjl_lo = 1;
+            } else {
+                throw std::runtime_error("invalid --tq-qjl value: " + value + " (expected: none, hi, both)");
+            }
         }
     ));
     add_opt(common_arg(

@@ -450,7 +450,8 @@ extern "C" {
         GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256 = 67, // tqk4_sjj_d256: 3.94 bpv, d=256, 64/192 split, 5-bit+QJL hi / 3-bit+QJL lo
         GGML_TYPE_TQK_AUTO  = 68, // meta-type: auto-select TQ K cache type per layer from calibration
         GGML_TYPE_TQK_5R3_SJ = 69, // tqk5r3_sj: 4.625 bpv, 32/96 split, 5-bit+3-bit residual hi, 3-bit lo
-        GGML_TYPE_COUNT     = 70,
+        GGML_TYPE_TQK_FLEX   = 70, // tqk_flex:  runtime-configurable TQ type for testing
+        GGML_TYPE_COUNT     = 71,
     };
 
     // precision
@@ -2760,6 +2761,9 @@ extern "C" {
     };
 
     GGML_API const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type);
+
+    // Patch type_size at runtime (only for GGML_TYPE_TQK_FLEX)
+    GGML_API void ggml_type_set_size(enum ggml_type type, size_t size);
 
     // ggml threadpool
     // TODO: currently, only a few functions are in the base ggml API, while the rest are in the CPU backend

@@ -333,7 +333,7 @@ int main(int argc, char ** argv) {
 #define TQ_MID_TYPE GGML_TYPE_Q8_0
 #endif
         if (pct > 90.0f)       layer_types[l] = GGML_TYPE_Q8_0;          // extreme: q8_0
-        else if (pct >= 53.0f)  layer_types[l] = GGML_TYPE_TQK_5R3_SJ;
+        else if (pct >= 53.0f)  layer_types[l] = TQ_MID_TYPE;
         else                    layer_types[l] = GGML_TYPE_Q8_0;        // uniform: q8_0
         fprintf(stderr, "  layer %2d: outlier=%.1f%% -> %s\n", l, pct, ggml_type_name((ggml_type)layer_types[l]));
     }

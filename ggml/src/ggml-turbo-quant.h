@@ -66,6 +66,12 @@ void tq_free_layer_type_recommendations(void);
 void tq_set_current_layer(int layer, int is_k);
 void tq_set_current_head(int head);
 
+// TQK_FLEX: runtime-configurable TurboQuant type for testing
+// Must be called BEFORE KV cache allocation (before context creation).
+// qjl_hi/qjl_lo: 0 = no QJL, 1 = QJL on that subset
+void tq_flex_configure(int split, int hi_bits, int lo_bits, int hi_res_bits, int qjl_hi, int qjl_lo);
+int  tq_flex_get_block_bytes(void);
+
 #ifdef __cplusplus
 }
 #endif

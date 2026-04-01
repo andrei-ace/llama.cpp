@@ -1062,12 +1062,28 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_tqk_5r3_sj,
         .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_5r3_sj_ref,
     },
+    [GGML_TYPE_TQK_FLEX] = {
+        .type_name                = "tqk_flex",
+        .blck_size                = TQK_BLOCK_SIZE,
+        .type_size                = 0, // patched at runtime by tq_flex_configure
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tqk_flex,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tqk_flex_ref,
+    },
 };
 
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
     assert(type >= 0);
     assert(type < GGML_TYPE_COUNT);
     return &type_traits[type];
+}
+
+static size_t tqk_flex_type_size_override = 0;
+
+void ggml_type_set_size(enum ggml_type type, size_t size) {
+    if (type == GGML_TYPE_TQK_FLEX) {
+        tqk_flex_type_size_override = size;
+    }
 }
 
 //
@@ -1442,6 +1458,9 @@ int64_t ggml_blck_size(enum ggml_type type) {
 size_t ggml_type_size(enum ggml_type type) {
     assert(type >= 0);
     assert(type < GGML_TYPE_COUNT);
+    if (type == GGML_TYPE_TQK_FLEX && tqk_flex_type_size_override > 0) {
+        return tqk_flex_type_size_override;
+    }
     return type_traits[type].type_size;
 }
 

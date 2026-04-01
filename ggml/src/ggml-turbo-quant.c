@@ -3020,3 +3020,194 @@ void ggml_vec_dot_tqk_3hi_2lo_had_d256_f32(int n, float * GGML_RESTRICT s, size_
     }
     *s = sumf;
 }
+
+// ===========================================================================
+// TQK_FLEX: runtime-configurable type for testing bit configurations
+// ===========================================================================
+
+static int tq_flex_split = 0;
+static int tq_flex_hi_bits = 4;
+static int tq_flex_lo_bits = 3;
+static int tq_flex_hi_res_bits = 0;
+static int tq_flex_qjl_hi = 0;
+static int tq_flex_qjl_lo = 0;
+static int tq_flex_block_bytes = 0;
+
+void tq_flex_configure(int split, int hi_bits, int lo_bits, int hi_res_bits, int qjl_hi, int qjl_lo) {
+    tq_flex_split = split; tq_flex_hi_bits = hi_bits; tq_flex_lo_bits = lo_bits;
+    tq_flex_hi_res_bits = hi_res_bits; tq_flex_qjl_hi = qjl_hi; tq_flex_qjl_lo = qjl_lo;
+    int sz = 0;
+    if (split) { sz+=4; sz+=(32*hi_bits+7)/8; sz+=(96*lo_bits+7)/8;
+        if(hi_res_bits>0) sz+=2+(32*hi_res_bits+7)/8; if(qjl_hi) sz+=6; if(qjl_lo) sz+=14;
+    } else { sz+=2; sz+=(128*hi_bits+7)/8;
+        if(hi_res_bits>0) sz+=2+(128*hi_res_bits+7)/8; if(qjl_hi) sz+=18; }
+    tq_flex_block_bytes = sz;
+    fprintf(stderr,"tq_flex: split=%d hi=%d lo=%d res=%d qjl_hi=%d qjl_lo=%d -> %d B = %.3f bpv\n",
+            split,hi_bits,lo_bits,hi_res_bits,qjl_hi,qjl_lo,sz,(float)sz*8.0f/128.0f);
+}
+int tq_flex_get_block_bytes(void) { return tq_flex_block_bytes; }
+
+static void flex_pack(uint8_t*buf,int idx,int val,int bits){
+    int bp=idx*bits,bi=bp/8,sh=bp%8;
+    buf[bi]|=(uint8_t)((val&((1<<bits)-1))<<sh);
+    if(sh+bits>8)buf[bi+1]|=(uint8_t)(val>>(8-sh));
+    if(sh+bits>16)buf[bi+2]|=(uint8_t)(val>>(16-sh));
+}
+static int flex_unpack(const uint8_t*buf,int idx,int bits){
+    int bp=idx*bits,bi=bp/8,sh=bp%8;
+    int val=buf[bi]>>sh;
+    if(sh+bits>8)val|=buf[bi+1]<<(8-sh);
+    if(sh+bits>16)val|=buf[bi+2]<<(16-sh);
+    return val&((1<<bits)-1);
+}
+static float flex_centroid_buf[256];
+static const float*flex_get_centroids(int bits,int dim){
+    int n=1<<bits;
+    if(dim==32){if(bits==2)return centroids_4_d32;if(bits==3)return centroids_8_d32;
+        if(bits==4)return centroids_16_d32;if(bits==5)return centroids_32_d32;}
+    if(dim==96){if(bits==1)return centroids_2_d96;if(bits==2)return centroids_4_d96;if(bits==3)return centroids_8_d96;}
+    if(dim==128){if(bits==3)return centroids_8;if(bits==4)return centroids_16;}
+    float sigma=1.0f/sqrtf((float)dim);
+    for(int i=0;i<n;i++){float p=((float)i+0.5f)/(float)n;
+        float t=(p<0.5f)?sqrtf(-2.0f*logf(p)):sqrtf(-2.0f*logf(1.0f-p));
+        float cc=2.515517f+t*(0.802853f+t*0.010328f);float dd=1.0f+t*(1.432788f+t*(0.189269f+t*0.001308f));
+        flex_centroid_buf[i]=((p<0.5f)?-(t-cc/dd):(t-cc/dd))*sigma;}
+    return flex_centroid_buf;
+}
+
+void quantize_row_tqk_flex_ref(const float*GGML_RESTRICT x,void*GGML_RESTRICT y,int64_t k){
+    assert(k%128==0); const int64_t nb=k/128; tq_init_rotations();
+    for(int64_t i=0;i<nb;i++){
+        if(nb>1)tq_cur_head=(int)(i%(tq_n_heads>0?tq_n_heads:nb));
+        uint8_t*blk=(uint8_t*)y+i*tq_flex_block_bytes; const float*xb=x+i*128;
+        memset(blk,0,tq_flex_block_bytes); int off=0;
+        if(tq_flex_split){
+            float hi_raw[32],lo_raw[96],hi_rot[32],lo_rot[96];
+            tq_split_channels(xb,hi_raw,lo_raw);
+            memcpy(hi_rot,hi_raw,sizeof(hi_rot));tq_fwht(hi_rot,32);
+            memcpy(lo_rot,lo_raw,sizeof(lo_rot));tq_bare_rotate_lo(lo_rot,96);
+            float sh=0,sl=0;for(int j=0;j<32;j++)sh+=hi_rot[j]*hi_rot[j];
+            for(int j=0;j<96;j++)sl+=lo_rot[j]*lo_rot[j];
+            float norm_hi=sqrtf(sh),norm_lo=sqrtf(sl);
+            ggml_half*norms=(ggml_half*)(blk+off);
+            norms[0]=GGML_FP32_TO_FP16(norm_hi);norms[1]=GGML_FP32_TO_FP16(norm_lo);off+=4;
+            float inv_hi=(norm_hi>1e-12f)?1.0f/norm_hi:0;
+            const float*c_hi=flex_get_centroids(tq_flex_hi_bits,32);int n_hi=1<<tq_flex_hi_bits;int hi_off=off;
+            for(int j=0;j<32;j++)flex_pack(blk+off,j,nearest(hi_rot[j]*inv_hi,c_hi,n_hi),tq_flex_hi_bits);
+            off+=(32*tq_flex_hi_bits+7)/8;
+            float inv_lo=(norm_lo>1e-12f)?1.0f/norm_lo:0;
+            const float*c_lo=flex_get_centroids(tq_flex_lo_bits,96);int n_lo=1<<tq_flex_lo_bits;int lo_off=off;
+            for(int j=0;j<96;j++)flex_pack(blk+off,j,nearest(lo_rot[j]*inv_lo,c_lo,n_lo),tq_flex_lo_bits);
+            off+=(96*tq_flex_lo_bits+7)/8;
+            if(tq_flex_hi_res_bits>0){float r[32];
+                for(int j=0;j<32;j++)r[j]=hi_rot[j]-norm_hi*c_hi[flex_unpack(blk+hi_off,j,tq_flex_hi_bits)];
+                float rn=0;for(int j=0;j<32;j++)rn+=r[j]*r[j];rn=sqrtf(rn);
+                *(ggml_half*)(blk+off)=GGML_FP32_TO_FP16(rn);off+=2;
+                float inv_r=(rn>1e-12f)?1.0f/rn:0;const float*c_r=flex_get_centroids(tq_flex_hi_res_bits,32);int n_r=1<<tq_flex_hi_res_bits;
+                for(int j=0;j<32;j++)flex_pack(blk+off,j,nearest(r[j]*inv_r,c_r,n_r),tq_flex_hi_res_bits);
+                off+=(32*tq_flex_hi_res_bits+7)/8;}
+            if(tq_flex_qjl_hi){float recon[32];
+                for(int j=0;j<32;j++)recon[j]=norm_hi*c_hi[flex_unpack(blk+hi_off,j,tq_flex_hi_bits)];
+                tq_fwht(recon,32);float r[32];for(int j=0;j<32;j++)r[j]=hi_raw[j]-recon[j];
+                float rn=qjl_forward(r,blk+off+2,32,QJL_SEED_32);
+                *(ggml_half*)(blk+off)=GGML_FP32_TO_FP16(rn);off+=6;}
+            if(tq_flex_qjl_lo){float r[96];
+                for(int j=0;j<96;j++)r[j]=lo_rot[j]-norm_lo*c_lo[flex_unpack(blk+lo_off,j,tq_flex_lo_bits)];
+                float rn=0;for(int j=0;j<96;j++)rn+=r[j]*r[j];rn=sqrtf(rn);
+                *(ggml_half*)(blk+off)=GGML_FP32_TO_FP16(rn);off+=2;
+                for(int j=0;j<96;j++)if(r[j]>=0)blk[off+j/8]|=(uint8_t)(1<<(j%8));off+=12;}
+        }else{
+            float rot[128];memcpy(rot,xb,sizeof(rot));tq_fwht(rot,128);
+            float nm=0;for(int j=0;j<128;j++)nm+=rot[j]*rot[j];nm=sqrtf(nm);
+            *(ggml_half*)(blk+off)=GGML_FP32_TO_FP16(nm);off+=2;
+            float inv=(nm>1e-12f)?1.0f/nm:0;const float*c=flex_get_centroids(tq_flex_hi_bits,128);int nc=1<<tq_flex_hi_bits;
+            for(int j=0;j<128;j++)flex_pack(blk+off,j,nearest(rot[j]*inv,c,nc),tq_flex_hi_bits);
+            off+=(128*tq_flex_hi_bits+7)/8;
+            if(tq_flex_qjl_hi){float r[128];for(int j=0;j<128;j++)r[j]=rot[j]-nm*c[flex_unpack(blk+2,j,tq_flex_hi_bits)];
+                float rn=qjl_forward(r,blk+off+2,128,QJL_SEED_128);
+                *(ggml_half*)(blk+off)=GGML_FP32_TO_FP16(rn);off+=18;}
+        }
+    }
+}
+
+void dequantize_row_tqk_flex(const void*GGML_RESTRICT x,float*GGML_RESTRICT y,int64_t k){
+    assert(k%128==0);const int64_t nb=k/128;tq_init_rotations();
+    for(int64_t i=0;i<nb;i++){
+        if(nb>1)tq_cur_head=(int)(i%(tq_n_heads>0?tq_n_heads:nb));
+        const uint8_t*blk=(const uint8_t*)x+i*tq_flex_block_bytes;float*out=y+i*128;int off=0;
+        if(tq_flex_split){
+            float norm_hi=GGML_FP16_TO_FP32(((const ggml_half*)(blk+off))[0]);
+            float norm_lo=GGML_FP16_TO_FP32(((const ggml_half*)(blk+off))[1]);off+=4;
+            const float*c_hi=flex_get_centroids(tq_flex_hi_bits,32);float hi[32];
+            for(int j=0;j<32;j++)hi[j]=norm_hi*c_hi[flex_unpack(blk+off,j,tq_flex_hi_bits)];
+            off+=(32*tq_flex_hi_bits+7)/8;
+            const float*c_lo=flex_get_centroids(tq_flex_lo_bits,96);float lo[96];
+            for(int j=0;j<96;j++)lo[j]=norm_lo*c_lo[flex_unpack(blk+off,j,tq_flex_lo_bits)];
+            off+=(96*tq_flex_lo_bits+7)/8;
+            if(tq_flex_hi_res_bits>0){float rn2=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                const float*c_r=flex_get_centroids(tq_flex_hi_res_bits,32);
+                for(int j=0;j<32;j++)hi[j]+=rn2*c_r[flex_unpack(blk+off,j,tq_flex_hi_res_bits)];
+                off+=(32*tq_flex_hi_res_bits+7)/8;}
+            tq_fwht(hi,32);
+            if(tq_flex_qjl_hi){float rn=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                float corr[32];qjl_inverse(blk+off,rn,corr,32,QJL_SEED_32);
+                for(int j=0;j<32;j++)hi[j]+=corr[j];off+=4;}
+            if(tq_flex_qjl_lo){float rn=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                float sc=1.2533141f/96.0f*rn;const uint8_t*signs=blk+off;
+                for(int j=0;j<96;j++)lo[j]+=((signs[j/8]>>(j%8))&1)?sc:-sc;off+=12;}
+            tq_bare_unrotate_lo(lo,96);tq_merge_channels(hi,lo,out);
+        }else{
+            float nm=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+            const float*c=flex_get_centroids(tq_flex_hi_bits,128);
+            for(int j=0;j<128;j++)out[j]=nm*c[flex_unpack(blk+off,j,tq_flex_hi_bits)];
+            off+=(128*tq_flex_hi_bits+7)/8;tq_fwht(out,128);
+            if(tq_flex_qjl_hi){float rn=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                float corr[128];qjl_inverse(blk+off,rn,corr,128,QJL_SEED_128);
+                for(int j=0;j<128;j++)out[j]+=corr[j];off+=16;}
+        }
+    }
+}
+
+void ggml_vec_dot_tqk_flex_f32(int n,float*GGML_RESTRICT s,size_t bs,
+        const void*GGML_RESTRICT vx,size_t bx,const void*GGML_RESTRICT vy,size_t by,int nrc){
+    assert(n%128==0);assert(nrc==1);(void)bs;(void)bx;(void)by;(void)nrc;
+    tq_init_rotations();const float*q=(const float*)vy;const int64_t nb=n/128;float sumf=0;
+    for(int64_t i=0;i<nb;i++){
+        if(nb>1)tq_cur_head=(int)(i%(tq_n_heads>0?tq_n_heads:nb));
+        const uint8_t*blk=(const uint8_t*)vx+i*tq_flex_block_bytes;const float*qb=q+i*128;int off=0;
+        if(tq_flex_split){
+            float hi_raw[32],lo_raw[96];tq_split_channels(qb,hi_raw,lo_raw);
+            float qhi[32],qlo[96];memcpy(qhi,hi_raw,sizeof(qhi));tq_fwht(qhi,32);
+            memcpy(qlo,lo_raw,sizeof(qlo));tq_bare_rotate_lo(qlo,96);
+            float norm_hi=GGML_FP16_TO_FP32(((const ggml_half*)(blk+off))[0]);
+            float norm_lo=GGML_FP16_TO_FP32(((const ggml_half*)(blk+off))[1]);off+=4;
+            const float*c_hi=flex_get_centroids(tq_flex_hi_bits,32);
+            float dh=0;for(int j=0;j<32;j++)dh+=qhi[j]*c_hi[flex_unpack(blk+off,j,tq_flex_hi_bits)];
+            dh*=norm_hi;off+=(32*tq_flex_hi_bits+7)/8;
+            const float*c_lo=flex_get_centroids(tq_flex_lo_bits,96);
+            float dl=0;for(int j=0;j<96;j++)dl+=qlo[j]*c_lo[flex_unpack(blk+off,j,tq_flex_lo_bits)];
+            dl*=norm_lo;off+=(96*tq_flex_lo_bits+7)/8;
+            if(tq_flex_hi_res_bits>0){float rn2=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                const float*c_r=flex_get_centroids(tq_flex_hi_res_bits,32);
+                float dr=0;for(int j=0;j<32;j++)dr+=qhi[j]*c_r[flex_unpack(blk+off,j,tq_flex_hi_res_bits)];
+                dh+=dr*rn2;off+=(32*tq_flex_hi_res_bits+7)/8;}
+            float qjl_h=0,qjl_l=0;
+            if(tq_flex_qjl_hi){float rn=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                qjl_h=qjl_asymmetric_dot(hi_raw,32,QJL_SEED_32,blk+off,rn);off+=4;}
+            if(tq_flex_qjl_lo){float rn=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                qjl_l=qjl_asymmetric_dot_rotated(qlo,96,blk+off,rn);off+=12;}
+            sumf+=dh+dl+qjl_h+qjl_l;
+        }else{
+            float rot[128];memcpy(rot,qb,sizeof(rot));tq_fwht(rot,128);
+            float nm=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+            const float*c=flex_get_centroids(tq_flex_hi_bits,128);
+            float d=0;for(int j=0;j<128;j++)d+=rot[j]*c[flex_unpack(blk+off,j,tq_flex_hi_bits)];
+            d*=nm;off+=(128*tq_flex_hi_bits+7)/8;
+            float qd=0;
+            if(tq_flex_qjl_hi){float rn=GGML_FP16_TO_FP32(*(const ggml_half*)(blk+off));off+=2;
+                qd=qjl_asymmetric_dot(qb,128,QJL_SEED_128,blk+off,rn);off+=16;}
+            sumf+=d+qd;
+        }
+    }
+    *s=sumf;
+}

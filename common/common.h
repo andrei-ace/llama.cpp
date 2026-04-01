@@ -551,6 +551,14 @@ struct common_params {
 
     std::string tq_perms_file; // TurboQuant channel permutation file (from tq-calibrate)
 
+    // TQK_FLEX runtime config (--tq-* flags)
+    int  tq_flex_split        = 0; // 0 = uniform (full FWHT-128), 1 = 32/96 split
+    int  tq_flex_hi_bits      = 4; // MSE bits for hi (or full vector if no split)
+    int  tq_flex_lo_bits      = 3; // MSE bits for lo (only with split)
+    int  tq_flex_hi_res_bits  = 0; // residual pass bits on hi (0 = none)
+    int  tq_flex_qjl_hi       = 0; // QJL on hi subset
+    int  tq_flex_qjl_lo       = 0; // QJL on lo subset
+
     // Per-layer K cache types loaded from calibration (populated when -ctk tqk is used)
     // Indexed by KV cache layer index (compacted, not model layer index)
     std::vector<ggml_type> tq_layer_k_types;
