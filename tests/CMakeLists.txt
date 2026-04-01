@@ -260,6 +260,9 @@ endif()
 # TurboQuant architecture search — research tools, not CI tests
 llama_build(test-tq-architecture-search.cpp)
 llama_build(test-tq-architecture-search2.cpp)
+llama_build(test-tq-analyze-extreme.cpp)
+llama_build(test-tq-analyze-moderate.cpp)
+llama_build(test-tq-analyze-uniform.cpp)
 
 # libmtmd
 set(LLAMA_TEST_NAME test-mtmd-c-api)
