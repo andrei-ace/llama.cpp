@@ -1716,7 +1716,7 @@ void ggml_vec_dot_tqk_6hi_3lo_had_jj_f32(int n, float * GGML_RESTRICT s, size_t 
 }
 
 // ---------------------------------------------------------------------------
-// TQK 2hi_1lo_had (tqk2_sj): 2-bit MSE + QJL on outliers, 1-bit MSE + QJL on regulars
+// TQK 2hi_1lo_had (tqk2_sjj): 2-bit MSE + QJL on outliers, 1-bit MSE + QJL on regulars
 // QJL on both hi and lo (lo in original space). 2.75 bpv.
 // ---------------------------------------------------------------------------
 

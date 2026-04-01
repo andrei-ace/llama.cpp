@@ -489,7 +489,7 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "tqk4_sj") {
         return GGML_TYPE_TQK_6HI_3LO_HAD;
     }
-    if (s == "tqk2_sj") {
+    if (s == "tqk2_sjj") {
         return GGML_TYPE_TQK_2HI_1LO_HAD;
     }
     if (s == "tqk3_sjj") {
@@ -501,7 +501,7 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "tqk4_sj_d256") {
         return GGML_TYPE_TQK_6HI_3LO_HAD_D256;
     }
-    if (s == "tqk2_sj_d256") {
+    if (s == "tqk2_sjj_d256") {
         return GGML_TYPE_TQK_2HI_1LO_HAD_D256;
     }
     if (s == "tqk3_sjj_d256") {
