@@ -174,10 +174,11 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "       --metric var      Outlier = highest variance Var(K) (default)\n");
     fprintf(stderr, "       --metric mag      Outlier = highest mean |K|\n");
     fprintf(stderr, "       --metric both     Outlier = |K| × std(K)\n");
+    fprintf(stderr, "       --stats FILE      Dump per-channel stats CSV (for visualization)\n");
 }
 
 int main(int argc, char ** argv) {
-    std::string model_path, calib_file, output_path = "tq-perms.bin";
+    std::string model_path, calib_file, output_path = "tq-perms.bin", stats_path;
     int n_tokens_max = 4096, n_ctx = 512, n_gpu_layers = 99;
     bool pre_rope = false;
     calib_metric_t metric = METRIC_VAR;
@@ -192,6 +193,7 @@ int main(int argc, char ** argv) {
         else if ((arg == "-ngl" || arg == "--n-gpu-layers") && i+1 < argc) n_gpu_layers = std::atoi(argv[++i]);
         else if (arg == "--pre-rope") pre_rope = true;
         else if (arg == "--post-rope") pre_rope = false;
+        else if (arg == "--stats" && i+1 < argc) stats_path = argv[++i];
         else if (arg == "--metric" && i+1 < argc) {
             std::string m = argv[++i];
             if (m == "mag") metric = METRIC_MAG;
@@ -294,6 +296,89 @@ int main(int argc, char ** argv) {
             g_calib.compute_perm(old_cidx, h, all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim);
         }
         fprintf(stderr, "  layer %2d: %lld vectors\n", l, (long long)g_calib.counts[old_cidx]);
+    }
+
+    // --stats: dump per-channel statistics to CSV for visualization
+    if (!stats_path.empty()) {
+        FILE * sf = fopen(stats_path.c_str(), "w");
+        if (!sf) { fprintf(stderr, "error: cannot open stats file '%s'\n", stats_path.c_str()); }
+        else {
+            fprintf(sf, "layer,head,channel,mean_abs,variance,std,importance,rank,is_outlier\n");
+            for (int l = 0; l < n_kv_layers; l++) {
+                int old_cidx = kv_cidx_map[l];
+                int64_t n = std::max(g_calib.counts[old_cidx], (int64_t)1);
+                for (int h = 0; h < n_kv_heads; h++) {
+                    size_t off = ((size_t)old_cidx * n_kv_heads + h) * head_dim;
+                    const double * sa = g_calib.sum_abs.data() + off;
+                    const double * sv = g_calib.sum_val.data() + off;
+                    const double * ss = g_calib.sum_sq.data()  + off;
+                    const uint8_t * perm = all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim;
+
+                    // Compute importance scores and ranks
+                    std::vector<std::pair<double, int>> ranked(head_dim);
+                    for (int d = 0; d < head_dim; d++) {
+                        double mag = sa[d] / n;
+                        double var = ss[d] / n - (sv[d] / n) * (sv[d] / n);
+                        if (var < 0) var = 0;
+                        double score = (metric == METRIC_MAG) ? mag :
+                                       (metric == METRIC_VAR) ? var : mag * sqrt(var);
+                        ranked[d] = { score, d };
+                    }
+                    std::sort(ranked.begin(), ranked.end(),
+                              [](const auto & a, const auto & b) { return a.first > b.first; });
+
+                    // Build rank map and outlier set
+                    std::vector<int> rank_of(head_dim);
+                    std::vector<bool> is_outlier(head_dim, false);
+                    for (int r = 0; r < head_dim; r++) {
+                        rank_of[ranked[r].second] = r;
+                        if (r < n_hi) is_outlier[ranked[r].second] = true;
+                    }
+
+                    for (int d = 0; d < head_dim; d++) {
+                        double mag = sa[d] / n;
+                        double var = ss[d] / n - (sv[d] / n) * (sv[d] / n);
+                        if (var < 0) var = 0;
+                        double score = (metric == METRIC_MAG) ? mag :
+                                       (metric == METRIC_VAR) ? var : mag * sqrt(var);
+                        fprintf(sf, "%d,%d,%d,%.8f,%.8f,%.8f,%.8f,%d,%d\n",
+                                l, h, d, mag, var, sqrt(var), score, rank_of[d],
+                                is_outlier[d] ? 1 : 0);
+                    }
+                }
+            }
+            fclose(sf);
+            fprintf(stderr, "saved channel statistics to '%s'\n", stats_path.c_str());
+
+            // Print summary: outlier concentration ratio
+            fprintf(stderr, "\n=== Outlier concentration summary ===\n");
+            for (int l = 0; l < std::min(n_kv_layers, 3); l++) {
+                int old_cidx = kv_cidx_map[l];
+                int64_t n = std::max(g_calib.counts[old_cidx], (int64_t)1);
+                double total_var = 0, hi_var = 0;
+                // Average across heads
+                for (int h = 0; h < n_kv_heads; h++) {
+                    size_t off = ((size_t)old_cidx * n_kv_heads + h) * head_dim;
+                    const double * sv = g_calib.sum_val.data() + off;
+                    const double * ss = g_calib.sum_sq.data()  + off;
+                    const uint8_t * perm = all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        double var = ss[d] / n - (sv[d] / n) * (sv[d] / n);
+                        if (var < 0) var = 0;
+                        total_var += var;
+                    }
+                    for (int d = 0; d < n_hi; d++) {
+                        int ch = perm[d];
+                        double var = ss[ch] / n - (sv[ch] / n) * (sv[ch] / n);
+                        if (var < 0) var = 0;
+                        hi_var += var;
+                    }
+                }
+                double hi_pct = 100.0 * hi_var / (total_var + 1e-30);
+                fprintf(stderr, "  layer %2d: top %d%% channels hold %.1f%% of total variance\n",
+                        l, 100 * n_hi / head_dim, hi_pct);
+            }
+        }
     }
 
     FILE * fp = fopen(output_path.c_str(), "wb");
