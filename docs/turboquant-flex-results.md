@@ -261,20 +261,82 @@ Offset  Size   Field
 
 Model: q4_k_m weights, Metal FA, wikitext-2, 20 chunks.
 
-Calibration: 7 split layers (0,1,2,3,13,19,27) + 21 non-split, avg 6.28 bpv.
-
 The 7B has more extreme early layers than the 1.5B: layers 0-3 are all >70% outlier concentration (100%, 92%, 72%, 87%), plus layer 13 (76%), 19 (80%), and 27 (100%). The middle layers (4-12, 14-18, 20-26) are uniformly 50-65%.
+
+### Best Configuration (Korean-safe)
+
+The 7B requires higher precision than the 1.5B for multilingual tasks. A "Pauli test" (Korean transliteration of scientist names using 외래어 표기법 standard) revealed that lower bit configs that pass English PPL tests can corrupt cross-script generation. The winning config was determined by finding the lowest bpv that passes both PPL and Pauli tests.
+
+```bash
+llama-tq-calibrate -m model.gguf -f ptb.txt -o perms.bin \
+    --flex-extreme 1:10:5:1:0 \
+    --flex-high 1:10:5:1:0 \
+    --flex-moderate 0:5:0:1:0 \
+    --flex-threshold-high 70
+```
+
+**Split layers** (7 layers, >70% outlier): 10-bit hi (1024 centroids, d=32) + 5-bit lo (32 centroids, d=96) + QJL on hi only. 110 bytes = **6.88 bpv**.
+
+**Non-split layers** (21 layers, <70% outlier): 5-bit uniform (32 centroids, d=128) + QJL. 100 bytes = **6.25 bpv**.
+
+**Average: 6.41 bpv = 2.5x K cache compression.**
+
+With QJL on both hi and lo for split layers (conservative for very long context): avg 6.62 bpv.
+
+### Per-Layer Assignment
+
+| Layer | Outlier % | Config | bpv |
+|-------|-----------|--------|-----|
+| 0 | 100% | split 10/5 QJL=hi | 6.88 |
+| 1 | 92% | split 10/5 QJL=hi | 6.88 |
+| 2 | 72% | split 10/5 QJL=hi | 6.88 |
+| 3 | 87% | split 10/5 QJL=hi | 6.88 |
+| 4-12 | 50-58% | nosplit 5-bit + QJL | 6.25 |
+| 13 | 76% | split 10/5 QJL=hi | 6.88 |
+| 14-18 | 60-70% | nosplit 5-bit + QJL | 6.25 |
+| 19 | 80% | split 10/5 QJL=hi | 6.88 |
+| 20-26 | 57-64% | nosplit 5-bit + QJL | 6.25 |
+| 27 | 100% | split 10/5 QJL=hi | 6.88 |
+
+### PPL Results (20 chunks)
 
 | KV config | bpv | PPL | ±CI | vs f16 |
 |-----------|-----|-----|-----|--------|
 | f16 KV | 16.00 | 7.780 | ±0.297 | — |
 | q8_0 KV | 8.50 | 7.783 | ±0.298 | +0.03% |
-| TQ+QJL | 7.12 | 7.805 | ±0.298 | +0.3% |
-| **TQ best** | **6.28** | **7.816** | **±0.298** | **+0.5%** |
+| **TQ QJL all** | **6.62** | **7.826** | **±0.300** | **+0.6%** |
+| **TQ winner** | **6.41** | **7.831** | **±0.300** | **+0.7%** |
 
-All results fall within each other's 95% confidence intervals. TQ at 6.28 bpv achieves 2.5x K cache compression with +0.5% PPL degradation — matching the 1.5B results.
+All results fall within each other's 95% confidence intervals.
 
-The same architecture (threshold 70%, 9/4 split + 6-bit non-split) works on both models without any tuning changes, only the number of split layers differs (7 vs 4) based on each model's outlier distribution.
+### Pauli Test (Korean Transliteration)
+
+The Pauli test checks if TQ preserves attention precision for rare cross-script tokens. The 7B model knows Korean better than the 1.5B but is still imperfect (wrong on "Wolfgang Pauli"). The key metric is whether TQ output matches f16 output.
+
+| Scientist | f16 / q8_0 | TQ winner (6.41 bpv) |
+|-----------|-----------|----------------------|
+| Wolfgang Pauli | 폴딩우글 파울리 | ✅ identical |
+| Niels Bohr | 니엘스 보어 | ✅ identical |
+| Erwin Schrödinger | 에르빈 슈뢰딩거 | ✅ identical |
+| Werner Heisenberg | 베르너 하이젠베르크 | ✅ identical |
+| Max Planck | 맥스 플랑크 | ✅ identical |
+| Enrico Fermi | 엔리코 페르미 | ✅ identical |
+
+6/6 match f16. Lower bpv configs (6-bit non-split, 9-bit split) fail this test — they produce mixed Korean/Latin garbage characters.
+
+### Differences from 1.5B Configuration
+
+| | 1.5B | 7B |
+|---|---|---|
+| Split layers | 4 (threshold 70%) | 7 (threshold 70%) |
+| Split hi bits | 9-bit | 10-bit (Korean needs more) |
+| Split lo bits | 4-bit | 5-bit |
+| Non-split bits | 6-bit | 5-bit |
+| Non-split QJL | no | yes |
+| Avg bpv | 6.21 | 6.41 |
+| PPL vs f16 | +0.5% | +0.7% |
+
+The 7B needs 10-bit hi (vs 9-bit for 1.5B) because the Pauli test fails at 9-bit with QJL. This is likely due to a QJL precision bug at 9-bit that affects multilingual attention — under investigation. The 1.5B was only tested on English where this doesn't manifest.
 
 ## Generation Quality Comparison
 
