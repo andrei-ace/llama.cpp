@@ -24,7 +24,7 @@ These split channels into 32 outliers and 96 regulars based on calibrated per-la
 | `tqk4_sj` | 4.13 | 5-bit MSE + 1-bit QJL | 3-bit MSE |
 | `tqk3_sj` | 3.88 | 4-bit MSE + 1-bit QJL | 3-bit MSE |
 | `tqk3_sjj` | 3.75 | 3-bit MSE + 1-bit QJL | 2-bit MSE + 1-bit QJL |
-| `tqk2_sj` | 2.75 | 2-bit MSE + 1-bit QJL | 1-bit MSE + 1-bit QJL |
+| `tqk2_sjj` | 2.75 | 2-bit MSE + 1-bit QJL | 1-bit MSE + 1-bit QJL |
 
 Naming convention: `tqk{approx_bpv}_{variant}` where `s` = split, `j` = QJL correction.
 
@@ -72,7 +72,7 @@ tqk3_sjj (60B = 3.75 bpv):
   signs_hi    4B (32 × 1-bit)
   signs_lo   12B (96 × 1-bit)
 
-tqk2_sj (44B = 2.75 bpv):
+tqk2_sjj (44B = 2.75 bpv):
   norm_hi      2B    norm_lo      2B    rnorm_hi     2B    rnorm_lo     2B
   qs_hi       8B (32 × 2-bit)
   qs_lo      12B (96 × 1-bit)
@@ -88,7 +88,7 @@ q4_1  (20B = 5.00 bpv):  scale 2B + min 2B + 32×4-bit 16B
 q8_0  (34B = 8.50 bpv):  scale 2B + 32×8-bit 32B
 ```
 
-The fp16 norms are overhead — at low bit rates they become significant (e.g. 8B of norms in tqk2_sj's 44B total = 18%).
+The fp16 norms are overhead — at low bit rates they become significant (e.g. 8B of norms in tqk2_sjj's 44B total = 18%).
 
 ## How it works
 

@@ -99,7 +99,7 @@ Qwen3 is robust to KV quantization — all types produce usable results. The spl
 | tqk3_sj+tqv4_0 | 3.88 | 11.97 | +9.6% |
 | tqk4_1j+tqv4_0 | 4.25 | 12.38 | +13% |
 | tqk3_sjj+tqv4_0 | 3.75 | 13.71 | +26% |
-| tqk2_sj+tqv4_0 | 2.75 | 131.6 | — |
+| tqk2_sjj+tqv4_0 | 2.75 | 131.6 | — |
 
 ### Throughput
 
@@ -126,7 +126,7 @@ Qwen3 is robust to KV quantization — all types produce usable results. The spl
 
 ### d=128 Types (fully implemented)
 
-| Operation | tqk4_0 | tqk5_0j | tqk4_1j | tqk3_sj | tqk4_sj | tqk3_sjj | tqk2_sj | tqv4_0 |
+| Operation | tqk4_0 | tqk5_0j | tqk4_1j | tqk3_sj | tqk4_sj | tqk3_sjj | tqk2_sjj | tqv4_0 |
 |-----------|--------|---------|---------|---------|---------|----------|---------|--------|
 | get_rows | yes | yes | yes | yes | yes | yes | yes | yes |
 | set_rows | yes | yes | yes | yes | yes | yes | yes | yes |
