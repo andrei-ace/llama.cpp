@@ -6716,6 +6716,9 @@ template [[host_name("kernel_flash_attn_ext_tq3j_dk128_dv128")]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_tq3j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tq2j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tq2j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tql_dk512_dv512")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tql,  8, dequantize_tql,  half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 
 #undef FA_TYPES
 #undef FA_TYPES_BF
@@ -7359,6 +7362,9 @@ template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk128_dv128")]] kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tql_dk512_dv512")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tql,  32, dequantize_tql_t4,  half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 
 #undef FA_TYPES
 #undef FA_TYPES_F32
