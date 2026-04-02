@@ -131,6 +131,11 @@ static __global__ void flash_attn_ext_vec(
     __shared__ float  KQ[ne_KQ > ne_combine ? ne_KQ : ne_combine];
 #endif // V_DOT2_F32_F16_AVAILABLE
 
+    // Shared memory centroid LUT for TQK_FLEX — loaded once, persists across entire KV loop
+    // Layout: [0..255] = hi/d128 centroids, [256..511] = lo centroids (split mode only)
+    constexpr bool is_flex_type_shmem = (type_K == GGML_TYPE_TQK_FLEX);
+    __shared__ float flex_ct_shmem[is_flex_type_shmem ? 512 : 1];
+
     float KQ_max[ncols];
     float KQ_sum[ncols];
 #pragma unroll
@@ -349,6 +354,27 @@ static __global__ void flash_attn_ext_vec(
         }
     }
 
+    // Load flex centroid tables into shared memory (once, before KV loop)
+    // Only for bit widths ≤8 (up to 256 centroids). 9-10 bit falls back to old path.
+    bool flex_use_shmem = false;
+    if constexpr (type_K == GGML_TYPE_TQK_FLEX) {
+        if (flex_cfg) {
+            const int fc_split   = flex_cfg[0];
+            const int fc_hi_bits = flex_cfg[1];
+            const int fc_lo_bits = flex_cfg[2];
+            if (fc_hi_bits <= 8 && fc_lo_bits <= 8) {
+                flex_use_shmem = true;
+                if (fc_split) {
+                    tq_flex_load_centroids_d32(flex_ct_shmem, fc_hi_bits, tid, nthreads);
+                    tq_flex_load_centroids_d96(flex_ct_shmem + 256, fc_lo_bits, tid, nthreads);
+                } else {
+                    tq_flex_load_centroids_d128(flex_ct_shmem, fc_hi_bits, tid, nthreads);
+                }
+            }
+            __syncthreads();
+        }
+    }
+
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     K     += blockIdx.y*nthreads * nb11;
     V     += blockIdx.y*nthreads * nb21;
@@ -372,7 +398,17 @@ static __global__ void flash_attn_ext_vec(
 
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
-                float sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j], flex_cfg);
+                float sum;
+                if constexpr (type_K == GGML_TYPE_TQK_FLEX) {
+                    if (flex_use_shmem) {
+                        sum = vec_dot_fattn_vec_KQ_tqk_flex_opt<D, nthreads_KQ>(
+                            K + i_KQ*nb11, Q_reg[j], flex_cfg, flex_ct_shmem);
+                    } else {
+                        sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j], flex_cfg);
+                    }
+                } else {
+                    sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j], flex_cfg);
+                }
                 sum = warp_reduce_sum<nthreads_KQ>(sum);
 
                 if (use_logit_softcap) {

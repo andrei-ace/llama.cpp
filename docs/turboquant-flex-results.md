@@ -689,3 +689,55 @@ llama-bench -m model.gguf --tq-perms perms.bin -ctk f16,q8_0,tqk -ctv f16 -fa 1 
 q8_0 is also significantly slower than f16 (19-39% for tg), suggesting Metal FA with quantized K types has general overhead vs f16 — not specific to TQ.
 
 **Tradeoff**: TQ saves 2.5-2.6x K cache memory at the cost of ~50% slower token generation. For memory-bound deployments (long context, large batch), the memory savings outweigh the speed loss. For latency-critical single-user scenarios, f16 K is faster.
+
+## CUDA Benchmark Results
+
+Hardware: NVIDIA RTX A6000 (48 GB VRAM, compute capability 8.6), CUDA 13.0, Driver 580.126.09.
+
+Methodology: same as Metal — WikiText-2 test set, `llama-bench` with pp512/tg128, flash attention enabled, full GPU offload. Calibration identical to Metal sections above. V cache: f16 for all tests.
+
+### Perplexity (50 chunks)
+
+| Model | f16 | q8_0 | tqk | tqk vs f16 |
+|-------|-----|------|-----|------------|
+| Qwen 2.5 1.5B (Q4_K_M) | 9.837 | 9.870 | 9.870 | +0.34% |
+| Qwen 2.5 7B (Q4_K_M) | 7.260 | 7.291 | 7.304 | +0.60% |
+| Qwen3 8B (Q4_K_M) | 9.730 | 9.708 | 9.731 | +0.01% |
+
+All TQ results fall within noise of f16, consistent with Metal results.
+
+### Throughput
+
+#### Qwen 2.5 1.5B (Q4_K_M, 1.04 GiB)
+
+| Type | KV bpv | pp512 (t/s) | tg128 (t/s) |
+|------|--------|-------------|-------------|
+| f16+f16 | 16.00 | 17,271 | 359 |
+| q8_0+f16 | 8.50 | 4,338 | 258 |
+| tqk+f16 | 6.21 | 2,284 | 138 |
+
+#### Qwen 2.5 7B (Q4_K_M, 4.36 GiB)
+
+| Type | KV bpv | pp512 (t/s) | tg128 (t/s) |
+|------|--------|-------------|-------------|
+| f16+f16 | 16.00 | 5,479 | 130 |
+| q8_0+f16 | 8.50 | 1,706 | 109 |
+| tqk+f16 | 6.41 | 773 | 76 |
+
+#### Qwen3 8B (Q4_K_M, 4.68 GiB)
+
+| Type | KV bpv | pp512 (t/s) | tg128 (t/s) |
+|------|--------|-------------|-------------|
+| f16+f16 | 16.00 | 4,783 | 117 |
+| q8_0+f16 | 8.50 | 1,309 | 89 |
+| tqk+f16 | 5.13 | 790 | 65 |
+
+### Analysis
+
+**Prompt processing (pp)**: TQ is 3.2-7.6x slower than f16 on CUDA, compared to only 1.05x on Metal. The CUDA FA vec kernel with runtime-configurable flex dequant has higher per-element overhead than the Metal implementation which benefits from unified memory and different memory hierarchy.
+
+**Token generation (tg)**: TQ is 38-58% of f16 throughput depending on model size. Larger models (7B, 8B) show better relative performance (58%, 56%) than the 1.5B (38%) because they are more memory-bandwidth bound, amortizing the TQ compute overhead.
+
+**CUDA vs Metal comparison**: Metal tg overhead is ~50% (TQ vs f16). CUDA tg overhead is 42-62%. The gap is narrower on larger models. The CUDA implementation uses shared memory centroid tables and specialized bit-unpack to minimize per-element overhead in the FA vec_dot kernel.
+
+**q8_0 reference**: q8_0 on CUDA is 72-84% of f16 tg, showing that quantized K cache types have general FA overhead on CUDA — not specific to TQ.

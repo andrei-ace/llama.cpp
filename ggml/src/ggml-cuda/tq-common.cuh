@@ -625,6 +625,9 @@ static __device__ __constant__ float tq_c256_d128[256] = {
      0.3195109575f,  0.3352260993f,  0.3561818028f,  0.3892295407f
 };
 
+// 9-10 bit centroid tables (d=32 and d=128) — needed for Qwen 7B config
+#include "tq-centroids-9-10bit.cuh"
+
 // ---------------------------------------------------------------------------
 // Flex centroid lookup — returns centroid value for given index and bit-width
 // ---------------------------------------------------------------------------
@@ -638,6 +641,8 @@ static __device__ __forceinline__ float tq_flex_centroid_d32(int idx, int bits) 
         case 6:  return tq_c64_d32[idx];
         case 7:  return tq_c128_d32[idx];
         case 8:  return tq_c256_d32[idx];
+        case 9:  return tq_c512_d32[idx];
+        case 10: return tq_c1024_d32[idx];
         default: return 0.0f;
     }
 }
@@ -664,42 +669,111 @@ static __device__ __forceinline__ float tq_flex_centroid_d128(int idx, int bits)
         case 6:  return tq_c64_d128[idx];
         case 7:  return tq_c128_d128[idx];
         case 8:  return tq_c256_d128[idx];
+        case 9:  return tq_c512_d128[idx];
+        case 10: return tq_c1024_d128[idx];
         default: return 0.0f;
     }
 }
 
-// Flex nearest-centroid search for d=32
-static __device__ __forceinline__ int tq_flex_nearest_d32(float val, int bits) {
-    int n = 1 << bits;
-    int best = 0;
-    float bd = fabsf(val - tq_flex_centroid_d32(0, bits));
-    for (int i = 1; i < n; i++) {
-        float d = fabsf(val - tq_flex_centroid_d32(i, bits));
-        if (d < bd) { bd = d; best = i; }
+// Binary search for nearest centroid in a sorted table (all TQ centroid tables are monotonically increasing)
+static __device__ __forceinline__ int tq_flex_nearest_sorted(const float * ct, int n, float val) {
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        if (ct[mid] < val) lo = mid + 1;
+        else hi = mid;
     }
-    return best;
+    // lo = insertion point. Check neighbors.
+    if (lo == 0) return 0;
+    if (lo >= n) return n - 1;
+    return (fabsf(val - ct[lo - 1]) <= fabsf(val - ct[lo])) ? lo - 1 : lo;
+}
+
+// Helper: get centroid table pointer for d=32
+static __device__ __forceinline__ const float * tq_flex_centroid_ptr_d32(int bits) {
+    switch (bits) {
+        case 2:  return tq_c4_d32;
+        case 3:  return tq_c8_d32;
+        case 4:  return tq_c16_d32;
+        case 5:  return tq_c32_d32;
+        case 6:  return tq_c64_d32;
+        case 7:  return tq_c128_d32;
+        case 8:  return tq_c256_d32;
+        case 9:  return tq_c512_d32;
+        case 10: return tq_c1024_d32;
+        default: return nullptr;
+    }
+}
+
+// Helper: get centroid table pointer for d=96
+static __device__ __forceinline__ const float * tq_flex_centroid_ptr_d96(int bits) {
+    switch (bits) {
+        case 1:  return tq_c2_d96;
+        case 2:  return tq_c4_d96;
+        case 3:  return tq_c8_d96;
+        case 4:  return tq_c16_d96;
+        case 5:  return tq_c32_d96;
+        case 6:  return tq_c64_d96;
+        case 7:  return tq_c128_d96;
+        case 8:  return tq_c256_d96;
+        default: return nullptr;
+    }
+}
+
+// Helper: get centroid table pointer for d=128
+static __device__ __forceinline__ const float * tq_flex_centroid_ptr_d128(int bits) {
+    switch (bits) {
+        case 3:  return tq_c8_d128;
+        case 4:  return tq_c16_d128;
+        case 5:  return tq_c32_d128;
+        case 6:  return tq_c64_d128;
+        case 7:  return tq_c128_d128;
+        case 8:  return tq_c256_d128;
+        case 9:  return tq_c512_d128;
+        case 10: return tq_c1024_d128;
+        default: return nullptr;
+    }
+}
+
+// Flex nearest-centroid search for d=32 (binary search — centroid tables are sorted)
+static __device__ __forceinline__ int tq_flex_nearest_d32(float val, int bits) {
+    const float * ct = tq_flex_centroid_ptr_d32(bits);
+    return ct ? tq_flex_nearest_sorted(ct, 1 << bits, val) : 0;
 }
 
 // Flex nearest-centroid search for d=96
 static __device__ __forceinline__ int tq_flex_nearest_d96(float val, int bits) {
-    int n = 1 << bits;
-    int best = 0;
-    float bd = fabsf(val - tq_flex_centroid_d96(0, bits));
-    for (int i = 1; i < n; i++) {
-        float d = fabsf(val - tq_flex_centroid_d96(i, bits));
-        if (d < bd) { bd = d; best = i; }
-    }
-    return best;
+    const float * ct = tq_flex_centroid_ptr_d96(bits);
+    return ct ? tq_flex_nearest_sorted(ct, 1 << bits, val) : 0;
 }
 
 // Flex nearest-centroid search for d=128
 static __device__ __forceinline__ int tq_flex_nearest_d128(float val, int bits) {
-    int n = 1 << bits;
-    int best = 0;
-    float bd = fabsf(val - tq_flex_centroid_d128(0, bits));
-    for (int i = 1; i < n; i++) {
-        float d = fabsf(val - tq_flex_centroid_d128(i, bits));
-        if (d < bd) { bd = d; best = i; }
-    }
-    return best;
+    const float * ct = tq_flex_centroid_ptr_d128(bits);
+    return ct ? tq_flex_nearest_sorted(ct, 1 << bits, val) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Cooperative centroid table loaders (for shared memory pre-loading in FA)
+// ---------------------------------------------------------------------------
+
+static __device__ __forceinline__ void tq_flex_load_centroids_d32(
+        float * dst, int bits, int tid, int nthreads) {
+    const int n = 1 << bits;
+    const float * src = tq_flex_centroid_ptr_d32(bits);
+    if (src) { for (int i = tid; i < n; i += nthreads) dst[i] = src[i]; }
+}
+
+static __device__ __forceinline__ void tq_flex_load_centroids_d96(
+        float * dst, int bits, int tid, int nthreads) {
+    const int n = 1 << bits;
+    const float * src = tq_flex_centroid_ptr_d96(bits);
+    if (src) { for (int i = tid; i < n; i += nthreads) dst[i] = src[i]; }
+}
+
+static __device__ __forceinline__ void tq_flex_load_centroids_d128(
+        float * dst, int bits, int tid, int nthreads) {
+    const int n = 1 << bits;
+    const float * src = tq_flex_centroid_ptr_d128(bits);
+    if (src) { for (int i = tid; i < n; i += nthreads) dst[i] = src[i]; }
 }

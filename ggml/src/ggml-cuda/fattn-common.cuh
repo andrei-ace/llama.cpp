@@ -868,7 +868,7 @@ static __device__ __forceinline__ void dequantize_V_tqv_had_mse4(const void * __
     }
 }
 
-// TQK_FLEX: runtime-configurable FA vec_dot
+// TQK_FLEX: original FA vec_dot (used as fallback via function pointer for correctness verification)
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
@@ -880,11 +880,9 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
     constexpr int cpy_ne = cpy_nb / 4;
     float sum = 0.0f;
 
-    // Read flex config from device pointer (passed as kernel parameter)
     const tq_flex_config fc = {flex_cfg_v[0], flex_cfg_v[1], flex_cfg_v[2], flex_cfg_v[3], flex_cfg_v[4], flex_cfg_v[5], flex_cfg_v[6]};
 
     if (fc.split) {
-        // Split mode: 32 hi + 96 lo
         float norm_hi = __half2float(((const half *)blk)[0]);
         float norm_lo = __half2float(((const half *)blk)[1]);
         int off = 4;
@@ -893,19 +891,16 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
         const int off_qs_lo = off;
         off += (96 * fc.lo_bits + 7) / 8;
 
-        // Hi residual (optional)
         int off_rnorm_res = off;
         int off_qs_hi2 = off + 2;
         if (fc.hi_res_bits > 0) {
             off += 2 + (32 * fc.hi_res_bits + 7) / 8;
         }
 
-        // QJL hi (optional)
         int off_rnorm_qjl_hi = off;
         int off_signs_hi = off + 2;
         if (fc.qjl_hi) off += 6;
 
-        // QJL lo (optional)
         int off_rnorm_qjl_lo = off;
         int off_signs_lo = off + 2;
 
@@ -932,7 +927,6 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
                 const int j0 = j_base + k_KQ_1 * 2;
                 float kv0, kv1;
 
-                // j0
                 if (j0 < 32) {
                     kv0 = norm_hi * tq_flex_centroid_d32(tq_flex_unpack(blk + off_qs_hi, j0, fc.hi_bits), fc.hi_bits);
                     if (fc.hi_res_bits > 0)
@@ -946,7 +940,6 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
                         kv0 += qjl_scale_lo * (((blk[off_signs_lo + lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f);
                 }
 
-                // j0+1
                 if (j0 + 1 < 32) {
                     kv1 = norm_hi * tq_flex_centroid_d32(tq_flex_unpack(blk + off_qs_hi, j0 + 1, fc.hi_bits), fc.hi_bits);
                     if (fc.hi_res_bits > 0)
@@ -969,7 +962,6 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
             }
         }
     } else {
-        // Non-split mode: full 128-dim
         float norm = __half2float(*(const half *)blk);
         int off = 2;
         const int off_qs = off;
@@ -1001,6 +993,146 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
     }
     return sum;
 }
+
+// Helper: unpack element j from packed buffer using specialized or generic unpack
+// The UNPACK_FN macro selects the right unpack based on bits (resolved once per vec_dot call)
+#define TQ_FLEX_UNPACK(buf, j, bits) ( \
+    (bits) == 2 ? tq_up2(buf, j) : \
+    (bits) == 3 ? tq_up3(buf, j) : \
+    (bits) == 4 ? tq_up4(buf, j) : \
+    (bits) == 5 ? tq_up5(buf, j) : \
+    tq_flex_unpack(buf, j, bits))
+
+// TQK_FLEX: optimized FA vec_dot using shared memory centroid tables + specialized unpack
+// ct_shmem layout: [0..255] = hi/d128 centroids, [256..511] = lo centroids (split mode)
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex_opt(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v,
+    const int32_t * __restrict__ flex_cfg_v, const float * __restrict__ ct_shmem) {
+    const uint8_t * blk = (const uint8_t *)K_c;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+
+    const tq_flex_config fc = {flex_cfg_v[0], flex_cfg_v[1], flex_cfg_v[2], flex_cfg_v[3], flex_cfg_v[4], flex_cfg_v[5], flex_cfg_v[6]};
+
+    if (fc.split) {
+        // Split mode: 32 hi + 96 lo — centroid lookup via shared memory
+        const float * ct_hi = ct_shmem;       // hi centroids at offset 0
+        const float * ct_lo = ct_shmem + 256;  // lo centroids at offset 256
+
+        float norm_hi = __half2float(((const half *)blk)[0]);
+        float norm_lo = __half2float(((const half *)blk)[1]);
+        int off = 4;
+        const int off_qs_hi = off;
+        off += (32 * fc.hi_bits + 7) / 8;
+        const int off_qs_lo = off;
+        off += (96 * fc.lo_bits + 7) / 8;
+
+        int off_qs_hi2 = off + 2;
+        float rnorm_res = 0.0f;
+        if (fc.hi_res_bits > 0) {
+            rnorm_res = __half2float(*(const half *)(blk + off));
+            off += 2 + (32 * fc.hi_res_bits + 7) / 8;
+        }
+
+        float qjl_scale_hi = 0.0f;
+        int off_signs_hi = off + 2;
+        if (fc.qjl_hi) {
+            qjl_scale_hi = QJL_SCALE_32 * __half2float(*(const half *)(blk + off));
+            off += 6;
+        }
+
+        float qjl_scale_lo = 0.0f;
+        int off_signs_lo = off + 2;
+        if (fc.qjl_lo) {
+            qjl_scale_lo = QJL_SCALE_96 * __half2float(*(const half *)(blk + off));
+        }
+
+        // Pre-cache hi_res centroid table pointer (uses d=32 tables, may differ from hi_bits)
+        const float * ct_res = (fc.hi_res_bits > 0) ? tq_flex_centroid_ptr_d32(fc.hi_res_bits) : nullptr;
+
+        const int hi_bits = fc.hi_bits;
+        const int lo_bits = fc.lo_bits;
+        const int hi_res_bits = fc.hi_res_bits;
+        const bool has_qjl_hi = fc.qjl_hi;
+        const bool has_qjl_lo = fc.qjl_lo;
+        const bool has_hi_res = hi_res_bits > 0;
+
+#pragma unroll
+        for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+            const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+            for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+                const int j0 = j_base + k_KQ_1 * 2;
+                float kv0, kv1;
+
+                if (j0 < 32) {
+                    kv0 = norm_hi * ct_hi[TQ_FLEX_UNPACK(blk + off_qs_hi, j0, hi_bits)];
+                    if (has_hi_res) kv0 += rnorm_res * ct_res[TQ_FLEX_UNPACK(blk + off_qs_hi2, j0, hi_res_bits)];
+                    if (has_qjl_hi) kv0 += qjl_scale_hi * tq_sign_bit(blk + off_signs_hi, j0);
+                } else {
+                    int lo_j = j0 - 32;
+                    kv0 = norm_lo * ct_lo[TQ_FLEX_UNPACK(blk + off_qs_lo, lo_j, lo_bits)];
+                    if (has_qjl_lo) kv0 += qjl_scale_lo * (((blk[off_signs_lo + lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f);
+                }
+
+                if (j0 + 1 < 32) {
+                    kv1 = norm_hi * ct_hi[TQ_FLEX_UNPACK(blk + off_qs_hi, j0 + 1, hi_bits)];
+                    if (has_hi_res) kv1 += rnorm_res * ct_res[TQ_FLEX_UNPACK(blk + off_qs_hi2, j0 + 1, hi_res_bits)];
+                    if (has_qjl_hi) kv1 += qjl_scale_hi * tq_sign_bit(blk + off_signs_hi, j0 + 1);
+                } else if (j0 + 1 == 32) {
+                    kv1 = norm_lo * ct_lo[TQ_FLEX_UNPACK(blk + off_qs_lo, 0, lo_bits)];
+                    if (has_qjl_lo) kv1 += qjl_scale_lo * (((blk[off_signs_lo] >> 0) & 1) ? 1.0f : -1.0f);
+                } else {
+                    int lo_j = j0 + 1 - 32;
+                    kv1 = norm_lo * ct_lo[TQ_FLEX_UNPACK(blk + off_qs_lo, lo_j, lo_bits)];
+                    if (has_qjl_lo) kv1 += qjl_scale_lo * (((blk[off_signs_lo + lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f);
+                }
+
+                float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+                sum += kv0 * qv.x + kv1 * qv.y;
+            }
+        }
+    } else {
+        // Non-split mode: full 128-dim — centroid lookup via shared memory
+        const float * ct = ct_shmem;
+        float norm = __half2float(*(const half *)blk);
+        int off = 2;
+        const int off_qs = off;
+        off += (128 * fc.hi_bits + 7) / 8;
+
+        float qjl_scale = 0.0f;
+        int off_signs = off + 2;
+        if (fc.qjl_hi) {
+            qjl_scale = QJL_SCALE_128 * __half2float(*(const half *)(blk + off));
+        }
+
+        const int bits = fc.hi_bits;
+        const bool has_qjl = fc.qjl_hi;
+
+#pragma unroll
+        for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+            const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+            for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+                const int j0 = j_base + k_KQ_1 * 2;
+                float kv0 = norm * ct[TQ_FLEX_UNPACK(blk + off_qs, j0, bits)];
+                float kv1 = norm * ct[TQ_FLEX_UNPACK(blk + off_qs, j0 + 1, bits)];
+                if (has_qjl) {
+                    kv0 += qjl_scale * tq_sign_bit(blk + off_signs, j0);
+                    kv1 += qjl_scale * tq_sign_bit(blk + off_signs, j0 + 1);
+                }
+                float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+                sum += kv0 * qv.x + kv1 * qv.y;
+            }
+        }
+    }
+    return sum;
+}
+
+#undef TQ_FLEX_UNPACK
 
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
