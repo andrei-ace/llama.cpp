@@ -5986,23 +5986,26 @@ void kernel_flash_attn_ext_impl(
         }
     }
 
-    // TurboQuant: FWHT-transform Q using barrier-free simd_shuffle
+    // TurboQuant: FWHT-transform Q in shared memory (works for any DK)
     if (TQ_FWHT) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
-            threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
             if (iq1 + j < args.ne01) {
-                // Load 4 values per thread, FWHT-128 via simd_shuffle, write back
-                half4 qv = {sq_j[tiisg*4], sq_j[tiisg*4+1], sq_j[tiisg*4+2], sq_j[tiisg*4+3]};
-                tq_fwht128_simd(qv, tiisg);
-                sq_j[tiisg*4]   = qv[0];
-                sq_j[tiisg*4+1] = qv[1];
-                sq_j[tiisg*4+2] = qv[2];
-                sq_j[tiisg*4+3] = qv[3];
+                threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
+                for (short step = 1; step < DK; step *= 2) {
+                    for (short idx = tiisg; idx < DK/2; idx += NW) {
+                        short i = (idx / step) * (2 * step) + (idx % step);
+                        half a = sq_j[i], b = sq_j[i + step];
+                        sq_j[i] = a + b; sq_j[i + step] = a - b;
+                    }
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                const half s = half(1.0h / sqrt((half)DK));
+                for (short i = tiisg; i < DK; i += NW) sq_j[i] *= s;
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
     }
     // zero out
     FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
@@ -6849,17 +6852,21 @@ kernel void kernel_flash_attn_ext_vec(
         }
     }
 
-    // TurboQuant: FWHT-transform Q using barrier-free simd_shuffle
+    // TurboQuant: FWHT-transform Q in shared memory (works for any DK)
     if (TQ_FWHT) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup half * sq_h = (threadgroup half *) sq4;
         if (iq1 < args.ne01) {
-            half4 qv = {sq_h[tiisg*4], sq_h[tiisg*4+1], sq_h[tiisg*4+2], sq_h[tiisg*4+3]};
-            tq_fwht128_simd(qv, tiisg);
-            sq_h[tiisg*4]   = qv[0];
-            sq_h[tiisg*4+1] = qv[1];
-            sq_h[tiisg*4+2] = qv[2];
-            sq_h[tiisg*4+3] = qv[3];
+            for (short step = 1; step < DK; step *= 2) {
+                for (short idx = tiisg; idx < DK/2; idx += NW) {
+                    short i = (idx / step) * (2 * step) + (idx % step);
+                    half a = sq_h[i], b = sq_h[i + step];
+                    sq_h[i] = a + b; sq_h[i + step] = a - b;
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            const half s = half(1.0h / sqrt((half)DK));
+            for (short i = tiisg; i < DK; i += NW) sq_h[i] *= s;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
