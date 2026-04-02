@@ -1141,6 +1141,47 @@ void dequantize_tq2j_t4(device const block_tq2j * xb, short il, thread type4 & r
     }
 }
 
+// TQ3/TQ2: MSE-only dequant (no QJL) — for V cache
+template <typename type4x4>
+void dequantize_tq3(device const block_tq3 * xb, short il, thread type4x4 & reg) {
+    const float norm = float(xb->norm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        reg_f[i/4][i%4] = norm * tq_c8_d128[tq_up3(xb->qs, j)];
+    }
+    reg = (type4x4) reg_f;
+}
+
+template <typename type4x4>
+void dequantize_tq2(device const block_tq2 * xb, short il, thread type4x4 & reg) {
+    const float norm = float(xb->norm);
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        int j = il * 16 + i;
+        reg_f[i/4][i%4] = norm * tq_c4_d128[tq_up2(xb->qs, j)];
+    }
+    reg = (type4x4) reg_f;
+}
+
+template <typename type4>
+void dequantize_tq3_t4(device const block_tq3 * xb, short il, thread type4 & reg) {
+    const float norm = float(xb->norm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        reg[i] = norm * tq_c8_d128[tq_up3(xb->qs, j)];
+    }
+}
+
+template <typename type4>
+void dequantize_tq2_t4(device const block_tq2 * xb, short il, thread type4 & reg) {
+    const float norm = float(xb->norm);
+    for (int i = 0; i < 4; i++) {
+        int j = il * 4 + i;
+        reg[i] = norm * tq_c4_d128[tq_up2(xb->qs, j)];
+    }
+}
+
 template <typename type4>
 void dequantize_tql_t4(device const block_tql * xb, short il, thread type4 & reg) {
     int base = il * 4;
@@ -5842,7 +5883,8 @@ template<
     short C,          // cache items per threadgroup
     short NSG,        // number of simd groups
     bool TQ_FWHT = false,       // apply FWHT-DK to Q (tq3j/tq2j)
-    bool TQ_FWHT_SPLIT = false> // apply segmented FWHT to Q (tql: 32+32+64)
+    bool TQ_FWHT_SPLIT = false, // apply segmented FWHT to Q (tql: 32+32+64)
+    bool TQ_FWHT_O = false>     // apply inverse FWHT-DV to output (V stored rotated)
 void kernel_flash_attn_ext_impl(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,

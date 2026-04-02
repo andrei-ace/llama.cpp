@@ -559,6 +559,124 @@ void ggml_vec_dot_tq2j_f32(int n, float * GGML_RESTRICT s, size_t bs,
 }
 
 // ===========================================================================
+// TQ3: FWHT-128 + 3-bit MSE only (no QJL) — for V cache
+// ===========================================================================
+
+static float tq_mse_only_quantize(const float * x, int n,
+    const float * centroids, int n_c,
+    void (*pk)(uint8_t *, int, int),
+    uint8_t * qs, int qs_bytes, float * fwht_buf) {
+    memcpy(fwht_buf, x, (size_t)n * sizeof(float));
+    tq_fwht(fwht_buf, n);
+    float norm_sq = 0;
+    for (int j = 0; j < n; j++) norm_sq += fwht_buf[j] * fwht_buf[j];
+    float norm = sqrtf(norm_sq);
+    float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
+    memset(qs, 0, qs_bytes);
+    for (int j = 0; j < n; j++) {
+        pk(qs, j, nearest(fwht_buf[j] * inv_norm, centroids, n_c));
+    }
+    return norm;
+}
+
+static void tq_mse_only_dequantize(float * out, int n,
+    const float * centroids, int (*up)(const uint8_t *, int),
+    const uint8_t * qs, float norm) {
+    for (int j = 0; j < n; j++) out[j] = norm * centroids[up(qs, j)];
+    tq_fwht(out, n);
+}
+
+static float tq_mse_only_vec_dot(const float * q_fwht, int n,
+    const float * centroids, int (*up)(const uint8_t *, int),
+    const uint8_t * qs, float norm) {
+    float dot = 0;
+    for (int j = 0; j < n; j++) dot += q_fwht[j] * centroids[up(qs, j)];
+    return dot * norm;
+}
+
+void quantize_row_tq3_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TQL == 0);
+    const int64_t nb = k / QK_TQL;
+    block_tq3 * GGML_RESTRICT blk = (block_tq3 *)y;
+    for (int64_t i = 0; i < nb; i++) {
+        float buf[128];
+        blk[i].norm = GGML_FP32_TO_FP16(tq_mse_only_quantize(
+            x + i * QK_TQL, 128, centroids_8_d128, 8, pk3,
+            blk[i].qs, sizeof(blk[i].qs), buf));
+    }
+}
+
+void dequantize_row_tq3(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TQL == 0);
+    const int64_t nb = k / QK_TQL;
+    const block_tq3 * GGML_RESTRICT blk = (const block_tq3 *)x;
+    for (int64_t i = 0; i < nb; i++) {
+        tq_mse_only_dequantize(y + i * QK_TQL, 128, centroids_8_d128, up3,
+                                blk[i].qs, GGML_FP16_TO_FP32(blk[i].norm));
+    }
+}
+
+void ggml_vec_dot_tq3_f32(int n, float * GGML_RESTRICT s, size_t bs,
+                           const void * GGML_RESTRICT vx, size_t bx,
+                           const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK_TQL == 0); assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+    const block_tq3 * blk = (const block_tq3 *)vx;
+    const float * q = (const float *)vy;
+    const int64_t nb = n / QK_TQL;
+    float sumf = 0;
+    for (int64_t i = 0; i < nb; i++) {
+        float qf[128]; memcpy(qf, q + i*QK_TQL, 128*sizeof(float)); tq_fwht(qf, 128);
+        sumf += tq_mse_only_vec_dot(qf, 128, centroids_8_d128, up3,
+                                     blk[i].qs, GGML_FP16_TO_FP32(blk[i].norm));
+    }
+    *s = sumf;
+}
+
+// ===========================================================================
+// TQ2: FWHT-128 + 2-bit MSE only (no QJL) — for V cache
+// ===========================================================================
+
+void quantize_row_tq2_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TQL == 0);
+    const int64_t nb = k / QK_TQL;
+    block_tq2 * GGML_RESTRICT blk = (block_tq2 *)y;
+    for (int64_t i = 0; i < nb; i++) {
+        float buf[128];
+        blk[i].norm = GGML_FP32_TO_FP16(tq_mse_only_quantize(
+            x + i * QK_TQL, 128, centroids_4_d128, 4, pk2,
+            blk[i].qs, sizeof(blk[i].qs), buf));
+    }
+}
+
+void dequantize_row_tq2(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TQL == 0);
+    const int64_t nb = k / QK_TQL;
+    const block_tq2 * GGML_RESTRICT blk = (const block_tq2 *)x;
+    for (int64_t i = 0; i < nb; i++) {
+        tq_mse_only_dequantize(y + i * QK_TQL, 128, centroids_4_d128, up2,
+                                blk[i].qs, GGML_FP16_TO_FP32(blk[i].norm));
+    }
+}
+
+void ggml_vec_dot_tq2_f32(int n, float * GGML_RESTRICT s, size_t bs,
+                           const void * GGML_RESTRICT vx, size_t bx,
+                           const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK_TQL == 0); assert(nrc == 1);
+    (void)bs; (void)bx; (void)by; (void)nrc;
+    const block_tq2 * blk = (const block_tq2 *)vx;
+    const float * q = (const float *)vy;
+    const int64_t nb = n / QK_TQL;
+    float sumf = 0;
+    for (int64_t i = 0; i < nb; i++) {
+        float qf[128]; memcpy(qf, q + i*QK_TQL, 128*sizeof(float)); tq_fwht(qf, 128);
+        sumf += tq_mse_only_vec_dot(qf, 128, centroids_4_d128, up2,
+                                     blk[i].qs, GGML_FP16_TO_FP32(blk[i].norm));
+    }
+    *s = sumf;
+}
+
+// ===========================================================================
 // Wrapper functions for ggml_quantize_chunk
 // ===========================================================================
 
@@ -593,4 +711,26 @@ size_t quantize_tq2j(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                               n_per_row);
     }
     return (size_t)(nrows * (n_per_row / QK_TQL) * sizeof(block_tq2j));
+}
+
+size_t quantize_tq3(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                    int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_tq3_ref(src + row * n_per_row,
+                             (char *)dst + row * (n_per_row / QK_TQL) * sizeof(block_tq3),
+                             n_per_row);
+    }
+    return (size_t)(nrows * (n_per_row / QK_TQL) * sizeof(block_tq3));
+}
+
+size_t quantize_tq2(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                    int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    (void)imatrix;
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_tq2_ref(src + row * n_per_row,
+                             (char *)dst + row * (n_per_row / QK_TQL) * sizeof(block_tq2),
+                             n_per_row);
+    }
+    return (size_t)(nrows * (n_per_row / QK_TQL) * sizeof(block_tq2));
 }

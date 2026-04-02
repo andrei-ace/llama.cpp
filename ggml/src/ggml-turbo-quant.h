@@ -28,12 +28,30 @@ void ggml_vec_dot_tq2j_f32 (int n, float * GGML_RESTRICT s, size_t bs,
                               const void * GGML_RESTRICT vx, size_t bx,
                               const void * GGML_RESTRICT vy, size_t by, int nrc);
 
+// TQ3: FWHT-128 + 3-bit MSE only (for V cache)
+void quantize_row_tq3_ref (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tq3   (const void  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void ggml_vec_dot_tq3_f32 (int n, float * GGML_RESTRICT s, size_t bs,
+                             const void * GGML_RESTRICT vx, size_t bx,
+                             const void * GGML_RESTRICT vy, size_t by, int nrc);
+
+// TQ2: FWHT-128 + 2-bit MSE only (for V cache)
+void quantize_row_tq2_ref (const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+void dequantize_row_tq2   (const void  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void ggml_vec_dot_tq2_f32 (int n, float * GGML_RESTRICT s, size_t bs,
+                             const void * GGML_RESTRICT vx, size_t bx,
+                             const void * GGML_RESTRICT vy, size_t by, int nrc);
+
 // Wrapper functions for ggml_quantize_chunk
 size_t quantize_tql (const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                      int64_t nrows, int64_t n_per_row, const float * imatrix);
 size_t quantize_tq3j(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                      int64_t nrows, int64_t n_per_row, const float * imatrix);
 size_t quantize_tq2j(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                     int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq3 (const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                     int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq2 (const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                      int64_t nrows, int64_t n_per_row, const float * imatrix);
 
 // ---------------------------------------------------------------------------

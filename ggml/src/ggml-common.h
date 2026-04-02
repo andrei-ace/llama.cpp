@@ -305,6 +305,20 @@ typedef struct {
 } block_tq2j;
 static_assert(sizeof(block_tq2j) == 52, "wrong tq2j block size");
 
+// TQ3: FWHT-128 + 3-bit MSE only (no QJL) = 3.125 bpv — for V cache
+typedef struct {
+    ggml_half norm;          // L2 norm
+    uint8_t   qs[48];       // 3-bit centroid indices (128×3=384 bits)
+} block_tq3;
+static_assert(sizeof(block_tq3) == 50, "wrong tq3 block size");
+
+// TQ2: FWHT-128 + 2-bit MSE only (no QJL) = 2.125 bpv — for V cache
+typedef struct {
+    ggml_half norm;          // L2 norm
+    uint8_t   qs[32];       // 2-bit centroid indices (128×2=256 bits)
+} block_tq2;
+static_assert(sizeof(block_tq2) == 34, "wrong tq2 block size");
+
 //
 // Super-block quantization structures
 //
