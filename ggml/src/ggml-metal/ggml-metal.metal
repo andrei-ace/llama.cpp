@@ -6508,31 +6508,30 @@ void kernel_flash_attn_ext_impl(
     }
 
     // TQ_FWHT_O: inverse FWHT on output (V was stored in FWHT space)
+    // Note: so/so4 are o_t = float, not half
     if (TQ_FWHT_O) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
             if (iq1 + j < args.ne01) {
-                // Scale first, then FWHT
                 const float scale = S[jj] == 0.0 ? 0.0f : 1.0f/S[jj];
-                threadgroup half * o_j = (threadgroup half *)so + j*PV;
-                for (short i = tiisg; i < DV; i += NW) o_j[i] *= half(scale);
+                threadgroup float * o_j = (threadgroup float *)so + j*PV;
+                // Scale then inverse FWHT in float
+                for (short i = tiisg; i < DV; i += NW) o_j[i] *= scale;
                 simdgroup_barrier(mem_flags::mem_threadgroup);
-                // Inverse FWHT on output
                 for (short step = 1; step < DV; step *= 2) {
                     for (short idx = tiisg; idx < DV/2; idx += NW) {
                         short i = (idx / step) * (2 * step) + (idx % step);
-                        half a = o_j[i], b = o_j[i + step];
+                        float a = o_j[i], b = o_j[i + step];
                         o_j[i] = a + b; o_j[i + step] = a - b;
                     }
                     simdgroup_barrier(mem_flags::mem_threadgroup);
                 }
-                const half s = half(1.0h / sqrt((half)DV));
+                const float s = 1.0f / sqrt((float)DV);
                 for (short i = tiisg; i < DV; i += NW) o_j[i] *= s;
                 simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
-        // Write FWHT'd output to global memory (already scaled)
         for (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
             if (iq1 + j >= args.ne01) break;
