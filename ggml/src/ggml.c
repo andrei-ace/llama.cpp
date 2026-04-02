@@ -945,6 +945,70 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_tq2,
         .from_float_ref           = (ggml_from_float_t) quantize_row_tq2_ref,
     },
+    [GGML_TYPE_TQ3J_256] = {
+        .type_name                = "tq3j_256",
+        .blck_size                = QK_TQ256,
+        .type_size                = sizeof(block_tq3j_256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq3j_256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq3j_256_ref,
+    },
+    [GGML_TYPE_TQ2J_256] = {
+        .type_name                = "tq2j_256",
+        .blck_size                = QK_TQ256,
+        .type_size                = sizeof(block_tq2j_256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq2j_256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq2j_256_ref,
+    },
+    [GGML_TYPE_TQ3_256] = {
+        .type_name                = "tq3_256",
+        .blck_size                = QK_TQ256,
+        .type_size                = sizeof(block_tq3_256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq3_256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq3_256_ref,
+    },
+    [GGML_TYPE_TQ2_256] = {
+        .type_name                = "tq2_256",
+        .blck_size                = QK_TQ256,
+        .type_size                = sizeof(block_tq2_256),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq2_256,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq2_256_ref,
+    },
+    [GGML_TYPE_TQ3J_512] = {
+        .type_name                = "tq3j_512",
+        .blck_size                = QK_TQ512,
+        .type_size                = sizeof(block_tq3j_512),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq3j_512,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq3j_512_ref,
+    },
+    [GGML_TYPE_TQ2J_512] = {
+        .type_name                = "tq2j_512",
+        .blck_size                = QK_TQ512,
+        .type_size                = sizeof(block_tq2j_512),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq2j_512,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq2j_512_ref,
+    },
+    [GGML_TYPE_TQ3_512] = {
+        .type_name                = "tq3_512",
+        .blck_size                = QK_TQ512,
+        .type_size                = sizeof(block_tq3_512),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq3_512,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq3_512_ref,
+    },
+    [GGML_TYPE_TQ2_512] = {
+        .type_name                = "tq2_512",
+        .blck_size                = QK_TQ512,
+        .type_size                = sizeof(block_tq2_512),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq2_512,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq2_512_ref,
+    },
 };
 
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
@@ -7712,6 +7776,14 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_TQ2J:    result = quantize_tq2j (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ3:     result = quantize_tq3  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ2:     result = quantize_tq2  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ3J_256: result = quantize_tq3j_256(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ2J_256: result = quantize_tq2j_256(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ3_256: result = quantize_tq3_256(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ2_256: result = quantize_tq2_256(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ3J_512: result = quantize_tq3j_512(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ2J_512: result = quantize_tq2j_512(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ3_512: result = quantize_tq3_512(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ2_512: result = quantize_tq2_512(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ2_XXS: result = quantize_iq2_xxs(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ2_XS:  result = quantize_iq2_xs (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ3_XXS: result = quantize_iq3_xxs(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

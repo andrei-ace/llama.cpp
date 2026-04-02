@@ -319,6 +319,72 @@ typedef struct {
 } block_tq2;
 static_assert(sizeof(block_tq2) == 34, "wrong tq2 block size");
 
+// TQ3J_256: FWHT-256 + 3-bit MSE + 1-bit QJL = 4.125 bpv
+#define QK_TQ256 256
+typedef struct {
+    ggml_half norm;
+    ggml_half rnorm;
+    uint8_t   qs[96];      // 256×3/8
+    uint8_t   signs[32];   // 256/8
+} block_tq3j_256;
+static_assert(sizeof(block_tq3j_256) == 132, "wrong tq3j_256 block size");
+
+// TQ2J_256: FWHT-256 + 2-bit MSE + 1-bit QJL = 3.125 bpv
+typedef struct {
+    ggml_half norm;
+    ggml_half rnorm;
+    uint8_t   qs[64];      // 256×2/8
+    uint8_t   signs[32];   // 256/8
+} block_tq2j_256;
+static_assert(sizeof(block_tq2j_256) == 100, "wrong tq2j_256 block size");
+
+// TQ3_256: FWHT-256 + 3-bit MSE only = 3.0625 bpv
+typedef struct {
+    ggml_half norm;
+    uint8_t   qs[96];      // 256×3/8
+} block_tq3_256;
+static_assert(sizeof(block_tq3_256) == 98, "wrong tq3_256 block size");
+
+// TQ2_256: FWHT-256 + 2-bit MSE only = 2.0625 bpv
+typedef struct {
+    ggml_half norm;
+    uint8_t   qs[64];      // 256×2/8
+} block_tq2_256;
+static_assert(sizeof(block_tq2_256) == 66, "wrong tq2_256 block size");
+
+// TQ3J_512: FWHT-512 + 3-bit MSE + 1-bit QJL = 4.0625 bpv
+#define QK_TQ512 512
+typedef struct {
+    ggml_half norm;
+    ggml_half rnorm;
+    uint8_t   qs[192];     // 512×3/8
+    uint8_t   signs[64];   // 512/8
+} block_tq3j_512;
+static_assert(sizeof(block_tq3j_512) == 260, "wrong tq3j_512 block size");
+
+// TQ2J_512: FWHT-512 + 2-bit MSE + 1-bit QJL = 3.0625 bpv
+typedef struct {
+    ggml_half norm;
+    ggml_half rnorm;
+    uint8_t   qs[128];     // 512×2/8
+    uint8_t   signs[64];   // 512/8
+} block_tq2j_512;
+static_assert(sizeof(block_tq2j_512) == 196, "wrong tq2j_512 block size");
+
+// TQ3_512: FWHT-512 + 3-bit MSE only = 3.03125 bpv
+typedef struct {
+    ggml_half norm;
+    uint8_t   qs[192];     // 512×3/8
+} block_tq3_512;
+static_assert(sizeof(block_tq3_512) == 194, "wrong tq3_512 block size");
+
+// TQ2_512: FWHT-512 + 2-bit MSE only = 2.03125 bpv
+typedef struct {
+    ggml_half norm;
+    uint8_t   qs[128];     // 512×2/8
+} block_tq2_512;
+static_assert(sizeof(block_tq2_512) == 130, "wrong tq2_512 block size");
+
 //
 // Super-block quantization structures
 //

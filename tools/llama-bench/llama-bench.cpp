@@ -498,6 +498,30 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "tq2") {
         return GGML_TYPE_TQ2;
     }
+    if (s == "tq3j_256") {
+        return GGML_TYPE_TQ3J_256;
+    }
+    if (s == "tq2j_256") {
+        return GGML_TYPE_TQ2J_256;
+    }
+    if (s == "tq3_256") {
+        return GGML_TYPE_TQ3_256;
+    }
+    if (s == "tq2_256") {
+        return GGML_TYPE_TQ2_256;
+    }
+    if (s == "tq3j_512") {
+        return GGML_TYPE_TQ3J_512;
+    }
+    if (s == "tq2j_512") {
+        return GGML_TYPE_TQ2J_512;
+    }
+    if (s == "tq3_512") {
+        return GGML_TYPE_TQ3_512;
+    }
+    if (s == "tq2_512") {
+        return GGML_TYPE_TQ2_512;
+    }
 
     return GGML_TYPE_COUNT;
 }
@@ -1202,7 +1226,11 @@ struct cmd_params_instance {
         // TurboQuant types require flash attention
         if (type_k == GGML_TYPE_TQL  || type_k == GGML_TYPE_TQ3J || type_k == GGML_TYPE_TQ2J ||
             type_k == GGML_TYPE_TQ3  || type_k == GGML_TYPE_TQ2  ||
-            type_v == GGML_TYPE_TQ3  || type_v == GGML_TYPE_TQ2) {
+            type_v == GGML_TYPE_TQ3  || type_v == GGML_TYPE_TQ2  ||
+            type_k == GGML_TYPE_TQ3J_256 || type_k == GGML_TYPE_TQ2J_256 ||
+            type_k == GGML_TYPE_TQ3J_512 || type_k == GGML_TYPE_TQ2J_512 ||
+            type_v == GGML_TYPE_TQ3_256  || type_v == GGML_TYPE_TQ2_256  ||
+            type_v == GGML_TYPE_TQ3_512  || type_v == GGML_TYPE_TQ2_512) {
             cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
         }
         cparams.embeddings      = embeddings;

@@ -42,6 +42,24 @@ static const float centroids_4_d128[4] = {
     -0.1330415202f, -0.0399915952f, 0.0399915952f, 0.1330415202f,
 };
 
+// d=256 centroids — Beta(127.5, 127.5)
+static const float centroids_8_d256[8] = {
+    -0.1338542901f, -0.0837654569f, -0.0471667103f, -0.0152974877f,
+     0.0152974877f,  0.0471667103f,  0.0837654569f,  0.1338542901f,
+};
+static const float centroids_4_d256[4] = {
+    -0.0942377821f, -0.0282885989f, 0.0282885989f, 0.0942377821f,
+};
+
+// d=512 centroids — Beta(255.5, 255.5)
+static const float centroids_8_d512[8] = {
+    -0.0948759304f, -0.0593119667f, -0.0333814610f, -0.0108243491f,
+     0.0108243491f,  0.0333814610f,  0.0593119667f,  0.0948759304f,
+};
+static const float centroids_4_d512[4] = {
+    -0.0666939081f, -0.0200066602f, 0.0200066602f, 0.0666939081f,
+};
+
 // ---------------------------------------------------------------------------
 // Per-channel permutation support
 // ---------------------------------------------------------------------------
@@ -734,3 +752,113 @@ size_t quantize_tq2(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
     }
     return (size_t)(nrows * (n_per_row / QK_TQL) * sizeof(block_tq2));
 }
+
+// ===========================================================================
+// Macro-generated variants for d=256 and d=512
+// ===========================================================================
+
+// QJL variant (K cache): quantize with QJL signs
+#define DEFINE_TQ_QJL(SUFFIX, BLK, QK, BITS, NC, CENTROIDS, PK, UP)          \
+void quantize_row_##SUFFIX##_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) { \
+    assert(k % QK == 0);                                                       \
+    const int64_t nb = k / QK;                                                 \
+    BLK * GGML_RESTRICT blk = (BLK *)y;                                        \
+    for (int64_t i = 0; i < nb; i++) {                                         \
+        memset(&blk[i], 0, sizeof(BLK));                                       \
+        float buf[QK]; float rnorm;                                            \
+        float norm = tq_segment_quantize(x + i*QK, QK, CENTROIDS, NC, PK,     \
+            blk[i].qs, sizeof(blk[i].qs), blk[i].signs, sizeof(blk[i].signs), \
+            &rnorm, buf);                                                      \
+        blk[i].norm  = GGML_FP32_TO_FP16(norm);                               \
+        blk[i].rnorm = GGML_FP32_TO_FP16(rnorm);                              \
+    }                                                                          \
+}                                                                              \
+void dequantize_row_##SUFFIX(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) { \
+    assert(k % QK == 0);                                                       \
+    const int64_t nb = k / QK;                                                 \
+    const BLK * GGML_RESTRICT blk = (const BLK *)x;                            \
+    for (int64_t i = 0; i < nb; i++)                                           \
+        tq_segment_dequantize(y + i*QK, QK, CENTROIDS, UP,                    \
+            blk[i].qs, blk[i].signs,                                           \
+            GGML_FP16_TO_FP32(blk[i].norm), GGML_FP16_TO_FP32(blk[i].rnorm));\
+}                                                                              \
+void ggml_vec_dot_##SUFFIX##_f32(int n, float * GGML_RESTRICT s, size_t bs,   \
+    const void * GGML_RESTRICT vx, size_t bx,                                 \
+    const void * GGML_RESTRICT vy, size_t by, int nrc) {                       \
+    assert(n % QK == 0); assert(nrc == 1);                                     \
+    (void)bs; (void)bx; (void)by; (void)nrc;                                  \
+    const BLK * blk = (const BLK *)vx;                                         \
+    const float * q = (const float *)vy;                                       \
+    const int64_t nb = n / QK; float sumf = 0;                                \
+    for (int64_t i = 0; i < nb; i++) {                                         \
+        float qf[QK]; memcpy(qf, q+i*QK, QK*sizeof(float)); tq_fwht(qf, QK); \
+        sumf += tq_segment_vec_dot(qf, QK, CENTROIDS, UP,                     \
+            blk[i].qs, blk[i].signs,                                           \
+            GGML_FP16_TO_FP32(blk[i].norm), GGML_FP16_TO_FP32(blk[i].rnorm));\
+    }                                                                          \
+    *s = sumf;                                                                 \
+}                                                                              \
+size_t quantize_##SUFFIX(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, \
+    int64_t nrows, int64_t n_per_row, const float * imatrix) {                 \
+    (void)imatrix;                                                             \
+    for (int64_t row = 0; row < nrows; row++)                                  \
+        quantize_row_##SUFFIX##_ref(src + row*n_per_row,                       \
+            (char *)dst + row*(n_per_row/QK)*sizeof(BLK), n_per_row);          \
+    return (size_t)(nrows * (n_per_row/QK) * sizeof(BLK));                     \
+}
+
+// MSE-only variant (V cache): no QJL
+#define DEFINE_TQ_MSE(SUFFIX, BLK, QK, BITS, NC, CENTROIDS, PK, UP)           \
+void quantize_row_##SUFFIX##_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) { \
+    assert(k % QK == 0);                                                       \
+    const int64_t nb = k / QK;                                                 \
+    BLK * GGML_RESTRICT blk = (BLK *)y;                                        \
+    for (int64_t i = 0; i < nb; i++) {                                         \
+        float buf[QK];                                                         \
+        blk[i].norm = GGML_FP32_TO_FP16(tq_mse_only_quantize(                 \
+            x + i*QK, QK, CENTROIDS, NC, PK, blk[i].qs, sizeof(blk[i].qs), buf)); \
+    }                                                                          \
+}                                                                              \
+void dequantize_row_##SUFFIX(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) { \
+    assert(k % QK == 0);                                                       \
+    const int64_t nb = k / QK;                                                 \
+    const BLK * GGML_RESTRICT blk = (const BLK *)x;                            \
+    for (int64_t i = 0; i < nb; i++)                                           \
+        tq_mse_only_dequantize(y + i*QK, QK, CENTROIDS, UP,                   \
+            blk[i].qs, GGML_FP16_TO_FP32(blk[i].norm));                       \
+}                                                                              \
+void ggml_vec_dot_##SUFFIX##_f32(int n, float * GGML_RESTRICT s, size_t bs,   \
+    const void * GGML_RESTRICT vx, size_t bx,                                 \
+    const void * GGML_RESTRICT vy, size_t by, int nrc) {                       \
+    assert(n % QK == 0); assert(nrc == 1);                                     \
+    (void)bs; (void)bx; (void)by; (void)nrc;                                  \
+    const BLK * blk = (const BLK *)vx;                                         \
+    const float * q = (const float *)vy;                                       \
+    const int64_t nb = n / QK; float sumf = 0;                                \
+    for (int64_t i = 0; i < nb; i++) {                                         \
+        float qf[QK]; memcpy(qf, q+i*QK, QK*sizeof(float)); tq_fwht(qf, QK); \
+        sumf += tq_mse_only_vec_dot(qf, QK, CENTROIDS, UP,                    \
+            blk[i].qs, GGML_FP16_TO_FP32(blk[i].norm));                       \
+    }                                                                          \
+    *s = sumf;                                                                 \
+}                                                                              \
+size_t quantize_##SUFFIX(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, \
+    int64_t nrows, int64_t n_per_row, const float * imatrix) {                 \
+    (void)imatrix;                                                             \
+    for (int64_t row = 0; row < nrows; row++)                                  \
+        quantize_row_##SUFFIX##_ref(src + row*n_per_row,                       \
+            (char *)dst + row*(n_per_row/QK)*sizeof(BLK), n_per_row);          \
+    return (size_t)(nrows * (n_per_row/QK) * sizeof(BLK));                     \
+}
+
+// d=256 variants
+DEFINE_TQ_QJL(tq3j_256, block_tq3j_256, QK_TQ256, 3, 8, centroids_8_d256, pk3, up3)
+DEFINE_TQ_QJL(tq2j_256, block_tq2j_256, QK_TQ256, 2, 4, centroids_4_d256, pk2, up2)
+DEFINE_TQ_MSE(tq3_256,  block_tq3_256,  QK_TQ256, 3, 8, centroids_8_d256, pk3, up3)
+DEFINE_TQ_MSE(tq2_256,  block_tq2_256,  QK_TQ256, 2, 4, centroids_4_d256, pk2, up2)
+
+// d=512 variants
+DEFINE_TQ_QJL(tq3j_512, block_tq3j_512, QK_TQ512, 3, 8, centroids_8_d512, pk3, up3)
+DEFINE_TQ_QJL(tq2j_512, block_tq2j_512, QK_TQ512, 2, 4, centroids_4_d512, pk2, up2)
+DEFINE_TQ_MSE(tq3_512,  block_tq3_512,  QK_TQ512, 3, 8, centroids_8_d512, pk3, up3)
+DEFINE_TQ_MSE(tq2_512,  block_tq2_512,  QK_TQ512, 2, 4, centroids_4_d512, pk2, up2)

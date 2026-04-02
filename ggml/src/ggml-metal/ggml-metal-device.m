@@ -1161,8 +1161,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 const enum ggml_type kt = op->src[1]->type;
                 const enum ggml_type vt = op->src[2]->type;
                 const bool tq_k = (kt == GGML_TYPE_TQL || kt == GGML_TYPE_TQ3J || kt == GGML_TYPE_TQ2J ||
-                                   kt == GGML_TYPE_TQ3 || kt == GGML_TYPE_TQ2);
-                const bool tq_v = (vt == GGML_TYPE_TQ3 || vt == GGML_TYPE_TQ2);
+                                   kt == GGML_TYPE_TQ3 || kt == GGML_TYPE_TQ2 ||
+                                   kt == GGML_TYPE_TQ3J_256 || kt == GGML_TYPE_TQ2J_256 ||
+                                   kt == GGML_TYPE_TQ3J_512 || kt == GGML_TYPE_TQ2J_512);
+                const bool tq_v = (vt == GGML_TYPE_TQ3 || vt == GGML_TYPE_TQ2 ||
+                                   vt == GGML_TYPE_TQ3_256 || vt == GGML_TYPE_TQ2_256 ||
+                                   vt == GGML_TYPE_TQ3_512 || vt == GGML_TYPE_TQ2_512);
                 if ((tq_k || tq_v) && op->src[0]->ne[0] >= 128) {
                     // OK - TQ K and/or V
                 } else {

@@ -54,6 +54,62 @@ size_t quantize_tq3 (const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
 size_t quantize_tq2 (const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                      int64_t nrows, int64_t n_per_row, const float * imatrix);
 
+// d=256 and d=512 variants (macro-generated in ggml-turbo-quant.c)
+#define TQ_DECLARE(SUFFIX)                                                     \
+void quantize_row_##SUFFIX##_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k); \
+void dequantize_row_##SUFFIX(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k); \
+void ggml_vec_dot_##SUFFIX##_f32(int n, float * GGML_RESTRICT s, size_t bs, \
+    const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc); \
+size_t quantize_##SUFFIX(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, \
+    int64_t nrows, int64_t n_per_row, const float * imatrix);
+
+TQ_DECLARE(tq3j_256)
+TQ_DECLARE(tq2j_256)
+TQ_DECLARE(tq3_256)
+TQ_DECLARE(tq2_256)
+TQ_DECLARE(tq3j_512)
+TQ_DECLARE(tq2j_512)
+TQ_DECLARE(tq3_512)
+TQ_DECLARE(tq2_512)
+#undef TQ_DECLARE
+
+// (keep old-style declarations for backward compat)
+// size_t quantize_tq3j_256(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq2j_256(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq3_256(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq2_256(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq3j_512(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq2j_512(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq3_512(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+size_t quantize_tq2_512(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+// ---------------------------------------------------------------------------
+// Auto-resolve TQ type by head dimension
+// tq3j → tq3j (d=128), tq3j_256 (d=256), tq3j_512 (d=512)
+// ---------------------------------------------------------------------------
+
+static inline enum ggml_type tq_resolve_type(enum ggml_type type, int head_dim) {
+    switch (type) {
+        case GGML_TYPE_TQ3J:
+            if (head_dim == 256) return GGML_TYPE_TQ3J_256;
+            if (head_dim >= 512) return GGML_TYPE_TQ3J_512;
+            return GGML_TYPE_TQ3J;
+        case GGML_TYPE_TQ2J:
+            if (head_dim == 256) return GGML_TYPE_TQ2J_256;
+            if (head_dim >= 512) return GGML_TYPE_TQ2J_512;
+            return GGML_TYPE_TQ2J;
+        case GGML_TYPE_TQ3:
+            if (head_dim == 256) return GGML_TYPE_TQ3_256;
+            if (head_dim >= 512) return GGML_TYPE_TQ3_512;
+            return GGML_TYPE_TQ3;
+        case GGML_TYPE_TQ2:
+            if (head_dim == 256) return GGML_TYPE_TQ2_256;
+            if (head_dim >= 512) return GGML_TYPE_TQ2_512;
+            return GGML_TYPE_TQ2;
+        default:
+            return type;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-channel permutation support (loaded from calibration file)
 // ---------------------------------------------------------------------------
