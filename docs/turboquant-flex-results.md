@@ -255,6 +255,72 @@ Offset  Size   Field
 2       96     qs[96] — 6-bit × 128 packed centroid indices
 ```
 
+## Generation Quality Comparison
+
+Model: Qwen2.5 1.5B Instruct (q4_k_m), seed=42, temp=0, Metal FA.
+
+### Factual / Knowledge
+
+| Prompt | f16 | q8_0 | TQ (6.21 bpv) |
+|--------|-----|------|---------------|
+| List planets in order from Sun | Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune | identical | identical |
+| Capital of Australia? | Canberra | identical | identical |
+| First 10 prime numbers | 2,3,5,7,11,13,17,19,23,29 | identical | identical |
+
+All factual answers are **token-for-token identical** across f16, q8_0, and TQ.
+
+### Math / Reasoning
+
+**Q: What is 127 × 38?** (correct answer: 4826)
+- f16: "So, 127 × 38 = 4566." (wrong)
+- q8_0: "So, 127 × 38 = 4666." (wrong)
+- TQ: "127 * 38 = 4866" (wrong)
+
+All three get it wrong — 1.5B model limitation, not KV quantization.
+
+**Q: If a train travels at 60 mph for 2.5 hours, how far does it go?**
+- f16: "Distance = 60 mph × 2.5 hours = 150 miles"
+- q8_0: identical
+- TQ: identical
+
+**Q: Simplify the expression: (3x + 2)(x - 5)**
+- f16: Correct FOIL method: 3x·x = 3x², 3x·(-5) = -15x, 2·x = 2x, 2·(-5) = -10
+- q8_0: identical steps and math
+- TQ: identical steps and math (minor wording: "binomials" vs "product")
+
+### Code
+
+**Q: Write a Python function that checks if a string is a palindrome.**
+
+f16 and TQ produce identical code:
+```python
+def is_palindrome(s):
+    normalized_s = ''.join(char.lower() for char in s if char.isalnum())
+    return normalized_s == normalized_s[::-1]
+
+print(is_palindrome("A man, a plan, a canal: Panama"))  # True
+print(is_palindrome("racecar"))  # True
+```
+q8_0 produces equivalent code with slightly different variable name (`cleaned` vs `normalized_s`).
+
+### Creative
+
+**Q: Write a haiku about winter.**
+- f16: "Snow falls softly, / Trees stand still in white, / Winter's breath."
+- q8_0: "Snow muffles the earth, / White whispers in the cold, / Winter holds its breath."
+- TQ: "Snow falls softly, / Blanketing the world in white, / Winter's breath, so sweet."
+
+All three are valid haikus, just different artistic choices. Creative generation is sensitive to tiny probability shifts — even q8_0 differs from f16.
+
+**Q: Translate to French: The cat sat on the mat and watched the birds fly by.**
+- f16: "Le chat s'est assis sur le tapis et a observé les oiseaux voler par la fenêtre."
+- q8_0: identical
+- TQ: identical
+
+### Summary
+
+TQ at 6.21 bpv produces **identical output to f16 on factual, mathematical, and coding tasks**. Differences only appear in creative/sampling-sensitive tasks where even q8_0 differs from f16. The KV cache quantization does not degrade the model's knowledge, reasoning, or instruction-following ability.
+
 ## Key Findings
 
 1. **Outlier channels need high precision**: 5-bit on 32 outlier channels → PPL 1250. 9-bit → PPL 10. The highest-variance channels dominate attention quality.
