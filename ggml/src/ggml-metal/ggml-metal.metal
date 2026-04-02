@@ -1161,23 +1161,16 @@ void dequantize_tq2j_t4(device const block_tq2j * xb_struct, short il, thread ty
     }
 }
 
-// TQ3/TQ2: MSE-only dequant for V cache — FULL reconstruction with inverse FWHT
-// V values must be in original space (no dot-product trick for weighted sums)
-// Each call reconstructs the entire block then outputs 16 (or 4) values for il
+// TQ3/TQ2: MSE-only dequant for V cache — outputs FWHT-space values (pointwise, fast)
+// The FA kernel applies inverse FWHT to V shared memory after loading via TQ_FWHT_O
 template <short BLK_DIM = 128, typename type4x4>
 void dequantize_tq3(device const block_tq3 * xb_struct, short il, thread type4x4 & reg) {
     device const uint8_t * xb = (device const uint8_t *)xb_struct;
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
-
-    // Reconstruct all BLK_DIM values then inverse FWHT
-    float buf[BLK_DIM];
-    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up3(qs, j)];
-    tq_fwht_metal(buf, BLK_DIM);
-
     float4x4 reg_f;
-    for (int i = 0; i < 16; i++) reg_f[i/4][i%4] = buf[il * 16 + i];
+    for (int i = 0; i < 16; i++) reg_f[i/4][i%4] = norm * c[tq_up3(qs, il * 16 + i)];
     reg = (type4x4) reg_f;
 }
 
@@ -1187,13 +1180,8 @@ void dequantize_tq2(device const block_tq2 * xb_struct, short il, thread type4x4
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
-
-    float buf[BLK_DIM];
-    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up2(qs, j)];
-    tq_fwht_metal(buf, BLK_DIM);
-
     float4x4 reg_f;
-    for (int i = 0; i < 16; i++) reg_f[i/4][i%4] = buf[il * 16 + i];
+    for (int i = 0; i < 16; i++) reg_f[i/4][i%4] = norm * c[tq_up2(qs, il * 16 + i)];
     reg = (type4x4) reg_f;
 }
 
@@ -1203,12 +1191,7 @@ void dequantize_tq3_t4(device const block_tq3 * xb_struct, short il, thread type
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
-
-    float buf[BLK_DIM];
-    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up3(qs, j)];
-    tq_fwht_metal(buf, BLK_DIM);
-
-    for (int i = 0; i < 4; i++) reg[i] = buf[il * 4 + i];
+    for (int i = 0; i < 4; i++) reg[i] = norm * c[tq_up3(qs, il * 4 + i)];
 }
 
 template <short BLK_DIM = 128, typename type4>
@@ -1217,12 +1200,7 @@ void dequantize_tq2_t4(device const block_tq2 * xb_struct, short il, thread type
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
-
-    float buf[BLK_DIM];
-    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up2(qs, j)];
-    tq_fwht_metal(buf, BLK_DIM);
-
-    for (int i = 0; i < 4; i++) reg[i] = buf[il * 4 + i];
+    for (int i = 0; i < 4; i++) reg[i] = norm * c[tq_up2(qs, il * 4 + i)];
 }
 
 template <typename type4>
@@ -6529,26 +6507,57 @@ void kernel_flash_attn_ext_impl(
         }
     }
 
-    // store to global memory
-    for (short jj = 0; jj < NQ; ++jj) {
-        const short j = jj*NSG + sgitg;
-        if (iq1 + j >= args.ne01) {
-            break;
-        }
-
-        device float4 * dst4 = (device float4 *) dst + ((uint64_t)iq3*args.ne2*args.ne1 + iq2 + (uint64_t)(iq1 + j)*args.ne1)*DV4;
-
-        const float scale = S[jj] == 0.0 ? 0.0f : 1.0f/S[jj];
-
-        if (DV4 % NW == 0) {
-            FOR_UNROLL (short ii = 0; ii < DV4/NW; ++ii) {
-                const short i = ii*NW + tiisg;
-
-                dst4[i] = (float4) so4[j*PV4 + i]*scale;
+    // TQ_FWHT_O: inverse FWHT on output (V was stored in FWHT space)
+    if (TQ_FWHT_O) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+            const short j = jj*NSG + sgitg;
+            if (iq1 + j < args.ne01) {
+                // Scale first, then FWHT
+                const float scale = S[jj] == 0.0 ? 0.0f : 1.0f/S[jj];
+                threadgroup half * o_j = (threadgroup half *)so + j*PV;
+                for (short i = tiisg; i < DV; i += NW) o_j[i] *= half(scale);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+                // Inverse FWHT on output
+                for (short step = 1; step < DV; step *= 2) {
+                    for (short idx = tiisg; idx < DV/2; idx += NW) {
+                        short i = (idx / step) * (2 * step) + (idx % step);
+                        half a = o_j[i], b = o_j[i + step];
+                        o_j[i] = a + b; o_j[i + step] = a - b;
+                    }
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                const half s = half(1.0h / sqrt((half)DV));
+                for (short i = tiisg; i < DV; i += NW) o_j[i] *= s;
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
-        } else {
+        }
+        // Write FWHT'd output to global memory (already scaled)
+        for (short jj = 0; jj < NQ; ++jj) {
+            const short j = jj*NSG + sgitg;
+            if (iq1 + j >= args.ne01) break;
+            device float4 * dst4 = (device float4 *) dst + ((uint64_t)iq3*args.ne2*args.ne1 + iq2 + (uint64_t)(iq1 + j)*args.ne1)*DV4;
             for (short i = tiisg; i < DV4; i += NW) {
-                dst4[i] = (float4) so4[j*PV4 + i]*scale;
+                dst4[i] = (float4) so4[j*PV4 + i];
+            }
+        }
+    } else {
+        // store to global memory
+        for (short jj = 0; jj < NQ; ++jj) {
+            const short j = jj*NSG + sgitg;
+            if (iq1 + j >= args.ne01) break;
+
+            device float4 * dst4 = (device float4 *) dst + ((uint64_t)iq3*args.ne2*args.ne1 + iq2 + (uint64_t)(iq1 + j)*args.ne1)*DV4;
+            const float scale = S[jj] == 0.0 ? 0.0f : 1.0f/S[jj];
+
+            if (DV4 % NW == 0) {
+                FOR_UNROLL (short ii = 0; ii < DV4/NW; ++ii) {
+                    dst4[ii*NW + tiisg] = (float4) so4[j*PV4 + ii*NW + tiisg]*scale;
+                }
+            } else {
+                for (short i = tiisg; i < DV4; i += NW) {
+                    dst4[i] = (float4) so4[j*PV4 + i]*scale;
+                }
             }
         }
     }
@@ -6585,7 +6594,8 @@ template<
     short DV,         // V head size
     short Q  = OP_FLASH_ATTN_EXT_NQPSG, // queries per threadgroup
     short C  = OP_FLASH_ATTN_EXT_NCPSG, // cache items per threadgroup
-    bool TQ_FWHT = false>
+    bool TQ_FWHT = false,
+    bool TQ_FWHT_O = false>
 kernel void kernel_flash_attn_ext(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -6603,8 +6613,8 @@ kernel void kernel_flash_attn_ext(
 #define FWD_TMPL q_t, q4_t, q8x8_t, k_t, k4x4_t, k8x8_t, v_t, v4x4_t, v8x8_t, qk_t, qk8x8_t, s_t, s2_t, s8x8_t, o_t, o4_t, o8x8_t, kd4x4_t, nl_k, deq_k, vd4x4_t, nl_v, deq_v, DK, DV, Q, C
 #define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, shmem_f16, tgpig, tiisg, sgitg
     switch (FC_flash_attn_ext_nsg) {
-        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT>(FWD_ARGS); break;
-        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT>(FWD_ARGS); break;
+        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT, TQ_FWHT_O>(FWD_ARGS); break;
+        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT, TQ_FWHT_O>(FWD_ARGS); break;
     }
 #undef FWD_TMPL
 #undef FWD_ARGS
@@ -6782,16 +6792,16 @@ template [[host_name("kernel_flash_attn_ext_tq2j_dk512_dv512")]] kernel flash_at
 
 // Mixed K/V: K=tq3j/tq2j V=tq3/tq2 (V stored in FWHT space, output needs inverse FWHT)
 // dk128
-template [[host_name("kernel_flash_attn_ext_tq3j_tq3_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j<128>, block_tq3, 8, dequantize_tq3<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq3j_tq2_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j<128>, block_tq2, 8, dequantize_tq2<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq2j_tq3_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j<128>, block_tq3, 8, dequantize_tq3<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq2j_tq2_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j<128>, block_tq2, 8, dequantize_tq2<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_tq3_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j<128>, block_tq3, 8, dequantize_tq3<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_tq2_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j<128>, block_tq2, 8, dequantize_tq2<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_tq3_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j<128>, block_tq3, 8, dequantize_tq3<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_tq2_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j<128>, block_tq2, 8, dequantize_tq2<128>, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
 // dk256
-template [[host_name("kernel_flash_attn_ext_tq3j_tq3_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 16, dequantize_tq3j<256>, block_tq3, 16, dequantize_tq3<256>, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq2j_tq2_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 16, dequantize_tq2j<256>, block_tq2, 16, dequantize_tq2<256>, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_tq3_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 16, dequantize_tq3j<256>, block_tq3, 16, dequantize_tq3<256>, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_tq2_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 16, dequantize_tq2j<256>, block_tq2, 16, dequantize_tq2<256>, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
 // dk512
-template [[host_name("kernel_flash_attn_ext_tq3j_tq3_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 32, dequantize_tq3j<512>, block_tq3, 32, dequantize_tq3<512>, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq2j_tq2_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 32, dequantize_tq2j<512>, block_tq2, 32, dequantize_tq2<512>, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_tq3_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 32, dequantize_tq3j<512>, block_tq3, 32, dequantize_tq3<512>, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_tq2_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 32, dequantize_tq2j<512>, block_tq2, 32, dequantize_tq2<512>, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true, true>;
 
 #undef FA_TYPES
 #undef FA_TYPES_BF
