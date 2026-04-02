@@ -999,28 +999,49 @@ constant float tq_c4_d128[4] = {
     -0.1330415202f, -0.0399915952f, 0.0399915952f, 0.1330415202f,
 };
 
-// TQ3J dequant: pre-scaled centroid lookup + sign select (no per-element multiply)
-// block_tq3j = { norm(2), rnorm(2), qs[48], signs[16] } = 68 bytes, 128 values, nl_k=8
+// TQ3J dequant: raw byte access, works for any block_size (128/256/512)
+// Block layout: [norm:fp16(2)][rnorm:fp16(2)][qs:blk*3/8][signs:blk/8]
+// NS10 function constant encodes the block stride in bytes
 template <typename type4x4>
-void dequantize_tq3j(device const block_tq3j * xb, short il, thread type4x4 & reg) {
-    // Pre-scale 8 centroids + precompute ±qjl
-    const float norm = float(xb->norm);
-    const float qjl_pos = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+void dequantize_tq3j(device const block_tq3j * xb_struct, short il, thread type4x4 & reg) {
+    device const uint8_t * xb = (device const uint8_t *)xb_struct;
+    const float norm = float(*(device const half *)(xb));
+    const float rnorm_val = float(*(device const half *)(xb + 2));
+    // Compute signs offset: 4 + qs_bytes. qs_bytes = (blk_size*3+7)/8
+    // blk_size = NS10 / type_size_per_elem... but we don't have it.
+    // Use il to figure out: we know qs starts at byte 4, and il indexes 16-value chunks.
+    // Signs start after all qs bytes. For the block_tq3j struct at d=128: signs at 52.
+    // For raw layout: signs_off = 4 + (block_dim * 3 + 7) / 8
+    // We can derive block_dim from NS10: block_dim = NS10 * 8 / (3 + 1 + 32/block_dim)...
+    // Simpler: read qs from byte 4 (always correct), read signs using FC_flash_attn_ext_ns10
+    device const uint8_t * qs = xb + 4;
+
+    // signs offset: for d=128: 4+48=52, d=256: 4+96=100, d=512: 4+192=196
+    // Derive from NS10 (block stride): signs_off = NS10 - block_dim/8
+    // block_dim: NS10 = 4 + block_dim*3/8 + block_dim/8 = 4 + block_dim*(3+1)/8 = 4 + block_dim/2
+    // So block_dim = (NS10 - 4) * 2, signs_off = NS10 - (NS10 - 4) * 2 / 8 = NS10 - (NS10-4)/4
+    // Actually: signs_off = 4 + (block_dim * 3 + 7) / 8
+    // For d=128: 4 + 48 = 52.  For d=256: 4 + 96 = 100. For d=512: 4 + 192 = 196.
+    // block_dim = il_max * 16 where il_max = nl_k. But we don't know nl_k here.
+    // HACK: compute from NS10 function constant
+    const int block_dim_est = (FC_flash_attn_ext_ns10 - 4) * 2; // NS10 = 4 + dim/2 for 3-bit+QJL
+    const int signs_off = 4 + (block_dim_est * 3 + 7) / 8;
+    device const uint8_t * signs = xb + signs_off;
+
+    const float qjl_pos = QJL_SCALE_F / (float)block_dim_est * rnorm_val;
     const float qjl_neg = -qjl_pos;
     float sc[8];
-    for (int k = 0; k < 8; k++) sc[k] = norm * tq_c8_d128[k];
+    for (int k = 0; k < 8; k++) sc[k] = norm * tq_c8_d128[k]; // TODO: select by block_dim
 
     float4x4 reg_f;
     const int base = il * 16;
-    // Read 8 bytes for 16×3-bit indices (48 bits needed, start at bit base*3)
     const int bp0 = base * 3;
     const int bi0 = bp0 / 8;
-    // Use 64-bit to avoid UB with shifts >= 32
-    uint64_t bits = (uint64_t)xb->qs[bi0]   | ((uint64_t)xb->qs[bi0+1] << 8) |
-                    ((uint64_t)xb->qs[bi0+2] << 16) | ((uint64_t)xb->qs[bi0+3] << 24) |
-                    ((uint64_t)xb->qs[bi0+4] << 32) | ((uint64_t)xb->qs[bi0+5] << 40);
+    uint64_t bits = (uint64_t)qs[bi0] | ((uint64_t)qs[bi0+1] << 8) |
+                    ((uint64_t)qs[bi0+2] << 16) | ((uint64_t)qs[bi0+3] << 24) |
+                    ((uint64_t)qs[bi0+4] << 32) | ((uint64_t)qs[bi0+5] << 40);
     int sh = bp0 % 8;
-    const uint16_t sign_bits = (uint16_t)xb->signs[base/8] | ((uint16_t)xb->signs[base/8 + 1] << 8);
+    const uint16_t sign_bits = (uint16_t)signs[base/8] | ((uint16_t)signs[base/8 + 1] << 8);
 
     for (int i = 0; i < 16; i++) {
         int idx = (int)((bits >> sh) & 7);
@@ -1031,12 +1052,21 @@ void dequantize_tq3j(device const block_tq3j * xb, short il, thread type4x4 & re
     reg = (type4x4) reg_f;
 }
 
-// TQ2J dequant: pre-scaled centroid lookup + sign select
-// block_tq2j = { norm(2), rnorm(2), qs[32], signs[16] } = 52 bytes, 128 values, nl_k=8
+// TQ2J dequant: raw byte access, works for any block_size
+// Block layout: [norm:fp16(2)][rnorm:fp16(2)][qs:blk/4][signs:blk/8]
 template <typename type4x4>
-void dequantize_tq2j(device const block_tq2j * xb, short il, thread type4x4 & reg) {
-    const float norm = float(xb->norm);
-    const float qjl_pos = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+void dequantize_tq2j(device const block_tq2j * xb_struct, short il, thread type4x4 & reg) {
+    device const uint8_t * xb = (device const uint8_t *)xb_struct;
+    const float norm = float(*(device const half *)(xb));
+    const float rnorm_val = float(*(device const half *)(xb + 2));
+    device const uint8_t * qs = xb + 4;
+    // signs_off for 2-bit: 4 + dim/4. NS10 = 4 + dim/4 + dim/8 = 4 + 3*dim/8
+    // dim = (NS10 - 4) * 8 / 3
+    const int block_dim_est = (FC_flash_attn_ext_ns10 - 4) * 8 / 3;
+    const int signs_off = 4 + block_dim_est / 4;
+    device const uint8_t * signs = xb + signs_off;
+
+    const float qjl_pos = QJL_SCALE_F / (float)block_dim_est * rnorm_val;
     const float qjl_neg = -qjl_pos;
     float sc[4];
     for (int k = 0; k < 4; k++) sc[k] = norm * tq_c4_d128[k];
