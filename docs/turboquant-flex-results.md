@@ -273,7 +273,7 @@ q4_k_m model weights, Metal FA, wikitext-2:
 | 16384   | 7.130 | 7.129 | 7.140  | 7.132  |
 | 32768*  | 9.018 | 9.046 | 9.038  | 9.032  |
 
-*32k with 2 chunks (limited by dataset size). See 32k 9-chunk results below.
+*32k with only 2 chunks — too few for reliable evaluation.
 
 - TQ at 6.21 bpv: always within +0.3% of f16
 - TQ consistently matches or beats q8_0 (which uses 37% more memory)
@@ -297,16 +297,18 @@ At 32k context with 9 chunks (maximum for wikitext-2), all configs fall within e
 
 Both TQ variants beat q8_0 in point estimate. TQ+QJL edges TQ best by 0.003 PPL — the QJL bias correction shows a consistent (if tiny) benefit at 32k.
 
-### 20-Chunk Comparison (ctx=512)
+### 200-Chunk Comparison (ctx=512)
 
-| KV config | bpv | PPL | vs f16 | K compression |
-|-----------|-----|-----|--------|---------------|
-| f16 KV | 16.00 | 11.640 | — | 1.0x |
-| q8_0 KV | 8.50 | 11.657 | +0.1% | 1.9x |
-| **TQ best** | **6.21** | **11.639** | **-0.01%** | **2.6x** |
-| TQ+QJL | 7.18 | 11.638 | -0.02% | 2.2x |
-| q4_1 KV | 5.00 | 1309.6 | +11,150% | — |
-| q4_0 KV | 4.50 | 3600.2 | +30,830% | — |
+| KV config | bpv | PPL | ±CI | vs f16 |
+|-----------|-----|-----|-----|--------|
+| f16 KV | 16.00 | 11.486 | ±0.139 | — |
+| **TQ best** | **6.21** | **11.514** | **±0.139** | **+0.24%** |
+| TQ+QJL all | 7.18 | 11.522 | ±0.139 | +0.31% |
+| q8_0 KV | 8.50 | 11.524 | ±0.139 | +0.33% |
+| q4_1 KV | 5.00 | 1530.5 | — | garbage |
+| q4_0 KV | 4.50 | 3925.9 | — | garbage |
+
+All non-garbage configs fall within each other's 95% confidence intervals. q4_0 and q4_1 are completely unusable on this model.
 
 ### Calibration Source Comparison
 
@@ -385,16 +387,18 @@ With QJL on both hi and lo for split layers (conservative for very long context)
 | 20-26 | 57-64% | nosplit 5-bit + QJL | 6.25 |
 | 27 | 100% | split 10/5 QJL=hi | 6.88 |
 
-### PPL Results (20 chunks)
+### PPL Results (200 chunks)
 
 | KV config | bpv | PPL | ±CI | vs f16 |
 |-----------|-----|-----|-----|--------|
-| f16 KV | 16.00 | 7.780 | ±0.297 | — |
-| q8_0 KV | 8.50 | 7.783 | ±0.298 | +0.03% |
-| **TQ QJL all** | **6.62** | **7.826** | **±0.300** | **+0.6%** |
-| **TQ winner** | **6.41** | **7.831** | **±0.300** | **+0.7%** |
+| f16 KV | 16.00 | 8.910 | ±0.112 | — |
+| **TQ winner** | **6.41** | **8.927** | **±0.112** | **+0.19%** |
+| TQ+QJL all | 6.62 | 8.933 | ±0.112 | +0.26% |
+| q8_0 KV | 8.50 | 8.949 | ±0.113 | +0.44% |
+| q4_1 KV | 5.00 | 10131.7 | — | garbage |
+| q4_0 KV | 4.50 | 3846.9 | — | garbage |
 
-All results fall within each other's 95% confidence intervals.
+All non-garbage configs fall within each other's 95% confidence intervals. q4_0 and q4_1 are completely unusable on this model — same as the 1.5B.
 
 ### Pauli Test (Korean Transliteration)
 
@@ -432,6 +436,106 @@ Key findings from QJL investigation:
 - Bug reproduces on both CPU and Metal FA paths → not a backend issue
 - Confirmed on both uniform flex and per-layer flex
 - The 1.5B was only tested on English where this doesn't manifest
+
+## Results: Qwen3 8B
+
+Model: Q8_0 weights, Metal FA, wikitext-2.
+
+Qwen3 8B has the same head geometry as Qwen2.5 7B (d=128, 8 KV heads, GQA) but 36 layers. Its outlier distribution is remarkably uniform — almost every layer falls in the "high" tier (60-90%), with only layer 0 as extreme (99%) and 4 moderate layers (25-27, 35). This changes the optimal strategy completely.
+
+### Outlier Distribution
+
+| Tier | Layers | Count |
+|------|--------|-------|
+| Extreme (>90%) | 0 | 1 |
+| High (60-90%) | 1-24, 28-34 | 31 |
+| Moderate (<60%) | 25-27, 35 | 4 |
+
+### Best Configuration
+
+Unlike Qwen2.5 where split quantization helps extreme layers, Qwen3's uniform outlier distribution means **every layer benefits equally from the same treatment**. Split quantization consistently underperforms nosplit on this model.
+
+```bash
+llama-tq-calibrate -m model.gguf -f ptb.txt -o perms.bin \
+    --flex-all 0:5:5:1:0
+```
+
+**All 36 layers**: nosplit 5-bit (32 centroids, d=128) + QJL. 82 bytes = **5.125 bpv**.
+
+**Average: 5.125 bpv = 3.1x K cache compression.**
+
+### Why Nosplit Wins on Qwen3
+
+The sweep tested split configs (9/4, 8/3, 7/3, 6/3, 5/4, 5/3) and nosplit (4-6 bit) with and without QJL. All split configs performed worse than nosplit 5-bit:
+
+| Config | PPL@20 | vs f16 (13.364) | bpv |
+|--------|--------|-----------------|-----|
+| **nosplit 5-bit QJL** | **13.340** | **≈0%** | **5.125** |
+| nosplit 5-bit | 13.348 | ≈0% | 5.0 |
+| 5/4 split QJL=hi | 13.357 | ≈0% | 4.88 |
+| 9/4 split QJL=both | 13.377 | +0.1% | 6.7 |
+| 8/3 split QJL=hi | 13.493 | +1.0% | 4.88 |
+| 6/3 split QJL=hi | 13.525 | +1.2% | 4.38 |
+| nosplit 4-bit QJL | 13.891 | +3.9% | 4.125 |
+| q4_0 (reference) | 13.968 | +4.5% | 4.5 |
+
+The split 32/96 channel partition assumes some channels are dramatically more important than others. In Qwen3, the outlier distribution is too uniform for this — forcing an artificial split wastes bits on the hi block without improving the lo block enough to compensate.
+
+Per-layer differentiation (different configs for extreme/high/moderate) also didn't help — giving layer 0 more bits (6-bit, 8-bit, or split 9/4) made PPL slightly worse, not better.
+
+### PPL Results (200 chunks)
+
+| KV config | bpv | PPL | ±CI | vs f16 |
+|-----------|-----|-----|-----|--------|
+| f16 KV | 16.00 | 10.899 | ±0.150 | — |
+| q8_0 KV | 8.50 | 10.890 | ±0.150 | ≈0% |
+| **TQ ns5 QJL** | **5.125** | **10.848** | **±0.149** | **≈0%** |
+| q4_1 KV | 5.00 | 10.993 | ±0.149 | +0.86% |
+| q4_0 KV | 4.50 | 11.470 | ±0.226 | +4.03%* |
+
+*q4_0 from 100-chunk run.
+
+f16, q8_0, and TQ all fall within each other's 95% confidence intervals. q4_0 is clearly worse at +4%. q4_1 consistently trends worse (+0.86%) across all chunk counts but the gap is not statistically significant at 200 chunks (~1.3σ). The trend is consistent: TQ ns5 QJL outperforms q4_1 in every run at similar bpv (5.125 vs 5.0).
+
+### Extended Evaluation (64 chunks)
+
+| KV config | bpv | PPL@64 | vs f16 |
+|-----------|-----|--------|--------|
+| f16 | 16.00 | 10.795 | — |
+| q8_0 | 8.50 | 10.791 | ≈0% |
+| **TQ ns5 QJL** | **5.125** | **10.755** | **≈0%** |
+| q4_0 | 4.50 | 11.260 | +4.3% |
+
+TQ ns5 QJL holds perfectly across more evaluation data. q4_0 remains at +4.3%, consistent from 20 to 64 chunks.
+
+### Generation Quality
+
+Model: Qwen3-8B (Q8_0), seed=42, temp=0, Metal FA. Qwen3 uses `<think>` reasoning chains.
+
+| Prompt | f16 | q8_0 | TQ (5.125 bpv) |
+|--------|-----|------|----------------|
+| 127 × 38 | ✅ (correct reasoning chain) | identical | identical |
+| French translation | ✅ Le chat s'est assis... | identical | identical (minor phrasing: "the original sentence") |
+| Capital of Australia | ✅ Canberra | identical | identical (minor phrasing) |
+| Train distance (60mph × 2.5h) | ✅ 150 miles | identical | identical |
+| Korean transliteration | ✅ correct 외래어 표기법 | identical | identical |
+| Python palindrome | ✅ correct implementation | identical | identical |
+
+All outputs match f16 quality. The `<think>` reasoning chains are virtually word-for-word identical across all three K cache types.
+
+### Differences from Qwen2.5 Configuration
+
+| | Qwen2.5 1.5B | Qwen2.5 7B | Qwen3 8B |
+|---|---|---|---|
+| Outlier pattern | 4 extreme layers | 7 extreme layers | 1 extreme layer |
+| Best config | split 9/4 + nosplit 6 | split 10/5 + nosplit 5 | **nosplit 5 everywhere** |
+| Split needed? | yes (extreme layers) | yes (extreme layers) | **no** |
+| QJL | per-tier | on hi / on all | on all |
+| Avg bpv | 6.21 | 6.41 | **5.125** |
+| PPL vs f16 | +0.5% | +0.7% | **≈0%** |
+| Compression | 2.6x | 2.5x | **3.1x** |
+
+Qwen3's uniform outlier distribution is ideal for TurboQuant — the single nosplit 5-bit + QJL config achieves the best compression ratio and lowest PPL delta of all tested models.
 
 ## Generation Quality Comparison
 
