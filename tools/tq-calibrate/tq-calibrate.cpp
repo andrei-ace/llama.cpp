@@ -169,8 +169,8 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  -n,  --n-tokens N      Max calibration tokens (default: 4096)\n");
     fprintf(stderr, "  -c,  --ctx-size N      Context size (default: 512)\n");
     fprintf(stderr, "  -ngl,--n-gpu-layers N  GPU layers (default: 99)\n");
-    fprintf(stderr, "       --pre-rope        Capture pre-RoPE K (default: post-RoPE)\n");
-    fprintf(stderr, "       --post-rope       Capture post-RoPE K (default)\n");
+    fprintf(stderr, "       --pre-rope        Capture pre-RoPE K (default)\n");
+    fprintf(stderr, "       --post-rope       Capture post-RoPE K\n");
     fprintf(stderr, "       --metric var      Outlier = highest variance Var(K) (default)\n");
     fprintf(stderr, "       --metric mag      Outlier = highest mean |K|\n");
     fprintf(stderr, "       --metric both     Outlier = |K| × std(K)\n");
@@ -180,7 +180,7 @@ static void print_usage(const char * prog) {
 int main(int argc, char ** argv) {
     std::string model_path, calib_file, output_path = "tq-perms.bin", stats_path;
     int n_tokens_max = 4096, n_ctx = 512, n_gpu_layers = 99;
-    bool pre_rope = false;
+    bool pre_rope = true;
     calib_metric_t metric = METRIC_VAR;
 
     for (int i = 1; i < argc; i++) {

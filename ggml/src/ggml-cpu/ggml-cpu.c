@@ -15,6 +15,10 @@
 #include "ggml.h"
 #include "common.h"
 
+// TurboQuant per-head context for vec_dot channel permutation
+extern void tq_set_current_layer(int layer, int is_k);
+extern void tq_set_current_head(int head);
+
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
 #elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
@@ -1321,6 +1325,17 @@ static void ggml_compute_forward_mul_mat_one_chunk(
                 const int64_t i3 = i13;
 
                 const char * src0_row = (const char*)src0->data + (0 + i02 * nb02 + i03 * nb03);
+
+                // TurboQuant: set per-head context for vec_dot channel permutation
+                {
+                    const struct ggml_tensor * root = src0;
+                    while (root->view_src) root = root->view_src;
+                    int layer = -1;
+                    if (sscanf(root->name, "cache_k_l%d", &layer) == 1) {
+                        tq_set_current_layer(layer, 1);
+                        tq_set_current_head((int)i02);
+                    }
+                }
 
                 // desc: when src1 is not a contiguous memory block we have to calculate the offset using the strides
                 //       if it is, then we have either copied the data to params->wdata and made it contiguous or we are using

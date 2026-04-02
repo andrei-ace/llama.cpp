@@ -9,6 +9,15 @@
 #include <string>
 #include <unordered_map>
 
+extern "C" {
+    int tq_flex_get_split(void);
+    int tq_flex_get_hi_bits(void);
+    int tq_flex_get_lo_bits(void);
+    int tq_flex_get_hi_res_bits(void);
+    int tq_flex_get_qjl_hi(void);
+    int tq_flex_get_qjl_lo(void);
+}
+
 struct ggml_metal_device_deleter {
     void operator()(ggml_metal_device_t ctx) {
         ggml_metal_device_free(ctx);
@@ -1336,6 +1345,15 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
                 dk, dv);
     }
 
+    // For TQK_FLEX, encode config in pipeline name so each config gets its own compiled pipeline
+    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+        char flex_suffix[64];
+        snprintf(flex_suffix, 64, "_s%dh%dl%dr%dj%dj%d",
+                tq_flex_get_split(), tq_flex_get_hi_bits(), tq_flex_get_lo_bits(),
+                tq_flex_get_hi_res_bits(), tq_flex_get_qjl_hi(), tq_flex_get_qjl_lo());
+        strncat(base, flex_suffix, 256 - strlen(base) - 1);
+    }
+
     snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d_kvpad=%d_bcm=%d_ns10=%d_ns20=%d_nsg=%d",
             base,
             has_mask,
@@ -1363,6 +1381,16 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
         ggml_metal_cv_set_int32(cv, ns10, FC_FLASH_ATTN_EXT + 20);
         ggml_metal_cv_set_int32(cv, ns20, FC_FLASH_ATTN_EXT + 21);
         ggml_metal_cv_set_int32(cv, nsg,  FC_FLASH_ATTN_EXT + 22);
+
+        // TQK_FLEX: set runtime config as function constants (shared base FC_TQ_FLEX)
+        if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+            ggml_metal_cv_set_bool (cv, tq_flex_get_split(),       FC_TQ_FLEX + 0);
+            ggml_metal_cv_set_int32(cv, tq_flex_get_hi_bits(),     FC_TQ_FLEX + 1);
+            ggml_metal_cv_set_int32(cv, tq_flex_get_lo_bits(),     FC_TQ_FLEX + 2);
+            ggml_metal_cv_set_int32(cv, tq_flex_get_hi_res_bits(), FC_TQ_FLEX + 3);
+            ggml_metal_cv_set_bool (cv, tq_flex_get_qjl_hi(),     FC_TQ_FLEX + 4);
+            ggml_metal_cv_set_bool (cv, tq_flex_get_qjl_lo(),     FC_TQ_FLEX + 5);
+        }
 
         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
 
@@ -1407,6 +1435,14 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
                 dk, dv);
     }
 
+    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+        char flex_suffix[64];
+        snprintf(flex_suffix, 64, "_s%dh%dl%dr%dj%dj%d",
+                tq_flex_get_split(), tq_flex_get_hi_bits(), tq_flex_get_lo_bits(),
+                tq_flex_get_hi_res_bits(), tq_flex_get_qjl_hi(), tq_flex_get_qjl_lo());
+        strncat(base, flex_suffix, 256 - strlen(base) - 1);
+    }
+
     snprintf(name, 256, "%s_mask=%d_sink=%d_bias=%d_scap=%d_kvpad=%d_ns10=%d_ns20=%d_nsg=%d_nwg=%d",
             base,
             has_mask,
@@ -1432,6 +1468,15 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         ggml_metal_cv_set_int32(cv, ns20, FC_FLASH_ATTN_EXT_VEC + 21);
         ggml_metal_cv_set_int32(cv, nsg,  FC_FLASH_ATTN_EXT_VEC + 22);
         ggml_metal_cv_set_int32(cv, nwg,  FC_FLASH_ATTN_EXT_VEC + 23);
+
+        if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+            ggml_metal_cv_set_bool (cv, tq_flex_get_split(),       FC_TQ_FLEX + 0);
+            ggml_metal_cv_set_int32(cv, tq_flex_get_hi_bits(),     FC_TQ_FLEX + 1);
+            ggml_metal_cv_set_int32(cv, tq_flex_get_lo_bits(),     FC_TQ_FLEX + 2);
+            ggml_metal_cv_set_int32(cv, tq_flex_get_hi_res_bits(), FC_TQ_FLEX + 3);
+            ggml_metal_cv_set_bool (cv, tq_flex_get_qjl_hi(),     FC_TQ_FLEX + 4);
+            ggml_metal_cv_set_bool (cv, tq_flex_get_qjl_lo(),     FC_TQ_FLEX + 5);
+        }
 
         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
 

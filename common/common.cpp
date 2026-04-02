@@ -15,6 +15,7 @@ extern "C" {
     int  tq_get_n_recommended_layers(void);
     void tq_flex_configure(int split, int hi_bits, int lo_bits, int hi_res_bits, int qjl_hi, int qjl_lo);
     int  tq_flex_get_block_bytes(void);
+    int  tq_flex_map_to_real_type(void);
     void ggml_type_set_size(enum ggml_type type, size_t size);
 }
 
@@ -1288,7 +1289,9 @@ common_init_result::common_init_result(common_params & params) :
     }
 
     // TQK_FLEX: configure runtime parameters and patch type_size before context creation
-    if (cparams.type_k == GGML_TYPE_TQK_FLEX) {
+    // Also configure flex when -ctk tqk is used with flex flags (per-layer mode)
+    if (cparams.type_k == GGML_TYPE_TQK_FLEX ||
+        (cparams.type_k == GGML_TYPE_TQK_AUTO && params.tq_flex_hi_bits > 0)) {
         tq_flex_configure(
             params.tq_flex_split,
             params.tq_flex_hi_bits,

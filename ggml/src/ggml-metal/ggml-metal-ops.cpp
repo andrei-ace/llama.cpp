@@ -11,6 +11,16 @@
 #include <cassert>
 #include <algorithm>
 #include <limits>
+
+extern "C" {
+    int tq_flex_get_split(void);
+    int tq_flex_get_hi_bits(void);
+    int tq_flex_get_lo_bits(void);
+    int tq_flex_get_hi_res_bits(void);
+    int tq_flex_get_qjl_hi(void);
+    int tq_flex_get_qjl_lo(void);
+    int tq_flex_get_block_bytes(void);
+}
 #include <cmath>
 
 static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
@@ -1333,8 +1343,10 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256 ||
         dst_type == GGML_TYPE_TQK_2HI_1LO_HAD_D256 ||
         dst_type == GGML_TYPE_TQK_3HI_2LO_HAD_D256 ||
-        dst_type == GGML_TYPE_TQV_HAD_MSE4_D256) {
-        if (dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+        dst_type == GGML_TYPE_TQV_HAD_MSE4_D256 ||
+        dst_type == GGML_TYPE_TQK_FLEX) {
+        if (dst_type == GGML_TYPE_TQK_FLEX ||
+            dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ ||
             dst_type == GGML_TYPE_TQK_5R3_SJ ||
@@ -1359,7 +1371,8 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
                               dst_type == GGML_TYPE_TQV_HAD_MSE4_D256);
         const int block_size = is_d256 ? 256 : 128;
 
-        const char * name = dst_type == GGML_TYPE_TQK_HAD_MSE4         ? "kernel_set_rows_had_mse4_i32" :
+        const char * name = dst_type == GGML_TYPE_TQK_FLEX             ? "kernel_set_rows_flex_i32" :
+                            dst_type == GGML_TYPE_TQK_HAD_MSE4         ? "kernel_set_rows_had_mse4_i32" :
                             dst_type == GGML_TYPE_TQK_HAD_PROD5        ? "kernel_set_rows_had_prod5_i32" :
                             dst_type == GGML_TYPE_TQK_HAD_PROD4        ? "kernel_set_rows_had_prod4_i32" :
                             dst_type == GGML_TYPE_TQV_HAD_MSE4         ? "kernel_set_rows_had_mse4_i32" :
@@ -1403,8 +1416,9 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
         ggml_metal_encoder_set_buffer (enc, ggml_metal_get_buffer_id(op),         3);
 
-        // split types: pass channel map buffer and layer index for calibrated channel ordering
-        if (dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
+        // split types + flex: pass channel map buffer and layer index for calibrated channel ordering
+        if (dst_type == GGML_TYPE_TQK_FLEX ||
+            dst_type == GGML_TYPE_TQK_5HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD ||
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ ||
             dst_type == GGML_TYPE_TQK_5R3_SJ ||
@@ -1415,16 +1429,32 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
             dst_type == GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256 ||
             dst_type == GGML_TYPE_TQK_2HI_1LO_HAD_D256 ||
             dst_type == GGML_TYPE_TQK_3HI_2LO_HAD_D256) {
-            // get_tq_channel_map auto-creates default map if none exists yet
             ggml_metal_buffer_id bid_chmap = ggml_metal_device_get_tq_channel_map(ctx->dev);
             ggml_metal_encoder_set_buffer(enc, bid_chmap, 4);
-            // Extract layer index from tensor name "cache_k_l<N>"
             int32_t layer_idx = 0;
             const char * lp = strstr(op->name, "_l");
             if (lp) layer_idx = atoi(lp + 2);
-            int32_t n_kv_heads = ne00 / block_size; // n_embd_k_gqa / head_size
+            int32_t n_kv_heads = ne00 / block_size;
             ggml_metal_encoder_set_bytes(enc, &layer_idx,  sizeof(layer_idx),  5);
             ggml_metal_encoder_set_bytes(enc, &n_kv_heads, sizeof(n_kv_heads), 6);
+
+            // TQK_FLEX: pass runtime config as extra constant arguments (indices 7-13)
+            if (dst_type == GGML_TYPE_TQK_FLEX) {
+                int32_t fhi   = tq_flex_get_hi_bits();
+                int32_t flo   = tq_flex_get_lo_bits();
+                int32_t fres  = tq_flex_get_hi_res_bits();
+                int32_t fqjlh = tq_flex_get_qjl_hi();
+                int32_t fqjll = tq_flex_get_qjl_lo();
+                int32_t fsplit= tq_flex_get_split();
+                int32_t fblk  = tq_flex_get_block_bytes();
+                ggml_metal_encoder_set_bytes(enc, &fhi,    sizeof(int32_t), 7);
+                ggml_metal_encoder_set_bytes(enc, &flo,    sizeof(int32_t), 8);
+                ggml_metal_encoder_set_bytes(enc, &fres,   sizeof(int32_t), 9);
+                ggml_metal_encoder_set_bytes(enc, &fqjlh,  sizeof(int32_t), 10);
+                ggml_metal_encoder_set_bytes(enc, &fqjll,  sizeof(int32_t), 11);
+                ggml_metal_encoder_set_bytes(enc, &fsplit,  sizeof(int32_t), 12);
+                ggml_metal_encoder_set_bytes(enc, &fblk,   sizeof(int32_t), 13);
+            }
         }
 
         ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, n_blocks, 1, 1);

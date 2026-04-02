@@ -2969,7 +2969,7 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    // TurboQuant types require Flash Attention (except TQK_FLEX which uses CPU vec_dot)
+    // TurboQuant types require Flash Attention
     {
         const bool tq_flex_k = (params.type_k == GGML_TYPE_TQK_FLEX);
         const bool tq_k = (params.type_k == GGML_TYPE_TQK_AUTO) ||
@@ -2977,13 +2977,7 @@ llama_context * llama_init_from_model(
                           (params.type_k == GGML_TYPE_TQK_5R3_SJ);
         const bool tq_v = (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256) ||
                           (params.type_v == GGML_TYPE_TQK_5R3_SJ);
-        // TQK_FLEX: force FA OFF — no Metal kernel, CPU vec_dot only
-        if (tq_flex_k) {
-            if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED) {
-                params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
-                LLAMA_LOG_INFO("%s: tqk_flex detected — disabling flash_attn (CPU vec_dot path only)\n", __func__);
-            }
-        } else if (tq_k || tq_v) {
+        if (tq_flex_k || tq_k || tq_v) {
             if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
                 LLAMA_LOG_ERROR("%s: TurboQuant KV cache types require flash_attn\n", __func__);
                 return nullptr;
@@ -2993,7 +2987,7 @@ llama_context * llama_init_from_model(
                 LLAMA_LOG_INFO("%s: TurboQuant detected — forcing flash_attn on\n", __func__);
             }
             // TQ K types only support f16 or tqv4_0 V cache (FA templates exist only for these combos)
-            if (tq_k && !tq_v && params.type_v != GGML_TYPE_F16) {
+            if ((tq_k || tq_flex_k) && !tq_v && params.type_v != GGML_TYPE_F16) {
                 LLAMA_LOG_WARN("%s: TurboQuant K with %s V is not supported — switching V to f16\n",
                         __func__, ggml_type_name(params.type_v));
                 params.type_v = GGML_TYPE_F16;

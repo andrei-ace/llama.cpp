@@ -71,6 +71,13 @@ void tq_set_current_head(int head);
 // qjl_hi/qjl_lo: 0 = no QJL, 1 = QJL on that subset
 void tq_flex_configure(int split, int hi_bits, int lo_bits, int hi_res_bits, int qjl_hi, int qjl_lo);
 int  tq_flex_get_block_bytes(void);
+int  tq_flex_map_to_real_type(void); // returns matching ggml_type or -1 if no match
+int  tq_flex_get_split(void);
+int  tq_flex_get_hi_bits(void);
+int  tq_flex_get_lo_bits(void);
+int  tq_flex_get_hi_res_bits(void);
+int  tq_flex_get_qjl_hi(void);
+int  tq_flex_get_qjl_lo(void);
 
 #ifdef __cplusplus
 }
