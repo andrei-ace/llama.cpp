@@ -1192,6 +1192,11 @@ struct cmd_params_instance {
         cparams.type_v          = type_v;
         cparams.offload_kqv     = !no_kv_offload;
         cparams.flash_attn_type = flash_attn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+
+        // TurboQuant types require flash attention
+        if (type_k == GGML_TYPE_TQL || type_k == GGML_TYPE_TQ3J || type_k == GGML_TYPE_TQ2J) {
+            cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        }
         cparams.embeddings      = embeddings;
         cparams.op_offload      = !no_op_offload;
         cparams.swa_full        = false;

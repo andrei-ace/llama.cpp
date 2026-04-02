@@ -1501,6 +1501,13 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.pooling_type      = params.pooling_type;
     cparams.attention_type    = params.attention_type;
     cparams.flash_attn_type   = params.flash_attn_type;
+
+    // TurboQuant types require flash attention
+    if (params.cache_type_k == GGML_TYPE_TQL  ||
+        params.cache_type_k == GGML_TYPE_TQ3J ||
+        params.cache_type_k == GGML_TYPE_TQ2J) {
+        cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    }
     cparams.cb_eval           = params.cb_eval;
     cparams.cb_eval_user_data = params.cb_eval_user_data;
     cparams.offload_kqv       = !params.no_kv_offload;
