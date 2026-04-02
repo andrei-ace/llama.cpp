@@ -1,5 +1,7 @@
 # TurboQuant Flex: KV Cache Quantization
 
+> **Experimental.** This is a research prototype — unoptimized, API subject to change, tested on CPU and Apple Metal only. Token generation is ~50% slower than f16 KV due to unoptimized vec FA kernels. CUDA is not supported. Use for experimentation and memory-constrained deployments, not production latency-sensitive workloads.
+
 ## Scope
 
 **Backend support**: TurboQuant Flex (`tqk_flex`, `tqk` auto per-layer) is supported on **CPU and Metal only**. CUDA is not yet supported — using `-ctk tqk_flex` or `-ctk tqk` with TQFC configs on a CUDA build will error at context creation. The fixed TQ types (tqk4_sj, tqk3_sjj, etc.) have CUDA support.
