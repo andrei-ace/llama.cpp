@@ -156,7 +156,7 @@ We swept the outlier % threshold that separates "use split" from "use non-split"
 | 80% | 5 | 6.19 | 11.660 |
 | 90% | 3 | 6.19 | 11.660 |
 
-70% was the sweet spot — only 8 layers truly benefit from split quantization.
+70% was the sweet spot — only a few layers (4 in this calibration run) truly benefit from split quantization.
 
 ## Model-Specific Results: Qwen2.5 1.5B Instruct
 
@@ -164,11 +164,13 @@ We swept the outlier % threshold that separates "use split" from "use non-split"
 
 ### Layer Tiers (Qwen2.5 1.5B, threshold 70%)
 
-| Tier | Outlier % | Count | Config | bpv |
-|------|-----------|-------|--------|-----|
-| Split (>70%) | 79-100% | 8 | 9/4 QJL=both | 6.75 |
-| Non-split (<70%) | 43-68% | 20 | 6-bit uniform | 6.00 |
+| Tier | Outlier % | Count* | Config | bpv |
+|------|-----------|--------|--------|-----|
+| Split (>70%) | 79-100% | 4 | 9/4 QJL=both | 6.75 |
+| Non-split (<70%) | 43-68% | 24 | 6-bit uniform | 6.125 |
 | **Average** | | **28** | | **6.21** |
+
+*Exact count varies slightly between calibration runs due to outlier % noise.
 
 ### Perplexity Across Context Lengths
 
@@ -191,7 +193,7 @@ q4_k_m model weights, Metal FA, wikitext-2:
 - q4_0 KV at similar bpv: PPL 3600 (unusable)
 
 Note on QJL in these results:
-- **TQ best (6.21 bpv)**: QJL on split layers only (8 layers with `1:9:4:1:1`), no QJL on non-split layers (20 layers with `0:6:0:0:0`)
+- **TQ best (6.21 bpv)**: QJL on split layers only (`1:9:4:1:1`), no QJL on non-split layers (`0:6:0:0:0`)
 - **TQ+QJL (7.18 bpv)**: QJL on all layers — split layers have `1:9:4:1:1`, non-split layers have `0:6:0:1:0`
 - A fully no-QJL config (`1:9:4:0:0` + `0:6:0:0:0`) would save ~0.4 bpv on the split layers but may degrade at very long contexts
 
@@ -247,7 +249,7 @@ Offset  Size   Field
 96      12     signs_lo[12] — 1-bit × 96 QJL signs (per-element)
 ```
 
-### Non-split block (98 bytes, 6.00 bpv)
+### Non-split block (98 bytes, 6.125 bpv)
 
 ```
 Offset  Size   Field
