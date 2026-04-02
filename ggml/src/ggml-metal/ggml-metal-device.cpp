@@ -1327,12 +1327,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
             dk,
             dv);
 
-    // TurboQuant: detect K type for FWHT Q pre-rotation
-    const enum ggml_type k_type = op->src[1]->type;
-    const bool tq_fwht       = (k_type == GGML_TYPE_TQ3J || k_type == GGML_TYPE_TQ2J);
-    const bool tq_fwht_split = (k_type == GGML_TYPE_TQL);
-
-    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d_kvpad=%d_bcm=%d_ns10=%d_ns20=%d_nsg=%d_tqf=%d_tqs=%d",
+    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d_kvpad=%d_bcm=%d_ns10=%d_ns20=%d_nsg=%d",
             base,
             has_mask,
             has_sinks,
@@ -1342,9 +1337,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
             bc_mask,
             ns10,
             ns20,
-            nsg,
-            tq_fwht,
-            tq_fwht_split);
+            nsg);
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
     if (!res.pipeline) {
@@ -1361,9 +1354,6 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
         ggml_metal_cv_set_int32(cv, ns10, FC_FLASH_ATTN_EXT + 20);
         ggml_metal_cv_set_int32(cv, ns20, FC_FLASH_ATTN_EXT + 21);
         ggml_metal_cv_set_int32(cv, nsg,  FC_FLASH_ATTN_EXT + 22);
-
-        ggml_metal_cv_set_bool(cv, tq_fwht,       FC_FLASH_ATTN_EXT + 30);
-        ggml_metal_cv_set_bool(cv, tq_fwht_split, FC_FLASH_ATTN_EXT + 31);
 
         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
 
@@ -1400,11 +1390,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
             dk,
             dv);
 
-    const enum ggml_type k_type_vec = op->src[1]->type;
-    const bool tq_fwht_vec       = (k_type_vec == GGML_TYPE_TQ3J || k_type_vec == GGML_TYPE_TQ2J);
-    const bool tq_fwht_split_vec = (k_type_vec == GGML_TYPE_TQL);
-
-    snprintf(name, 256, "%s_mask=%d_sink=%d_bias=%d_scap=%d_kvpad=%d_ns10=%d_ns20=%d_nsg=%d_nwg=%d_tqf=%d_tqs=%d",
+    snprintf(name, 256, "%s_mask=%d_sink=%d_bias=%d_scap=%d_kvpad=%d_ns10=%d_ns20=%d_nsg=%d_nwg=%d",
             base,
             has_mask,
             has_sinks,
@@ -1413,9 +1399,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
             has_kvpad,
             ns10,
             ns20,
-            nsg, nwg,
-            tq_fwht_vec,
-            tq_fwht_split_vec);
+            nsg, nwg);
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
     if (!res.pipeline) {
@@ -1431,9 +1415,6 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         ggml_metal_cv_set_int32(cv, ns20, FC_FLASH_ATTN_EXT_VEC + 21);
         ggml_metal_cv_set_int32(cv, nsg,  FC_FLASH_ATTN_EXT_VEC + 22);
         ggml_metal_cv_set_int32(cv, nwg,  FC_FLASH_ATTN_EXT_VEC + 23);
-
-        ggml_metal_cv_set_bool(cv, tq_fwht_vec,       FC_FLASH_ATTN_EXT_VEC + 30);
-        ggml_metal_cv_set_bool(cv, tq_fwht_split_vec, FC_FLASH_ATTN_EXT_VEC + 31);
 
         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
 
