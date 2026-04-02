@@ -1321,11 +1321,20 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
     // do bounds checks for the mask?
     const bool bc_mask = op->src[3] && (op->src[3]->ne[1] % 8 != 0);
 
-    snprintf(base, 256, "kernel_%s_%s_dk%d_dv%d",
-            "flash_attn_ext",
-            ggml_type_name(op->src[1]->type),
-            dk,
-            dv);
+    // Include V type in name when K and V types differ (TQ mixed K/V)
+    if (op->src[1]->type != op->src[2]->type &&
+        op->src[2]->type != GGML_TYPE_F16) {
+        snprintf(base, 256, "kernel_%s_%s_%s_dk%d_dv%d",
+                "flash_attn_ext",
+                ggml_type_name(op->src[1]->type),
+                ggml_type_name(op->src[2]->type),
+                dk, dv);
+    } else {
+        snprintf(base, 256, "kernel_%s_%s_dk%d_dv%d",
+                "flash_attn_ext",
+                ggml_type_name(op->src[1]->type),
+                dk, dv);
+    }
 
     snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d_kvpad=%d_bcm=%d_ns10=%d_ns20=%d_nsg=%d",
             base,
@@ -1389,6 +1398,14 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
             ggml_type_name(op->src[1]->type),
             dk,
             dv);
+    if (op->src[1]->type != op->src[2]->type &&
+        op->src[2]->type != GGML_TYPE_F16) {
+        snprintf(base, 256, "kernel_%s_%s_%s_dk%d_dv%d",
+                "flash_attn_ext_vec",
+                ggml_type_name(op->src[1]->type),
+                ggml_type_name(op->src[2]->type),
+                dk, dv);
+    }
 
     snprintf(name, 256, "%s_mask=%d_sink=%d_bias=%d_scap=%d_kvpad=%d_ns10=%d_ns20=%d_nsg=%d_nwg=%d",
             base,
