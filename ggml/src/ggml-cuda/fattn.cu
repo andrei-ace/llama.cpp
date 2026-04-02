@@ -6,6 +6,22 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+#include <cstring>
+#include <cstdlib>
+
+// Forward declarations for TQK_FLEX FA config (defined in ggml-cuda.cu)
+void tq_flex_upload_config_to_device(int layer);
+void tq_flex_upload_config_to_device_async(int layer, cudaStream_t stream);
+void tq_flex_ensure_all_configs_on_device(void);
+
+// Extract layer index from KV cache tensor name (e.g. "cache_k_l5")
+static int32_t tq_fa_extract_layer_idx(const ggml_tensor * K) {
+    const ggml_tensor * root = K;
+    while (root->view_src) root = root->view_src;
+    const char * lp = strstr(root->name, "_l");
+    return lp ? (int32_t)atoi(lp + 2) : 0;
+}
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -302,6 +318,9 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_3HI_2LO_HAD, GGML_TYPE_F16)
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_3HI_2LO_HAD, GGML_TYPE_TQV_HAD_MSE4)
     FATTN_VEC_CASE(128, GGML_TYPE_TQK_3HI_2LO_HAD, GGML_TYPE_Q4_0)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_FLEX,         GGML_TYPE_F16)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_FLEX,         GGML_TYPE_TQV_HAD_MSE4)
+    FATTN_VEC_CASE(128, GGML_TYPE_TQK_FLEX,         GGML_TYPE_Q4_0)
 
     // Non-TQ K with TQV V
     FATTN_VEC_CASE(128, GGML_TYPE_F16, GGML_TYPE_TQV_HAD_MSE4)
@@ -383,7 +402,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     const bool k_is_tq = K->type == GGML_TYPE_TQK_HAD_MSE4 || K->type == GGML_TYPE_TQK_HAD_PROD5 ||
                           K->type == GGML_TYPE_TQK_HAD_PROD4 || K->type == GGML_TYPE_TQK_5HI_3LO_HAD ||
                           K->type == GGML_TYPE_TQK_6HI_3LO_HAD || K->type == GGML_TYPE_TQK_2HI_1LO_HAD ||
-                          K->type == GGML_TYPE_TQK_3HI_2LO_HAD;
+                          K->type == GGML_TYPE_TQK_3HI_2LO_HAD || K->type == GGML_TYPE_TQK_FLEX;
     const bool v_is_tq = V->type == GGML_TYPE_TQV_HAD_MSE4;
     if (K->type != V->type && !k_is_tq && !v_is_tq) {
         return BEST_FATTN_KERNEL_NONE;
@@ -411,6 +430,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_TQK_6HI_3LO_HAD:
         case GGML_TYPE_TQK_2HI_1LO_HAD:
         case GGML_TYPE_TQK_3HI_2LO_HAD:
+        case GGML_TYPE_TQK_FLEX:
             // TQ types: force VEC kernel (MMA/tile don't support TQ), D=128 only
             if (K->ne[0] == 128 && V->ne[0] == 128 && K->ne[1] % FATTN_KQ_STRIDE == 0) {
                 if (V->type == GGML_TYPE_F16 || V->type == GGML_TYPE_TQV_HAD_MSE4 || V->type == GGML_TYPE_Q4_0) {
@@ -545,8 +565,14 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     {
         const ggml_tensor * K = dst->src[1];
         const ggml_tensor * V = dst->src[2];
-        GGML_UNUSED(K);
         GGML_UNUSED(V);
+
+        // TQK_FLEX: select per-layer config for FA kernel
+        if (K->type == GGML_TYPE_TQK_FLEX) {
+            tq_flex_ensure_all_configs_on_device();  // one-time upload of all configs
+            int32_t layer_idx = tq_fa_extract_layer_idx(K);
+            tq_flex_upload_config_to_device_async(layer_idx, ctx.stream());
+        }
     }
 
     ggml_cuda_set_device(ctx.device);

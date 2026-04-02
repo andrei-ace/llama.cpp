@@ -99,9 +99,103 @@ static int       g_tq_chmap_dim = 0;            // head dimension (128 or 256)
 __device__ const int32_t * tq_fa_channel_map_ptr = nullptr;
 __device__ int             tq_fa_chmap_n_heads   = 0;
 
+// Flex config for FA — 7 x int32 device buffer, pointer passed to FA kernel
+static int32_t * g_tq_flex_fa_config_d = nullptr;
+
 static void tq_update_device_pointers(const int32_t * dev_ptr, int n_kv_heads) {
     CUDA_CHECK(cudaMemcpyToSymbol(tq_fa_channel_map_ptr, &dev_ptr, sizeof(dev_ptr)));
     CUDA_CHECK(cudaMemcpyToSymbol(tq_fa_chmap_n_heads, &n_kv_heads, sizeof(n_kv_heads)));
+}
+
+extern "C" int tq_flex_get_split(void);
+extern "C" int tq_flex_get_hi_bits(void);
+extern "C" int tq_flex_get_lo_bits(void);
+extern "C" int tq_flex_get_hi_res_bits(void);
+extern "C" int tq_flex_get_qjl_hi(void);
+extern "C" int tq_flex_get_qjl_lo(void);
+extern "C" int tq_flex_get_block_bytes(void);
+
+extern "C" const tq_flex_layer_config_t * tq_flex_get_layer_config(int layer);
+
+int32_t * ggml_cuda_get_tq_flex_fa_config(void) {
+    if (!g_tq_flex_fa_config_d) {
+        CUDA_CHECK(cudaMalloc(&g_tq_flex_fa_config_d, 7 * sizeof(int32_t)));
+        CUDA_CHECK(cudaMemset(g_tq_flex_fa_config_d, 0, 7 * sizeof(int32_t)));
+    }
+    return g_tq_flex_fa_config_d;
+}
+
+void tq_flex_upload_config_to_device(int layer) {
+    // Read per-layer config WITHOUT activating (avoids corrupting CPU-side globals)
+    const tq_flex_layer_config_t * lc = tq_flex_get_layer_config(layer);
+    int32_t cfg[7];
+    if (lc) {
+        cfg[0] = lc->split;
+        cfg[1] = lc->hi_bits;
+        cfg[2] = lc->lo_bits;
+        cfg[3] = lc->hi_res_bits;
+        cfg[4] = lc->qjl_hi;
+        cfg[5] = lc->qjl_lo;
+        cfg[6] = lc->block_bytes;
+    } else {
+        // No per-layer configs — use current global config
+        cfg[0] = tq_flex_get_split();
+        cfg[1] = tq_flex_get_hi_bits();
+        cfg[2] = tq_flex_get_lo_bits();
+        cfg[3] = tq_flex_get_hi_res_bits();
+        cfg[4] = tq_flex_get_qjl_hi();
+        cfg[5] = tq_flex_get_qjl_lo();
+        cfg[6] = tq_flex_get_block_bytes();
+    }
+    if (!g_tq_flex_fa_config_d) {
+        CUDA_CHECK(cudaMalloc(&g_tq_flex_fa_config_d, 7 * sizeof(int32_t)));
+    }
+    CUDA_CHECK(cudaMemcpy(g_tq_flex_fa_config_d, cfg, 7 * sizeof(int32_t), cudaMemcpyHostToDevice));
+}
+
+// Pre-upload ALL per-layer configs as a device-side array.
+// FA kernel then indexes by layer_idx * 7 instead of using a single shared buffer.
+static int32_t * g_tq_flex_fa_all_configs_d = nullptr;
+static int        g_tq_flex_fa_n_configs = 0;
+
+extern "C" int tq_flex_get_n_layer_configs(void);
+
+void tq_flex_ensure_all_configs_on_device(void) {
+    int n = tq_flex_get_n_layer_configs();
+    if (n <= 0) return;
+    if (g_tq_flex_fa_all_configs_d && g_tq_flex_fa_n_configs == n) return;
+
+    // Build host array: n layers × 7 ints
+    std::vector<int32_t> all(n * 7);
+    for (int i = 0; i < n; i++) {
+        const tq_flex_layer_config_t * lc = tq_flex_get_layer_config(i);
+        if (lc) {
+            all[i*7+0] = lc->split;
+            all[i*7+1] = lc->hi_bits;
+            all[i*7+2] = lc->lo_bits;
+            all[i*7+3] = lc->hi_res_bits;
+            all[i*7+4] = lc->qjl_hi;
+            all[i*7+5] = lc->qjl_lo;
+            all[i*7+6] = lc->block_bytes;
+        }
+    }
+    if (g_tq_flex_fa_all_configs_d) CUDA_CHECK(cudaFree(g_tq_flex_fa_all_configs_d));
+    CUDA_CHECK(cudaMalloc(&g_tq_flex_fa_all_configs_d, n * 7 * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemcpy(g_tq_flex_fa_all_configs_d, all.data(), n * 7 * sizeof(int32_t), cudaMemcpyHostToDevice));
+    g_tq_flex_fa_n_configs = n;
+    // Also point the single-config pointer to layer 0 by default
+    g_tq_flex_fa_config_d = g_tq_flex_fa_all_configs_d;
+}
+
+void tq_flex_upload_config_to_device_async(int layer, cudaStream_t stream) {
+    GGML_UNUSED(stream);
+    // If all configs are pre-uploaded, just point to the right offset
+    if (g_tq_flex_fa_all_configs_d && layer < g_tq_flex_fa_n_configs) {
+        g_tq_flex_fa_config_d = g_tq_flex_fa_all_configs_d + layer * 7;
+        return;
+    }
+    // Fallback: sync upload (for uniform flex mode without per-layer configs)
+    tq_flex_upload_config_to_device(layer);
 }
 
 // Upload channel map data to device. Frees any existing map first.
@@ -4910,6 +5004,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_TQK_HAD_PROD4_D256:
                     case GGML_TYPE_TQK_5HI_3LO_HAD_D256:
                     case GGML_TYPE_TQV_HAD_MSE4_D256:
+                    case GGML_TYPE_TQK_FLEX:
                         return true;
                     default:
                         return false;
@@ -4931,7 +5026,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                        op->type == GGML_TYPE_TQV_HAD_MSE4 ||
                        op->type == GGML_TYPE_TQK_HAD_MSE4_D256 || op->type == GGML_TYPE_TQK_HAD_PROD5_D256 ||
                        op->type == GGML_TYPE_TQK_HAD_PROD4_D256 || op->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256 ||
-                       op->type == GGML_TYPE_TQV_HAD_MSE4_D256) &&
+                       op->type == GGML_TYPE_TQV_HAD_MSE4_D256 ||
+                       op->type == GGML_TYPE_TQK_FLEX) &&
                        op->src[0]->type == GGML_TYPE_F32 &&
                        (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32);
             } break;

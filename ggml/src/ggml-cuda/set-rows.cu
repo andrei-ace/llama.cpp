@@ -381,6 +381,8 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb01, nb02, nb03, nb10, nb11, nb12, nb1, nb2, nb3, stream);
     } else if (dst->type == GGML_TYPE_TQK_5HI_3LO_HAD_D256) {
         ggml_cuda_op_set_rows_tq_5hi_3lo_had_d256(ctx, dst);
+    } else if (dst->type == GGML_TYPE_TQK_FLEX) {
+        ggml_cuda_op_set_rows_tq_flex(ctx, dst);
     } else {
         GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
     }

@@ -41,14 +41,16 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33,
-        const int8_t * __restrict__ chmap);
+        const int8_t * __restrict__ chmap,
+        const int32_t * __restrict__ flex_cfg);
 
 typedef float (*vec_dot_KQ_t)(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds,
+    const int32_t * __restrict__ flex_cfg);
 
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_f16(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
 
     const half2 * K_h2 = (const half2 *) K_c;
     GGML_UNUSED(Q_q8);
@@ -78,7 +80,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_f16(
 
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_bf16(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
 
     const nv_bfloat162 * K_bf16 = (const nv_bfloat162 *) K_c;
     GGML_UNUSED(Q_q8);
@@ -109,7 +111,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_bf16(
 
 template<int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q4_0(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
 
     const block_q4_0 * K_q4_0 = (const block_q4_0 *) K_c;
     GGML_UNUSED(Q_v);
@@ -140,7 +142,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q4_0(
 
 template<int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q4_1(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
 
     const block_q4_1 * K_q4_1 = (const block_q4_1 *) K_c;
     GGML_UNUSED(Q_v);
@@ -173,7 +175,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q4_1(
 
 template<int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_0(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
 
     const block_q5_0 * K_q5_0 = (const block_q5_0 *) K_c;
     GGML_UNUSED(Q_v);
@@ -218,7 +220,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_0(
 
 template<int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_1(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
 
     const block_q5_1 * K_q5_1 = (const block_q5_1 *) K_c;
     GGML_UNUSED(Q_v);
@@ -264,7 +266,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_1(
 
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q8_0(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
 
     const block_q8_0 * K_q8_0 = (const block_q8_0 *) K_c;
     GGML_UNUSED(Q_v);
@@ -590,7 +592,7 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
 // We use the same loop pattern as vec_dot_fattn_vec_KQ_f16 to match the Q_reg indexing.
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_mse4(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
     const block_tqk_had_mse4 * blk = (const block_tqk_had_mse4 *) K_c;
@@ -618,7 +620,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_mse4(
 // TQK had_prod5: 4-bit MSE + QJL correction
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_prod5(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
     const block_tqk_had_prod5 * blk = (const block_tqk_had_prod5 *) K_c;
@@ -647,7 +649,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_prod5(
 // TQK had_prod4: 3-bit MSE + QJL correction
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_prod4(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
     const block_tqk_had_prod4 * blk = (const block_tqk_had_prod4 *) K_c;
@@ -680,7 +682,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_had_prod4(
 // For now, treats the concatenated [hi, lo] as a 128-dim Hadamard-domain vector.
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_5hi_3lo_had(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
     const block_tqk_5hi_3lo * blk = (const block_tqk_5hi_3lo *) K_c;
@@ -721,7 +723,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_5hi_3lo_had(
 // TQK 6hi_3lo_had: 5-bit MSE + QJL on hi, 3-bit MSE on lo (no QJL on lo)
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_6hi_3lo_had(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
     const block_tqk_6hi_3lo * blk = (const block_tqk_6hi_3lo *) K_c;
@@ -762,7 +764,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_6hi_3lo_had(
 // TQK 2hi_1lo_had: 2-bit MSE + QJL on hi, 1-bit MSE + QJL on lo
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_2hi_1lo_had(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
     const block_tqk_2hi_1lo * blk = (const block_tqk_2hi_1lo *) K_c;
@@ -805,7 +807,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_2hi_1lo_had(
 // TQK 3hi_2lo_had: 3-bit MSE + QJL on hi, 2-bit MSE + QJL on lo
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_3hi_2lo_had(
-    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
     const block_tqk_3hi_2lo * blk = (const block_tqk_3hi_2lo *) K_c;
@@ -866,6 +868,140 @@ static __device__ __forceinline__ void dequantize_V_tqv_had_mse4(const void * __
     }
 }
 
+// TQK_FLEX: runtime-configurable FA vec_dot
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tqk_flex(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v, const int32_t * __restrict__ flex_cfg_v) {
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    const uint8_t * blk = (const uint8_t *)K_c;
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+
+    // Read flex config from device pointer (passed as kernel parameter)
+    const tq_flex_config fc = {flex_cfg_v[0], flex_cfg_v[1], flex_cfg_v[2], flex_cfg_v[3], flex_cfg_v[4], flex_cfg_v[5], flex_cfg_v[6]};
+
+    if (fc.split) {
+        // Split mode: 32 hi + 96 lo
+        float norm_hi = __half2float(((const half *)blk)[0]);
+        float norm_lo = __half2float(((const half *)blk)[1]);
+        int off = 4;
+        const int off_qs_hi = off;
+        off += (32 * fc.hi_bits + 7) / 8;
+        const int off_qs_lo = off;
+        off += (96 * fc.lo_bits + 7) / 8;
+
+        // Hi residual (optional)
+        int off_rnorm_res = off;
+        int off_qs_hi2 = off + 2;
+        if (fc.hi_res_bits > 0) {
+            off += 2 + (32 * fc.hi_res_bits + 7) / 8;
+        }
+
+        // QJL hi (optional)
+        int off_rnorm_qjl_hi = off;
+        int off_signs_hi = off + 2;
+        if (fc.qjl_hi) off += 6;
+
+        // QJL lo (optional)
+        int off_rnorm_qjl_lo = off;
+        int off_signs_lo = off + 2;
+
+        float qjl_scale_hi = 0.0f;
+        if (fc.qjl_hi) {
+            float rn = __half2float(*(const half *)(blk + off_rnorm_qjl_hi));
+            qjl_scale_hi = QJL_SCALE_32 * rn;
+        }
+        float qjl_scale_lo = 0.0f;
+        if (fc.qjl_lo) {
+            float rn = __half2float(*(const half *)(blk + off_rnorm_qjl_lo));
+            qjl_scale_lo = QJL_SCALE_96 * rn;
+        }
+        float rnorm_res = 0.0f;
+        if (fc.hi_res_bits > 0) {
+            rnorm_res = __half2float(*(const half *)(blk + off_rnorm_res));
+        }
+
+#pragma unroll
+        for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+            const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+            for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+                const int j0 = j_base + k_KQ_1 * 2;
+                float kv0, kv1;
+
+                // j0
+                if (j0 < 32) {
+                    kv0 = norm_hi * tq_flex_centroid_d32(tq_flex_unpack(blk + off_qs_hi, j0, fc.hi_bits), fc.hi_bits);
+                    if (fc.hi_res_bits > 0)
+                        kv0 += rnorm_res * tq_flex_centroid_d32(tq_flex_unpack(blk + off_qs_hi2, j0, fc.hi_res_bits), fc.hi_res_bits);
+                    if (fc.qjl_hi)
+                        kv0 += qjl_scale_hi * tq_sign_bit(blk + off_signs_hi, j0);
+                } else {
+                    int lo_j = j0 - 32;
+                    kv0 = norm_lo * tq_flex_centroid_d96(tq_flex_unpack(blk + off_qs_lo, lo_j, fc.lo_bits), fc.lo_bits);
+                    if (fc.qjl_lo)
+                        kv0 += qjl_scale_lo * (((blk[off_signs_lo + lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f);
+                }
+
+                // j0+1
+                if (j0 + 1 < 32) {
+                    kv1 = norm_hi * tq_flex_centroid_d32(tq_flex_unpack(blk + off_qs_hi, j0 + 1, fc.hi_bits), fc.hi_bits);
+                    if (fc.hi_res_bits > 0)
+                        kv1 += rnorm_res * tq_flex_centroid_d32(tq_flex_unpack(blk + off_qs_hi2, j0 + 1, fc.hi_res_bits), fc.hi_res_bits);
+                    if (fc.qjl_hi)
+                        kv1 += qjl_scale_hi * tq_sign_bit(blk + off_signs_hi, j0 + 1);
+                } else if (j0 + 1 == 32) {
+                    kv1 = norm_lo * tq_flex_centroid_d96(tq_flex_unpack(blk + off_qs_lo, 0, fc.lo_bits), fc.lo_bits);
+                    if (fc.qjl_lo)
+                        kv1 += qjl_scale_lo * (((blk[off_signs_lo] >> 0) & 1) ? 1.0f : -1.0f);
+                } else {
+                    int lo_j = j0 + 1 - 32;
+                    kv1 = norm_lo * tq_flex_centroid_d96(tq_flex_unpack(blk + off_qs_lo, lo_j, fc.lo_bits), fc.lo_bits);
+                    if (fc.qjl_lo)
+                        kv1 += qjl_scale_lo * (((blk[off_signs_lo + lo_j / 8] >> (lo_j % 8)) & 1) ? 1.0f : -1.0f);
+                }
+
+                float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+                sum += kv0 * qv.x + kv1 * qv.y;
+            }
+        }
+    } else {
+        // Non-split mode: full 128-dim
+        float norm = __half2float(*(const half *)blk);
+        int off = 2;
+        const int off_qs = off;
+        off += (128 * fc.hi_bits + 7) / 8;
+
+        float qjl_scale = 0.0f;
+        int off_signs = off + 2;
+        if (fc.qjl_hi) {
+            float rn = __half2float(*(const half *)(blk + off));
+            qjl_scale = QJL_SCALE_128 * rn;
+        }
+
+#pragma unroll
+        for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
+            const int j_base = (k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne) * 2;
+#pragma unroll
+            for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+                const int j0 = j_base + k_KQ_1 * 2;
+                float kv0 = norm * tq_flex_centroid_d128(tq_flex_unpack(blk + off_qs, j0, fc.hi_bits), fc.hi_bits);
+                float kv1 = norm * tq_flex_centroid_d128(tq_flex_unpack(blk + off_qs, j0 + 1, fc.hi_bits), fc.hi_bits);
+                if (fc.qjl_hi) {
+                    kv0 += qjl_scale * tq_sign_bit(blk + off_signs, j0);
+                    kv1 += qjl_scale * tq_sign_bit(blk + off_signs, j0 + 1);
+                }
+                float2 qv = ((const float2 *)Q_v)[k_KQ_0/nthreads + k_KQ_1];
+                sum += kv0 * qv.x + kv1 * qv.y;
+            }
+        }
+    }
+    return sum;
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -896,6 +1032,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_tqk_2hi_1lo_had<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_TQK_3HI_2LO_HAD) {
         return vec_dot_fattn_vec_KQ_tqk_3hi_2lo_had<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQK_FLEX) {
+        return vec_dot_fattn_vec_KQ_tqk_flex<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -1366,7 +1504,8 @@ void launch_fattn(
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
-        chmap ? (const int8_t *) chmap->data : nullptr
+        chmap ? (const int8_t *) chmap->data : nullptr,
+        (K->type == GGML_TYPE_TQK_FLEX) ? ggml_cuda_get_tq_flex_fa_config() : nullptr
     );
     CUDA_CHECK(cudaGetLastError());
 

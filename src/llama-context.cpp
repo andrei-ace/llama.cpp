@@ -2991,13 +2991,7 @@ llama_context * llama_init_from_model(
                     __func__, ggml_type_name(params.type_v));
             return nullptr;
         }
-        // TQK_FLEX / TQK_AUTO with TQFC: only supported on CPU and Metal (no CUDA kernels yet)
-#ifdef GGML_USE_CUDA
-        if (tq_flex_k || (params.type_k == GGML_TYPE_TQK_AUTO && tq_flex_get_n_layer_configs() > 0)) {
-            LLAMA_LOG_ERROR("%s: TQK_FLEX / per-layer flex is not supported on CUDA — use CPU or Metal backend\n", __func__);
-            return nullptr;
-        }
-#endif
+        // TQK_FLEX / TQK_AUTO with TQFC: now supported on all backends (CPU, Metal, CUDA)
 
         if (tq_flex_k || tq_k || tq_v) {
             if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {

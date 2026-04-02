@@ -40,7 +40,8 @@ static __global__ void flash_attn_ext_vec(
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33,
-        const int8_t * __restrict__ chmap) {
+        const int8_t * __restrict__ chmap,
+        const int32_t * __restrict__ flex_cfg) {
 #ifdef FLASH_ATTN_AVAILABLE
 
     // Skip unused kernel variants for faster compilation:
@@ -54,7 +55,7 @@ static __global__ void flash_attn_ext_vec(
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
                   nb31, nb32, nb33,
-                  chmap);
+                  chmap, flex_cfg);
         NO_DEVICE_CODE;
         return;
     }
@@ -79,7 +80,7 @@ static __global__ void flash_attn_ext_vec(
     constexpr bool type_K_is_tq = type_K == GGML_TYPE_TQK_HAD_MSE4 || type_K == GGML_TYPE_TQK_HAD_PROD5 ||
                                    type_K == GGML_TYPE_TQK_HAD_PROD4 || type_K == GGML_TYPE_TQK_5HI_3LO_HAD ||
                                    type_K == GGML_TYPE_TQK_6HI_3LO_HAD || type_K == GGML_TYPE_TQK_2HI_1LO_HAD ||
-                                   type_K == GGML_TYPE_TQK_3HI_2LO_HAD;
+                                   type_K == GGML_TYPE_TQK_3HI_2LO_HAD || type_K == GGML_TYPE_TQK_FLEX;
     constexpr bool type_V_is_tq = type_V == GGML_TYPE_TQV_HAD_MSE4;
     constexpr bool type_K_is_float = type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 || type_K_is_tq;
     constexpr bool type_V_is_float = type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16;
@@ -256,11 +257,14 @@ static __global__ void flash_attn_ext_vec(
                                         type_K == GGML_TYPE_TQK_6HI_3LO_HAD ||
                                         type_K == GGML_TYPE_TQK_2HI_1LO_HAD ||
                                         type_K == GGML_TYPE_TQK_3HI_2LO_HAD);
+        // TQK_FLEX: runtime split check via device pointer
+        constexpr bool is_flex_type = (type_K == GGML_TYPE_TQK_FLEX);
+        const bool use_split_rotation = is_split_type || (is_flex_type && flex_cfg && flex_cfg[0]);
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
             float * shmem = (float *) KQ;
 
-            if constexpr (!is_split_type) {
+            if (!use_split_rotation) {
                 // had_* types: hybrid FWHT-128 (warp shuffles + shmem for cross-warp stages)
                 if (ncols == 1 || ic0 + j < int(ne01.z)) {
                     shmem[tid] = scale * ((const float *)(Q + j*nb01))[tid];
@@ -368,7 +372,7 @@ static __global__ void flash_attn_ext_vec(
 
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
-                float sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j]);
+                float sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j], flex_cfg);
                 sum = warp_reduce_sum<nthreads_KQ>(sum);
 
                 if (use_logit_softcap) {
@@ -651,7 +655,8 @@ static __global__ void flash_attn_ext_vec(
               nb11, nb12, nb13,
               nb21, nb22, nb23,
               ne31, ne32, ne33,
-              nb31, nb32, nb33);
+              nb31, nb32, nb33,
+              chmap, flex_cfg);
     NO_DEVICE_CODE;
 #endif // FLASH_ATTN_AVAILABLE
 }
@@ -752,6 +757,7 @@ EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_5HI_3LO_HAD)
 EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_6HI_3LO_HAD)
 EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_2HI_1LO_HAD)
 EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_3HI_2LO_HAD)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(GGML_TYPE_TQK_FLEX)
 
 // Non-TQ K with TQV V — D=128 only
 extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_F16, GGML_TYPE_TQV_HAD_MSE4);

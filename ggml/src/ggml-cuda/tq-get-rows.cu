@@ -721,3 +721,217 @@ DEFINE_TQ_SPLIT_GET_ROWS_OP(5hi_3lo_had_d256, k_get_rows_tq_5hi_3lo_had_d256, 25
 INSTANTIATE_TQ_GET_ROWS(get_rows_tq_had_mse4)
 INSTANTIATE_TQ_GET_ROWS(get_rows_tq_had_prod5)
 INSTANTIATE_TQ_GET_ROWS(get_rows_tq_had_prod4)
+
+// ===========================================================================
+// TQ Flex — runtime-configurable get_rows kernel
+// ===========================================================================
+
+extern "C" int tq_flex_get_split(void);
+extern "C" int tq_flex_get_hi_bits(void);
+extern "C" int tq_flex_get_lo_bits(void);
+extern "C" int tq_flex_get_hi_res_bits(void);
+extern "C" int tq_flex_get_qjl_hi(void);
+extern "C" int tq_flex_get_qjl_lo(void);
+extern "C" int tq_flex_get_block_bytes(void);
+typedef struct { int8_t split, hi_bits, lo_bits, hi_res_bits, qjl_hi, qjl_lo; int16_t block_bytes; } tq_flex_layer_config_t;
+extern "C" const tq_flex_layer_config_t * tq_flex_get_layer_config(int layer);
+
+template <typename dst_t>
+static __global__ void k_get_rows_tq_flex(
+        const void * __restrict__ src0, const int32_t * __restrict__ src1, dst_t * __restrict__ dst,
+        const int32_t * __restrict__ chmap, const int32_t n_kv_heads, const int32_t layer_idx,
+        const tq_flex_config cfg, const int64_t blk_stride,
+        const int64_t ne00,
+        const int64_t ne11, const int64_t ne12,
+        const size_t s1, const size_t s2, const size_t s3,
+        const size_t nb01, const size_t nb02, const size_t nb03,
+        const size_t s10, const size_t s11, const size_t s12) {
+
+    for (int64_t z = blockIdx.z; z < ne11 * ne12; z += gridDim.z) {
+        const int64_t block_in_row = threadIdx.x;
+        const int64_t n_blocks_per_row = ne00 / 128;
+        if (block_in_row >= n_blocks_per_row) return;
+
+        const int i11 = z / ne12;
+        const int i12 = z % ne12;
+        const int i10 = blockIdx.x;
+        const int i01 = src1[i10*s10 + i11*s11 + i12*s12];
+
+        dst_t * dst_row = dst + i10*s1 + i11*s2 + i12*s3;
+        const uint8_t * src0_row = (const uint8_t *)src0 + i01*nb01 + i11*nb02 + i12*nb03;
+        const uint8_t * blk = src0_row + block_in_row * blk_stride;
+
+        if (cfg.split) {
+            // --- SPLIT MODE: 32 outlier + 96 regular channels ---
+            const int head = (int)(block_in_row % n_kv_heads);
+            const int32_t * perm = chmap + ((int64_t)layer_idx * n_kv_heads + head) * 128;
+
+            float norm_hi = __half2float(((const half *)blk)[0]);
+            float norm_lo = __half2float(((const half *)blk)[1]);
+            int off = 4;
+
+            // Dequant hi: centroid lookup in Hadamard domain
+            const int hi_qs_off = off;
+            float hi[32];
+            for (int j = 0; j < 32; j++)
+                hi[j] = norm_hi * tq_flex_centroid_d32(tq_flex_unpack(blk + off, j, cfg.hi_bits), cfg.hi_bits);
+            off += (32 * cfg.hi_bits + 7) / 8;
+
+            // Dequant lo: centroid lookup in Hadamard domain
+            const int lo_qs_off = off;
+            float lo[96];
+            for (int j = 0; j < 96; j++)
+                lo[j] = norm_lo * tq_flex_centroid_d96(tq_flex_unpack(blk + off, j, cfg.lo_bits), cfg.lo_bits);
+            off += (96 * cfg.lo_bits + 7) / 8;
+
+            // Optional hi residual layer
+            if (cfg.hi_res_bits > 0) {
+                float rn2 = __half2float(*(const half *)(blk + off));
+                off += 2;
+                for (int j = 0; j < 32; j++)
+                    hi[j] += rn2 * tq_flex_centroid_d32(tq_flex_unpack(blk + off, j, cfg.hi_res_bits), cfg.hi_res_bits);
+                off += (32 * cfg.hi_res_bits + 7) / 8;
+            }
+
+            // Inverse FWHT on hi
+            tq_fwht_local<32>(hi);
+
+            // Optional QJL correction on hi (sign bits → FWHT → scale)
+            if (cfg.qjl_hi) {
+                float rn = __half2float(*(const half *)(blk + off));
+                off += 2;
+                float corr[32];
+                for (int j = 0; j < 32; j++) corr[j] = tq_sign_bit(blk + off, j);
+                tq_fwht_local<32>(corr);
+                float qjl_scale = QJL_SCALE_32 * rn;
+                for (int j = 0; j < 32; j++) hi[j] += qjl_scale * corr[j];
+                off += 4;
+            }
+
+            // Optional QJL correction on lo (per-element signs in rotated space)
+            if (cfg.qjl_lo) {
+                float rn = __half2float(*(const half *)(blk + off));
+                off += 2;
+                float sc = QJL_SCALE_96 * rn;
+                const uint8_t * signs = blk + off;
+                for (int j = 0; j < 96; j++)
+                    lo[j] += ((signs[j / 8] >> (j % 8)) & 1) ? sc : -sc;
+                off += 12;
+            }
+
+            // Inverse rotation on lo: 3×FWHT_32
+            tq_fwht_local<32>(lo);
+            tq_fwht_local<32>(lo + 32);
+            tq_fwht_local<32>(lo + 64);
+
+            // Inverse-permute via channel map and write
+            const int64_t base = block_in_row * 128;
+            for (int j = 0; j < 32; j++) dst_row[base + perm[j]] = ggml_cuda_cast<dst_t>(hi[j]);
+            for (int j = 0; j < 96; j++) dst_row[base + perm[32 + j]] = ggml_cuda_cast<dst_t>(lo[j]);
+        } else {
+            // --- NON-SPLIT MODE: full 128-dim ---
+            float norm = __half2float(*(const half *)blk);
+            int off = 2;
+
+            float out[128];
+            for (int j = 0; j < 128; j++)
+                out[j] = norm * tq_flex_centroid_d128(tq_flex_unpack(blk + off, j, cfg.hi_bits), cfg.hi_bits);
+            off += (128 * cfg.hi_bits + 7) / 8;
+
+            // Inverse FWHT
+            tq_fwht_local<128>(out);
+
+            // Optional QJL correction
+            if (cfg.qjl_hi) {
+                float rn = __half2float(*(const half *)(blk + off));
+                off += 2;
+                float corr[128];
+                for (int j = 0; j < 128; j++) corr[j] = tq_sign_bit(blk + off, j);
+                tq_fwht_local<128>(corr);
+                float qjl_scale = QJL_SCALE_128 * rn;
+                for (int j = 0; j < 128; j++) out[j] += qjl_scale * corr[j];
+                off += 16;
+            }
+
+            const int64_t base = block_in_row * 128;
+            for (int j = 0; j < 128; j++)
+                dst_row[base + j] = ggml_cuda_cast<dst_t>(out[j]);
+        }
+    }
+}
+
+// Helper to extract layer index from tensor name
+static int32_t tq_flex_extract_layer_idx(const ggml_tensor * src0) {
+    const ggml_tensor * root = src0;
+    while (root->view_src) root = root->view_src;
+    const char * lp = strstr(root->name, "_l");
+    return lp ? (int32_t)atoi(lp + 2) : 0;
+}
+
+void ggml_cuda_op_get_rows_tq_flex(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+
+    GGML_ASSERT(src1->type == GGML_TYPE_I32);
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    cudaStream_t stream = ctx.stream();
+
+    int32_t layer_idx = tq_flex_extract_layer_idx(src0);
+
+    // Read per-layer config without calling tq_flex_activate_layer (avoids corrupting CPU-side globals)
+    const tq_flex_layer_config_t * lc = tq_flex_get_layer_config(layer_idx);
+    tq_flex_config cfg;
+    if (lc) {
+        cfg.split       = lc->split;
+        cfg.hi_bits     = lc->hi_bits;
+        cfg.lo_bits     = lc->lo_bits;
+        cfg.hi_res_bits = lc->hi_res_bits;
+        cfg.qjl_hi      = lc->qjl_hi;
+        cfg.qjl_lo      = lc->qjl_lo;
+        cfg.block_bytes = lc->block_bytes;
+    } else {
+        cfg.split       = tq_flex_get_split();
+        cfg.hi_bits     = tq_flex_get_hi_bits();
+        cfg.lo_bits     = tq_flex_get_lo_bits();
+        cfg.hi_res_bits = tq_flex_get_hi_res_bits();
+        cfg.qjl_hi      = tq_flex_get_qjl_hi();
+        cfg.qjl_lo      = tq_flex_get_qjl_lo();
+        cfg.block_bytes = tq_flex_get_block_bytes();
+    }
+
+    int32_t * chmap = cfg.split ? ggml_cuda_get_tq_channel_map_device() : nullptr;
+    int n_kv_heads = ggml_cuda_get_tq_chmap_n_heads();
+    if (n_kv_heads < 1) n_kv_heads = (int)(ne00 / 128);
+
+    GGML_ASSERT(ne00 % 128 == 0);
+    const int64_t n_blocks_per_row = ne00 / 128;
+    const int64_t blk_stride = nb01 / n_blocks_per_row;
+
+
+    const dim3 block_dims(n_blocks_per_row, 1, 1);
+    const dim3 grid_dims(ne10, 1, std::min((int64_t)(ne11 * ne12), (int64_t)65535));
+
+    const size_t s1o = nb1 / ggml_type_size(dst->type);
+    const size_t s2o = nb2 / ggml_type_size(dst->type);
+    const size_t s3o = nb3 / ggml_type_size(dst->type);
+
+    if (dst->type == GGML_TYPE_F32) {
+        k_get_rows_tq_flex<<<grid_dims, block_dims, 0, stream>>>(
+            src0->data, (const int32_t *)src1->data, (float *)dst->data,
+            chmap, n_kv_heads, layer_idx, cfg, blk_stride,
+            ne00, ne11, ne12,
+            s1o, s2o, s3o,
+            nb01, nb02, nb03,
+            nb10 / sizeof(int32_t), nb11 / sizeof(int32_t), nb12 / sizeof(int32_t));
+    } else {
+        k_get_rows_tq_flex<<<grid_dims, block_dims, 0, stream>>>(
+            src0->data, (const int32_t *)src1->data, (half *)dst->data,
+            chmap, n_kv_heads, layer_idx, cfg, blk_stride,
+            ne00, ne11, ne12,
+            s1o, s2o, s3o,
+            nb01, nb02, nb03,
+            nb10 / sizeof(int32_t), nb11 / sizeof(int32_t), nb12 / sizeof(int32_t));
+    }
+}

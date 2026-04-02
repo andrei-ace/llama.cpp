@@ -177,3 +177,4 @@ void ggml_cuda_op_set_rows_tq_6hi_3lo_had(ggml_backend_cuda_context & ctx, ggml_
 void ggml_cuda_op_set_rows_tq_2hi_1lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_set_rows_tq_3hi_2lo_had(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_set_rows_tq_5hi_3lo_had_d256(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+void ggml_cuda_op_set_rows_tq_flex(ggml_backend_cuda_context & ctx, ggml_tensor * dst);

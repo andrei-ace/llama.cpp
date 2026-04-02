@@ -232,6 +232,7 @@ static void ggml_cuda_get_rows_switch_src0_type(
         case GGML_TYPE_TQK_2HI_1LO_HAD:
         case GGML_TYPE_TQK_3HI_2LO_HAD:
         case GGML_TYPE_TQK_5HI_3LO_HAD_D256:
+        case GGML_TYPE_TQK_FLEX:
             GGML_ABORT("split TQ types must be dispatched via ggml_cuda_op_get_rows, not template chain");
             break;
         default:
@@ -281,6 +282,7 @@ void ggml_cuda_op_get_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         case GGML_TYPE_TQK_2HI_1LO_HAD: ggml_cuda_op_get_rows_tq_2hi_1lo_had(ctx, dst); return;
         case GGML_TYPE_TQK_3HI_2LO_HAD:     ggml_cuda_op_get_rows_tq_3hi_2lo_had(ctx, dst); return;
         case GGML_TYPE_TQK_5HI_3LO_HAD_D256: ggml_cuda_op_get_rows_tq_5hi_3lo_had_d256(ctx, dst); return;
+        case GGML_TYPE_TQK_FLEX: ggml_cuda_op_get_rows_tq_flex(ctx, dst); return;
         default: break;
     }
 
