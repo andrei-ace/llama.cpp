@@ -998,40 +998,39 @@ constant float tq_c8_d128[8] = {
 constant float tq_c4_d128[4] = {
     -0.1330415202f, -0.0399915952f, 0.0399915952f, 0.1330415202f,
 };
+constant float tq_c8_d256[8] = {
+    -0.1338542901f, -0.0837654569f, -0.0471667103f, -0.0152974877f,
+     0.0152974877f,  0.0471667103f,  0.0837654569f,  0.1338542901f,
+};
+constant float tq_c4_d256[4] = {
+    -0.0942377821f, -0.0282885989f, 0.0282885989f, 0.0942377821f,
+};
+constant float tq_c8_d512[8] = {
+    -0.0948759304f, -0.0593119667f, -0.0333814610f, -0.0108243491f,
+     0.0108243491f,  0.0333814610f,  0.0593119667f,  0.0948759304f,
+};
+constant float tq_c4_d512[4] = {
+    -0.0666939081f, -0.0200066602f, 0.0200066602f, 0.0666939081f,
+};
 
-// TQ3J dequant: raw byte access, works for any block_size (128/256/512)
-// Block layout: [norm:fp16(2)][rnorm:fp16(2)][qs:blk*3/8][signs:blk/8]
-// NS10 function constant encodes the block stride in bytes
-template <typename type4x4>
+// TQ3J dequant: template param BLK_DIM for variable block size (128/256/512)
+// Block layout: [norm:fp16(2)][rnorm:fp16(2)][qs:BLK_DIM*3/8][signs:BLK_DIM/8]
+template <short BLK_DIM = 128, typename type4x4>
 void dequantize_tq3j(device const block_tq3j * xb_struct, short il, thread type4x4 & reg) {
     device const uint8_t * xb = (device const uint8_t *)xb_struct;
     const float norm = float(*(device const half *)(xb));
     const float rnorm_val = float(*(device const half *)(xb + 2));
-    // Compute signs offset: 4 + qs_bytes. qs_bytes = (blk_size*3+7)/8
-    // blk_size = NS10 / type_size_per_elem... but we don't have it.
-    // Use il to figure out: we know qs starts at byte 4, and il indexes 16-value chunks.
-    // Signs start after all qs bytes. For the block_tq3j struct at d=128: signs at 52.
-    // For raw layout: signs_off = 4 + (block_dim * 3 + 7) / 8
-    // We can derive block_dim from NS10: block_dim = NS10 * 8 / (3 + 1 + 32/block_dim)...
-    // Simpler: read qs from byte 4 (always correct), read signs using FC_flash_attn_ext_ns10
     device const uint8_t * qs = xb + 4;
-
-    // signs offset: for d=128: 4+48=52, d=256: 4+96=100, d=512: 4+192=196
-    // Derive from NS10 (block stride): signs_off = NS10 - block_dim/8
-    // block_dim: NS10 = 4 + block_dim*3/8 + block_dim/8 = 4 + block_dim*(3+1)/8 = 4 + block_dim/2
-    // So block_dim = (NS10 - 4) * 2, signs_off = NS10 - (NS10 - 4) * 2 / 8 = NS10 - (NS10-4)/4
-    // Actually: signs_off = 4 + (block_dim * 3 + 7) / 8
-    // For d=128: 4 + 48 = 52.  For d=256: 4 + 96 = 100. For d=512: 4 + 192 = 196.
-    // block_dim = il_max * 16 where il_max = nl_k. But we don't know nl_k here.
-    // HACK: compute from NS10 function constant
-    const int block_dim_est = (FC_flash_attn_ext_ns10 - 4) * 2; // NS10 = 4 + dim/2 for 3-bit+QJL
-    const int signs_off = 4 + (block_dim_est * 3 + 7) / 8;
+    constexpr int signs_off = 4 + (BLK_DIM * 3 + 7) / 8;
     device const uint8_t * signs = xb + signs_off;
 
-    const float qjl_pos = QJL_SCALE_F / (float)block_dim_est * rnorm_val;
+    const float qjl_pos = QJL_SCALE_F / (float)BLK_DIM * rnorm_val;
     const float qjl_neg = -qjl_pos;
+
+    // Select centroids by dimension
+    constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
     float sc[8];
-    for (int k = 0; k < 8; k++) sc[k] = norm * tq_c8_d128[k]; // TODO: select by block_dim
+    for (int k = 0; k < 8; k++) sc[k] = norm * c[k];
 
     float4x4 reg_f;
     const int base = il * 16;
@@ -1052,30 +1051,27 @@ void dequantize_tq3j(device const block_tq3j * xb_struct, short il, thread type4
     reg = (type4x4) reg_f;
 }
 
-// TQ2J dequant: raw byte access, works for any block_size
-// Block layout: [norm:fp16(2)][rnorm:fp16(2)][qs:blk/4][signs:blk/8]
-template <typename type4x4>
+// TQ2J dequant: template param BLK_DIM for variable block size
+// Block layout: [norm:fp16(2)][rnorm:fp16(2)][qs:BLK_DIM/4][signs:BLK_DIM/8]
+template <short BLK_DIM = 128, typename type4x4>
 void dequantize_tq2j(device const block_tq2j * xb_struct, short il, thread type4x4 & reg) {
     device const uint8_t * xb = (device const uint8_t *)xb_struct;
     const float norm = float(*(device const half *)(xb));
     const float rnorm_val = float(*(device const half *)(xb + 2));
     device const uint8_t * qs = xb + 4;
-    // signs_off for 2-bit: 4 + dim/4. NS10 = 4 + dim/4 + dim/8 = 4 + 3*dim/8
-    // dim = (NS10 - 4) * 8 / 3
-    const int block_dim_est = (FC_flash_attn_ext_ns10 - 4) * 8 / 3;
-    const int signs_off = 4 + block_dim_est / 4;
+    constexpr int signs_off = 4 + BLK_DIM / 4;
     device const uint8_t * signs = xb + signs_off;
 
-    const float qjl_pos = QJL_SCALE_F / (float)block_dim_est * rnorm_val;
+    const float qjl_pos = QJL_SCALE_F / (float)BLK_DIM * rnorm_val;
     const float qjl_neg = -qjl_pos;
+    constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
     float sc[4];
-    for (int k = 0; k < 4; k++) sc[k] = norm * tq_c4_d128[k];
+    for (int k = 0; k < 4; k++) sc[k] = norm * c[k];
 
     float4x4 reg_f;
     const int base = il * 16;
-    // Read 4 bytes of packed 2-bit indices (16 values * 2 bits = 32 bits)
-    const uint32_t idx_bits = *(device const uint32_t *)(xb->qs + base/4);
-    const uint16_t sign_bits = (uint16_t)xb->signs[base/8] | ((uint16_t)xb->signs[base/8 + 1] << 8);
+    const uint32_t idx_bits = *(device const uint32_t *)(qs + base/4);
+    const uint16_t sign_bits = (uint16_t)signs[base/8] | ((uint16_t)signs[base/8 + 1] << 8);
 
     for (int i = 0; i < 16; i++) {
         int idx = (idx_bits >> (i*2)) & 3;
@@ -1129,41 +1125,39 @@ void dequantize_tql(device const block_tql * xb, short il, thread type4x4 & reg)
 
 // TQ vec dequant (t4): pointwise FWHT-space coefficients, 4 values at a time
 
-template <typename type4>
-void dequantize_tq3j_t4(device const block_tq3j * xb, short il, thread type4 & reg) {
-    const half norm = xb->norm;
-    const half qjl_pos = half(QJL_SCALE_F / 128.0f) * xb->rnorm;
+template <short BLK_DIM = 128, typename type4>
+void dequantize_tq3j_t4(device const block_tq3j * xb_struct, short il, thread type4 & reg) {
+    device const uint8_t * xb = (device const uint8_t *)xb_struct;
+    const float norm = float(*(device const half *)(xb));
+    const float qjl_pos = QJL_SCALE_F / (float)BLK_DIM * float(*(device const half *)(xb + 2));
+    device const uint8_t * qs = xb + 4;
+    constexpr int signs_off = 4 + (BLK_DIM * 3 + 7) / 8;
+    device const uint8_t * signs = xb + signs_off;
+    constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
     const int base = il * 4;
-    // Bulk read index + sign bytes
-    const int bp = base * 3;
-    const int bi = bp / 8;
-    uint32_t bits = (uint32_t)xb->qs[bi] | ((uint32_t)xb->qs[bi+1] << 8);
-    int sh = bp % 8;
-    uint8_t signs = xb->signs[base / 8];
-    int sb = base % 8;
     for (int i = 0; i < 4; i++) {
-        int idx = (bits >> sh) & 7;
-        sh += 3;
-        if (sh >= 16) { bits = (uint32_t)xb->qs[bi + 2] | ((uint32_t)xb->qs[bi+3] << 8); sh -= 16; }
-        half qjl = ((signs >> (sb + i)) & 1) ? qjl_pos : -qjl_pos;
-        reg[i] = half(norm * half(tq_c8_d128[idx])) + qjl;
+        int j = base + i;
+        int bp = j * 3, bi = bp / 8;
+        uint32_t bits = (uint32_t)qs[bi] | ((uint32_t)qs[bi + 1] << 8);
+        int idx = (bits >> (bp % 8)) & 7;
+        float sign = ((signs[j/8] >> (j%8)) & 1) ? qjl_pos : -qjl_pos;
+        reg[i] = norm * c[idx] + sign;
     }
 }
 
-template <typename type4>
-void dequantize_tq2j_t4(device const block_tq2j * xb, short il, thread type4 & reg) {
-    const half norm = xb->norm;
-    const half qjl_pos = half(QJL_SCALE_F / 128.0f) * xb->rnorm;
+template <short BLK_DIM = 128, typename type4>
+void dequantize_tq2j_t4(device const block_tq2j * xb_struct, short il, thread type4 & reg) {
+    device const uint8_t * xb = (device const uint8_t *)xb_struct;
+    const float norm = float(*(device const half *)(xb));
+    const float qjl_pos = QJL_SCALE_F / (float)BLK_DIM * float(*(device const half *)(xb + 2));
+    device const uint8_t * qs = xb + 4;
+    constexpr int signs_off = 4 + BLK_DIM / 4;
+    device const uint8_t * signs = xb + signs_off;
+    constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
     const int base = il * 4;
-    uint8_t idx_byte = xb->qs[base / 4];
-    uint8_t signs = xb->signs[base / 8];
-    int sb = base % 8;
-    int ib = (base % 4) * 2;
     for (int i = 0; i < 4; i++) {
-        int idx = (idx_byte >> ib) & 3;
-        ib += 2;
-        half qjl = ((signs >> (sb + i)) & 1) ? qjl_pos : -qjl_pos;
-        reg[i] = half(norm * half(tq_c4_d128[idx])) + qjl;
+        int j = base + i;
+        reg[i] = norm * c[tq_up2(qs, j)] + ((signs[j/8] >> (j%8)) & 1 ? qjl_pos : -qjl_pos);
     }
 }
 
@@ -6756,12 +6750,12 @@ template [[host_name("kernel_flash_attn_ext_q8_0_dk512_dv512")]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_q8_0_dk576_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q8_0, 2, dequantize_q8_0, block_q8_0, 2, dequantize_q8_0, 576, 512>;
 
 // TurboQuant: K=TQ type, V=f16, TQ_FWHT=true for full FWHT, TQ_FWHT=true for FWHT rotation
-template [[host_name("kernel_flash_attn_ext_tq3j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq3j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq2j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq2j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq3j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tq2j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j,  8, dequantize_tq3j<128>, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 16, dequantize_tq3j<256>, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j,  8, dequantize_tq2j<128>, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 16, dequantize_tq2j<256>, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq3j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 32, dequantize_tq3j<512>, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_tq2j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 32, dequantize_tq2j<512>, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 
 #undef FA_TYPES
 #undef FA_TYPES_BF
@@ -7385,12 +7379,12 @@ template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk576_dv512")]] kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_q8_0_dk576_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q8_0, 8, dequantize_q8_0_t4, block_q8_0,  8, dequantize_q8_0_t4, 576, 512, 2>;
 
 // TurboQuant vec kernels: TQ_FWHT=true for full FWHT, TQ_FWHT=true for FWHT rotation
-template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j,  32, dequantize_tq3j_t4<128>, half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j,  64, dequantize_tq3j_t4<256>, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j,  32, dequantize_tq2j_t4<128>, half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j,  64, dequantize_tq2j_t4<256>, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 128, dequantize_tq3j_t4<512>, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 128, dequantize_tq2j_t4<512>, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 
 #undef FA_TYPES
 #undef FA_TYPES_F32
