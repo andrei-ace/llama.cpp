@@ -6185,8 +6185,84 @@ void kernel_flash_attn_ext_impl(
                     pk += 8*(NSG*NS10);
                     ps += 8*(NSG);
                 }
+            } else if (FC_flash_attn_ext_tq_fwht && DK == 128) {
+                // TurboQuant direct dot: bucket Q by centroid index, no per-element dequant
+                // <q,k> = norm * sum_c(centroid[c] * bucket[c]) + qjl_scale * sign_sum
+                const short tx = tiisg%4;
+                const short ty = tiisg/4;
+
+                for (short ccc = 0; ccc < (C/8)/NSG; ++ccc) {
+                    const short cc = ccc*NSG + sgitg;
+
+                    device const uint8_t * kb = (device const uint8_t *)(k + (ic + 8*cc + ty)*args.nb11);
+                    const float kn  = float(*(device const half *)(kb + 0));
+                    const float krn = float(*(device const half *)(kb + 2));
+                    device const uint8_t * kqs    = kb + 4;
+                    device const uint8_t * ksigns = kb + 4 + 48; // tq3j: qs=48 bytes
+
+                    FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
+                        const short j = jj*NSG + sgitg;
+                        threadgroup const half * sq_j = (threadgroup const half *)sq + j*DK;
+
+                        // Each tx handles 32 elements → accumulate into 8 buckets
+                        float bucket[8] = {0,0,0,0,0,0,0,0};
+                        float sign_sum = 0.0f;
+                        const short base = tx * 32;
+
+                        // Process 32 elements: read packed 3-bit indices in bulk
+                        const int bp0 = base * 3;
+                        const int bi0 = bp0 / 8;
+                        int sh = bp0 % 8;
+
+                        // Read enough bytes for 32×3 = 96 bits = 12 bytes
+                        uint32_t w0 = (uint32_t)kqs[bi0] | ((uint32_t)kqs[bi0+1]<<8) | ((uint32_t)kqs[bi0+2]<<16) | ((uint32_t)kqs[bi0+3]<<24);
+                        uint32_t w1 = (uint32_t)kqs[bi0+4] | ((uint32_t)kqs[bi0+5]<<8) | ((uint32_t)kqs[bi0+6]<<16) | ((uint32_t)kqs[bi0+7]<<24);
+                        uint32_t w2 = (uint32_t)kqs[bi0+8] | ((uint32_t)kqs[bi0+9]<<8) | ((uint32_t)kqs[bi0+10]<<16) | ((uint32_t)kqs[bi0+11]<<24);
+
+                        // Read 4 sign bytes for 32 bits
+                        const uint32_t sb = (uint32_t)ksigns[base/8] | ((uint32_t)ksigns[base/8+1]<<8) |
+                                            ((uint32_t)ksigns[base/8+2]<<16) | ((uint32_t)ksigns[base/8+3]<<24);
+
+                        for (short ii = 0; ii < 32; ii++) {
+                            const float qv = float(sq_j[base + ii]);
+
+                            // Extract 3-bit index from pre-loaded words
+                            int idx;
+                            if (sh < 30) {
+                                idx = (w0 >> sh) & 7;
+                            } else if (sh < 62) {
+                                int s2 = sh - 32;
+                                if (s2 < 0) {
+                                    idx = ((w0 >> sh) | (w1 << (32 - sh))) & 7;
+                                } else {
+                                    idx = (w1 >> s2) & 7;
+                                }
+                            } else {
+                                idx = (w2 >> (sh - 64)) & 7;
+                            }
+                            sh += 3;
+
+                            bucket[idx] += qv;
+                            sign_sum += ((sb >> ii) & 1) ? qv : -qv;
+                        }
+
+                        // Dot 8 buckets with centroids
+                        float dot_mse = 0.0f;
+                        for (short c = 0; c < 8; c++) dot_mse += tq_c8_d128[c] * bucket[c];
+
+                        // 4-way reduce
+                        dot_mse  += simd_shuffle_xor(dot_mse, 1);
+                        dot_mse  += simd_shuffle_xor(dot_mse, 2);
+                        sign_sum += simd_shuffle_xor(sign_sum, 1);
+                        sign_sum += simd_shuffle_xor(sign_sum, 2);
+
+                        if (tx == 0) {
+                            ss[j*SH + 8*cc + ty] = kn * dot_mse + QJL_SCALE_F / 128.0f * krn * sign_sum;
+                        }
+                    }
+                }
             } else {
-                // TODO: this is the quantized K cache branch - not optimized yet
+                // Quantized K cache branch (deq_k + simdgroup matmul)
                 for (short ccc = 0; ccc < (C/8)/NSG; ++ccc) {
                     const short cc = ccc*NSG + sgitg;
 
@@ -6199,7 +6275,6 @@ void kernel_flash_attn_ext_impl(
                         device const kd4x4_t * pk4x4 = (device const kd4x4_t *) (k + ((ic + 8*cc + ty)*args.nb11));
 
                         if (DK16%4 == 0) {
-                            // the head is evenly divisible by 4*16 = 64, so no need for bound checks
                             {
                                 k4x4_t tmp;
                                 deq_k(pk4x4 + (ii + tx)/nl_k, (ii + tx)%nl_k, tmp);
@@ -6212,11 +6287,11 @@ void kernel_flash_attn_ext_impl(
                                 k8x8_t mk;
                                 q8x8_t mq;
 
-                                simdgroup_load(mk, sk + 16*k + 0*8, 4*16, 0, true); // transpose
+                                simdgroup_load(mk, sk + 16*k + 0*8, 4*16, 0, true);
                                 simdgroup_load(mq, sq + (2*(ii + k) + 0)*8, DK);
                                 simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
 
-                                simdgroup_load(mk, sk + 16*k + 1*8, 4*16, 0, true); // transpose
+                                simdgroup_load(mk, sk + 16*k + 1*8, 4*16, 0, true);
                                 simdgroup_load(mq, sq + (2*(ii + k) + 1)*8, DK);
                                 simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
                             }
@@ -6233,11 +6308,11 @@ void kernel_flash_attn_ext_impl(
                                 k8x8_t mk;
                                 q8x8_t mq;
 
-                                simdgroup_load(mk, sk + 16*k + 0*8, 4*16, 0, true); // transpose
+                                simdgroup_load(mk, sk + 16*k + 0*8, 4*16, 0, true);
                                 simdgroup_load(mq, sq + (2*(ii + k) + 0)*8, DK);
                                 simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
 
-                                simdgroup_load(mk, sk + 16*k + 1*8, 4*16, 0, true); // transpose
+                                simdgroup_load(mk, sk + 16*k + 1*8, 4*16, 0, true);
                                 simdgroup_load(mq, sq + (2*(ii + k) + 1)*8, DK);
                                 simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
                             }
