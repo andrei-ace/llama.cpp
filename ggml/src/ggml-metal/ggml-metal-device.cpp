@@ -1349,15 +1349,6 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
                 dk, dv);
     }
 
-    // For TQK_FLEX, encode config in pipeline name so each config gets its own compiled pipeline
-    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
-        char flex_suffix[64];
-        snprintf(flex_suffix, 64, "_s%dh%dl%dr%dj%dj%d",
-                tq_flex_get_split(), tq_flex_get_hi_bits(), tq_flex_get_lo_bits(),
-                tq_flex_get_hi_res_bits(), tq_flex_get_qjl_hi(), tq_flex_get_qjl_lo());
-        strncat(base, flex_suffix, 256 - strlen(base) - 1);
-    }
-
     snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d_kvpad=%d_bcm=%d_ns10=%d_ns20=%d_nsg=%d",
             base,
             has_mask,
@@ -1369,6 +1360,16 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
             ns10,
             ns20,
             nsg);
+
+    // For TQK_FLEX, append config suffix to cache key (name) so each config gets its own compiled pipeline
+    // base stays unchanged (it's the Metal function name in the library)
+    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+        char flex_suffix[64];
+        snprintf(flex_suffix, 64, "_s%dh%dl%dr%dj%dj%d",
+                tq_flex_get_split(), tq_flex_get_hi_bits(), tq_flex_get_lo_bits(),
+                tq_flex_get_hi_res_bits(), tq_flex_get_qjl_hi(), tq_flex_get_qjl_lo());
+        strncat(name, flex_suffix, 256 - strlen(name) - 1);
+    }
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
     if (!res.pipeline) {
@@ -1445,14 +1446,6 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
                 dk, dv);
     }
 
-    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
-        char flex_suffix[64];
-        snprintf(flex_suffix, 64, "_s%dh%dl%dr%dj%dj%d",
-                tq_flex_get_split(), tq_flex_get_hi_bits(), tq_flex_get_lo_bits(),
-                tq_flex_get_hi_res_bits(), tq_flex_get_qjl_hi(), tq_flex_get_qjl_lo());
-        strncat(base, flex_suffix, 256 - strlen(base) - 1);
-    }
-
     snprintf(name, 256, "%s_mask=%d_sink=%d_bias=%d_scap=%d_kvpad=%d_ns10=%d_ns20=%d_nsg=%d_nwg=%d",
             base,
             has_mask,
@@ -1463,6 +1456,14 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
             ns10,
             ns20,
             nsg, nwg);
+
+    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+        char flex_suffix[64];
+        snprintf(flex_suffix, 64, "_s%dh%dl%dr%dj%dj%d",
+                tq_flex_get_split(), tq_flex_get_hi_bits(), tq_flex_get_lo_bits(),
+                tq_flex_get_hi_res_bits(), tq_flex_get_qjl_hi(), tq_flex_get_qjl_lo());
+        strncat(name, flex_suffix, 256 - strlen(name) - 1);
+    }
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
     if (!res.pipeline) {
