@@ -38,15 +38,15 @@ Constants: `TQK_BLOCK_SIZE = 128`, `TQK_N_OUTLIER = 32`, `TQK_N_REGULAR = 96`
 
 | CLI name | Internal struct | Bytes | bpv | Hi (32ch) | Lo (96ch) | Calibration |
 |----------|----------------|-------|-----|-----------|-----------|-------------|
-| `tqk3_sj` | `block_tqk_5hi_3lo` | 76 | 4.75 | 4-bit MSE + QJL | 3-bit MSE + QJL | Yes |
-| `tqk4_sj` | `block_tqk_6hi_3lo` | 80 | 5.00 | 5-bit MSE + QJL | 3-bit MSE + QJL | Yes |
-| `tqk4_sjj` | `block_tqk_6hi_3lo` | 80 | 5.00 | 5-bit MSE + QJL | 3-bit MSE + QJL | Yes |
+| `tqk3_sj` | `block_tqk_5hi_3lo` | 62 | 3.875 | 4-bit MSE + QJL hi | 3-bit MSE | Yes |
+| `tqk4_sj` | `block_tqk_6hi_3lo` | 66 | 4.125 | 5-bit MSE + QJL hi | 3-bit MSE | Yes |
+| `tqk4_sjj` | `block_tqk_6hi_3lo_jj` | 80 | 5.00 | 5-bit MSE + QJL | 3-bit MSE + QJL | Yes |
 | `tqk3_sjj` | `block_tqk_3hi_2lo` | 60 | 3.75 | 3-bit MSE + QJL | 2-bit MSE + QJL | Yes |
-| `tqk2_sj` | `block_tqk_2hi_1lo` | 44 | 2.75 | 2-bit MSE + QJL | 1-bit MSE + QJL | Yes |
+| `tqk2_sjj` | `block_tqk_2hi_1lo` | 44 | 2.75 | 2-bit MSE + QJL | 1-bit MSE + QJL | Yes |
 
-> **Note on tqk4_sj vs tqk4_sjj:** Both use the same block struct (`block_tqk_6hi_3lo`,
-> 80 bytes, 5.00 bpv). The difference is in decoding: `tqk4_sj` applies QJL correction
-> only to hi channels, while `tqk4_sjj` applies QJL correction to both hi and lo channels.
+> **Note on tqk4_sj vs tqk4_sjj:** `tqk4_sj` uses `block_tqk_6hi_3lo` (66 bytes, 4.125 bpv)
+> with QJL on hi only. `tqk4_sjj` uses `block_tqk_6hi_3lo_jj` (80 bytes, 5.00 bpv)
+> with QJL on both hi and lo channels. They have different structs.
 >
 > **Note on tqk3_sjj:** Previously named `tqk3_sjj` in documentation and benchmarks.
 > The CLI name is now `tqk3_sjj`. Uses `block_tqk_3hi_2lo`.

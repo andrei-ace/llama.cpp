@@ -1194,8 +1194,15 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     bool is_ok_v = (op->src[2]->type == GGML_TYPE_F16 ||
                                     op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4 ||
                                     op->src[2]->type == GGML_TYPE_TQV_HAD_MSE4_D256);
-                    // q4_0 V only has FA templates for d=128 TQ K types
+                    // q4_0 V has FA templates for all TQ K types at d<=128
                     if (op->src[2]->type == GGML_TYPE_Q4_0 && op->src[1]->ne[0] <= 128) {
+                        is_ok_v = true;
+                    }
+                    // q8_0/q4_1 V only have FA templates for flex K types at d<=128
+                    if ((op->src[2]->type == GGML_TYPE_Q8_0 ||
+                         op->src[2]->type == GGML_TYPE_Q4_1) &&
+                        op->src[1]->type == GGML_TYPE_TQK_FLEX &&
+                        op->src[1]->ne[0] <= 128) {
                         is_ok_v = true;
                     }
                     if (!(is_tq_k && is_ok_v)) {

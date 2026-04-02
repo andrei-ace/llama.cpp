@@ -6,12 +6,16 @@
 
 **V cache**: TurboQuant currently compresses **only the K cache**. All results below use f16 V.
 
-Supported V cache types with TQ K:
-- **f16**: ✅ full support, recommended
-- **q4_0**: ✅ works (Metal FA template exists at d=128)
-- **tqv4_0**: ✅ works for fixed TQ K types, untested with flex K. tqv4_0 (`GGML_TYPE_TQV_HAD_MSE4`) applies FWHT + 4-bit Lloyd-Max MSE to V vectors (4.125 bpv).
-- **q8_0**: ❌ no Metal FA template at d=128 (upstream llama.cpp limitation, not TQ-specific). Produces garbage with TQ K. Runtime guard auto-switches to f16 V.
-- **q4_1**: ❌ same as q8_0
+Supported V cache types with TQ flex K (`tqk_flex`, `tqk` per-layer):
+- **f16**: ✅ recommended for apples-to-apples comparison
+- **q8_0**: ✅ (8.5 bpv). Output identical to f16 V on both models.
+- **q4_0**: ✅ (4.5 bpv). Minor wording differences vs f16 V (same as f16 K + q4_0 V — V quantization effect, not TQ K).
+- **q4_1**: ✅ (5.0 bpv). Same as q4_0.
+- **tqv4_0**: ✅ for fixed TQ K types. tqv4_0 (`GGML_TYPE_TQV_HAD_MSE4`) applies FWHT + 4-bit Lloyd-Max MSE to V vectors (4.125 bpv).
+
+Quantized V types auto-enable Flash Attention. All PPL results in this document use f16 V to isolate the K cache quantization effect.
+
+Note: q8_0/q4_1 V FA templates only exist for flex K types (`tqk_flex`). The fixed TQ K types (tqk4_sj, etc.) only have f16, q4_0, and tqv4_0 V templates.
 
 For a model where K and V are the same size, the total KV cache savings are:
 - K: 16.0 → 6.21 bpv (2.6x compression)

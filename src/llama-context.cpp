@@ -2969,18 +2969,32 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
+    // Quantized V cache types require Flash Attention
+    if (params.type_v != GGML_TYPE_F16 && params.type_v != GGML_TYPE_F32 &&
+        params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
+        params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        LLAMA_LOG_INFO("%s: quantized V cache (%s) detected — forcing flash_attn on\n",
+                __func__, ggml_type_name(params.type_v));
+    }
+
     // TurboQuant types require Flash Attention
     {
         const bool tq_flex_k = (params.type_k == GGML_TYPE_TQK_FLEX);
         const bool tq_k = (params.type_k == GGML_TYPE_TQK_AUTO) ||
                           (params.type_k >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_k <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256) ||
                           (params.type_k == GGML_TYPE_TQK_5R3_SJ);
-        const bool tq_v = (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256) ||
-                          (params.type_v == GGML_TYPE_TQK_5R3_SJ);
+        const bool tq_v = (params.type_v == GGML_TYPE_TQV_HAD_MSE4 || params.type_v == GGML_TYPE_TQV_HAD_MSE4_D256);
+        // Reject TQ K types used as V (no V-side dequant exists for them)
+        if (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQK_FLEX &&
+            params.type_v != GGML_TYPE_TQV_HAD_MSE4 && params.type_v != GGML_TYPE_TQV_HAD_MSE4_D256) {
+            LLAMA_LOG_ERROR("%s: %s is a K-only type, cannot be used for V cache\n",
+                    __func__, ggml_type_name(params.type_v));
+            return nullptr;
+        }
         // TQK_FLEX / TQK_AUTO with TQFC: only supported on CPU and Metal (no CUDA kernels yet)
 #ifdef GGML_USE_CUDA
-        if (tq_flex_k) {
-            LLAMA_LOG_ERROR("%s: TQK_FLEX is not supported on CUDA — use CPU or Metal backend\n", __func__);
+        if (tq_flex_k || (params.type_k == GGML_TYPE_TQK_AUTO && tq_flex_get_n_layer_configs() > 0)) {
+            LLAMA_LOG_ERROR("%s: TQK_FLEX / per-layer flex is not supported on CUDA — use CPU or Metal backend\n", __func__);
             return nullptr;
         }
 #endif

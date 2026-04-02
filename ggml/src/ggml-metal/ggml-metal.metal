@@ -9249,6 +9249,18 @@ kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_flex_m
 template [[host_name("kernel_flash_attn_ext_vec_tqk_flex_nosplit_q4_0_dk128_dv128")]]
 kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_flex_metal, 32, dequantize_flex_t4, block_q4_0, 8, dequantize_q4_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 
+// TQK_FLEX vec: split + q8_0 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_flex_q8_0_dk128_dv128")]]
+kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_flex_metal, 32, dequantize_flex_t4, block_q8_0, 8, dequantize_q8_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+// TQK_FLEX vec: nosplit + q8_0 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_flex_nosplit_q8_0_dk128_dv128")]]
+kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_flex_metal, 32, dequantize_flex_t4, block_q8_0, 8, dequantize_q8_0_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
+// TQK_FLEX vec: split + q4_1 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_flex_q4_1_dk128_dv128")]]
+kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_flex_metal, 32, dequantize_flex_t4, block_q4_1, 8, dequantize_q4_1_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+// TQK_FLEX vec: nosplit + q4_1 V
+template [[host_name("kernel_flash_attn_ext_vec_tqk_flex_nosplit_q4_1_dk128_dv128")]]
+kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tqk_flex_metal, 32, dequantize_flex_t4, block_q4_1, 8, dequantize_q4_1_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 
 template [[host_name("kernel_flash_attn_ext_vec_f32_dk192_dv192")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES_F32, float4,     1, dequantize_f32_t4,  float4,      1, dequantize_f32_t4,  192, 192, 2>;
 template [[host_name("kernel_flash_attn_ext_vec_f16_dk192_dv192")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     half4,      1, dequantize_f16_t4,  half4,       1, dequantize_f16_t4,  192, 192, 2>;
