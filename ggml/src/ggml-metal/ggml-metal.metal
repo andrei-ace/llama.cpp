@@ -5882,8 +5882,7 @@ template<
     short Q,          // queries per threadgroup
     short C,          // cache items per threadgroup
     short NSG,        // number of simd groups
-    bool TQ_FWHT = false,       // apply FWHT-DK to Q (tq3j/tq2j)
-    bool TQ_FWHT_SPLIT = false, // apply segmented FWHT to Q (tql: 32+32+64)
+    bool TQ_FWHT = false,       // apply FWHT-DK to Q (tq3j/tq2j/tq3/tq2)
     bool TQ_FWHT_O = false>     // apply inverse FWHT-DV to output (V stored rotated)
 void kernel_flash_attn_ext_impl(
         constant ggml_metal_kargs_flash_attn_ext & args,
@@ -6009,29 +6008,6 @@ void kernel_flash_attn_ext_impl(
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (TQ_FWHT_SPLIT) {
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
-            const short j = jj*NSG + sgitg;
-            threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
-            if (iq1 + j < args.ne01) {
-                // FWHT-32 on [0:31]: thread holds 1 value
-                half v0 = (tiisg < 32) ? tq_fwht32_simd(sq_j[tiisg], tiisg) : sq_j[tiisg];
-                sq_j[tiisg] = v0;
-                // FWHT-32 on [32:63]
-                half v1 = (tiisg < 32) ? tq_fwht32_simd(sq_j[32 + tiisg], tiisg) : sq_j[32 + tiisg];
-                sq_j[32 + tiisg] = v1;
-                // FWHT-64 on [64:127]: thread holds 2 values
-                half lo0 = sq_j[64 + tiisg*2];
-                half lo1 = sq_j[64 + tiisg*2 + 1];
-                tq_fwht64_simd(lo0, lo1, tiisg);
-                sq_j[64 + tiisg*2]     = lo0;
-                sq_j[64 + tiisg*2 + 1] = lo1;
-            }
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
     // zero out
     FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
         const short j = jj*NSG + sgitg;
@@ -6563,8 +6539,7 @@ template<
     short DV,         // V head size
     short Q  = OP_FLASH_ATTN_EXT_NQPSG, // queries per threadgroup
     short C  = OP_FLASH_ATTN_EXT_NCPSG, // cache items per threadgroup
-    bool TQ_FWHT = false,
-    bool TQ_FWHT_SPLIT = false>
+    bool TQ_FWHT = false>
 kernel void kernel_flash_attn_ext(
         constant ggml_metal_kargs_flash_attn_ext & args,
         device const char * q,
@@ -6582,8 +6557,8 @@ kernel void kernel_flash_attn_ext(
 #define FWD_TMPL q_t, q4_t, q8x8_t, k_t, k4x4_t, k8x8_t, v_t, v4x4_t, v8x8_t, qk_t, qk8x8_t, s_t, s2_t, s8x8_t, o_t, o4_t, o8x8_t, kd4x4_t, nl_k, deq_k, vd4x4_t, nl_v, deq_v, DK, DV, Q, C
 #define FWD_ARGS args, q, k, v, mask, sinks, pad, blk, dst, shmem_f16, tgpig, tiisg, sgitg
     switch (FC_flash_attn_ext_nsg) {
-        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT, TQ_FWHT_SPLIT>(FWD_ARGS); break;
-        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT, TQ_FWHT_SPLIT>(FWD_ARGS); break;
+        case 4: kernel_flash_attn_ext_impl<FWD_TMPL, 4, TQ_FWHT>(FWD_ARGS); break;
+        case 8: kernel_flash_attn_ext_impl<FWD_TMPL, 8, TQ_FWHT>(FWD_ARGS); break;
     }
 #undef FWD_TMPL
 #undef FWD_ARGS
@@ -6751,14 +6726,11 @@ template [[host_name("kernel_flash_attn_ext_q8_0_dk320_dv256")]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_q8_0_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q8_0, 2, dequantize_q8_0, block_q8_0, 2, dequantize_q8_0, 512, 512>;
 template [[host_name("kernel_flash_attn_ext_q8_0_dk576_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q8_0, 2, dequantize_q8_0, block_q8_0, 2, dequantize_q8_0, 576, 512>;
 
-// TurboQuant: K=TQ type, V=f16, TQ_FWHT=true for full FWHT, TQ_FWHT_SPLIT=true for segmented
-template [[host_name("kernel_flash_attn_ext_tql_dk128_dv128")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tql,  8, dequantize_tql,  half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
-template [[host_name("kernel_flash_attn_ext_tql_dk256_dv256")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tql,  8, dequantize_tql,  half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// TurboQuant: K=TQ type, V=f16, TQ_FWHT=true for full FWHT, TQ_FWHT=true for FWHT rotation
 template [[host_name("kernel_flash_attn_ext_tq3j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tq3j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tq2j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tq2j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 256, 256, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_tql_dk512_dv512")]]  kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tql,  8, dequantize_tql,  half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
 template [[host_name("kernel_flash_attn_ext_tq3j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_tq2j_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 512, 512, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 
@@ -6801,8 +6773,7 @@ template<
     short NE = 4,   // head elements per thread
     short Q  = OP_FLASH_ATTN_EXT_VEC_NQPSG,  // queries per threadgroup
     short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG,  // cache items per threadgroup
-    bool TQ_FWHT = false,
-    bool TQ_FWHT_SPLIT = false>
+    bool TQ_FWHT = false>
 kernel void kernel_flash_attn_ext_vec(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
@@ -6896,23 +6867,6 @@ kernel void kernel_flash_attn_ext_vec(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (TQ_FWHT_SPLIT) {
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        threadgroup half * sq_h = (threadgroup half *) sq4;
-        if (iq1 < args.ne01) {
-            half v0 = (tiisg < 32) ? tq_fwht32_simd(sq_h[tiisg], tiisg) : sq_h[tiisg];
-            sq_h[tiisg] = v0;
-            half v1 = (tiisg < 32) ? tq_fwht32_simd(sq_h[32 + tiisg], tiisg) : sq_h[32 + tiisg];
-            sq_h[32 + tiisg] = v1;
-            half lo0 = sq_h[64 + tiisg*2];
-            half lo1 = sq_h[64 + tiisg*2 + 1];
-            tq_fwht64_simd(lo0, lo1, tiisg);
-            sq_h[64 + tiisg*2]     = lo0;
-            sq_h[64 + tiisg*2 + 1] = lo1;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
     // zero out so
     for (short i = 0; i < DV4/NL; ++i) {
         so4[i*NL] = (o4_t) 0.0f;
@@ -7397,14 +7351,11 @@ template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk576_dv512")]] kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk576_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 576, 512, 2>;
 template [[host_name("kernel_flash_attn_ext_vec_q8_0_dk576_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q8_0, 8, dequantize_q8_0_t4, block_q8_0,  8, dequantize_q8_0_t4, 576, 512, 2>;
 
-// TurboQuant vec kernels: TQ_FWHT=true for full FWHT, TQ_FWHT_SPLIT=true for segmented
-template [[host_name("kernel_flash_attn_ext_vec_tql_dk128_dv128")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tql,  32, dequantize_tql_t4,  half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tql_dk256_dv256")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tql,  32, dequantize_tql_t4,  half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
+// TurboQuant vec kernels: TQ_FWHT=true for full FWHT, TQ_FWHT=true for FWHT rotation
 template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 128, 128, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
-template [[host_name("kernel_flash_attn_ext_vec_tql_dk512_dv512")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tql,  32, dequantize_tql_t4,  half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, false, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 512, 512, 1, OP_FLASH_ATTN_EXT_VEC_NQPSG, OP_FLASH_ATTN_EXT_VEC_NCPSG, true>;
 
