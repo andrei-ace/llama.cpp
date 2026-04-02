@@ -476,3 +476,38 @@ K = TQ winner (9/4 QJL=both split + 6-bit nosplit, 6.21 bpv K)
 | K=TQ+QJL, V=q4_1 | different approach | slightly different | ✅ |
 
 **Conclusion**: TQ K produces correct output with all V cache types (f16, q8_0, q4_0, q4_1). Minor wording variations with q4_0/q4_1 V are the V quantization effect — identical differences appear with f16 K + q4_0/q4_1 V baselines.
+
+## Throughput Benchmarks
+
+Apple M4 Pro, Metal FA, pp512 + tg128, 3 repetitions. V=f16 for all.
+
+Benchmarked with:
+```bash
+llama-bench -m model.gguf --tq-perms perms.bin -ctk f16,q8_0,tqk -ctv f16 -fa 1 -ngl 99 -r 3 -p 512 -n 128
+```
+
+### Qwen2.5 1.5B (q4_k_m, K=6.21 bpv)
+
+| K type | K bpv | pp512 (t/s) | tg128 (t/s) | pp vs f16 | tg vs f16 |
+|--------|-------|-------------|-------------|-----------|-----------|
+| f16    | 16.00 | 2281.7 ± 6.0 | 167.7 ± 0.2 | — | — |
+| q8_0   | 8.50  | 1608.4 ± 28.6 | 102.2 ± 0.8 | -30% | -39% |
+| **TQ** | **6.21** | **2108.4 ± 2.7** | **85.0 ± 0.2** | **-8%** | **-49%** |
+
+### Qwen2.5 7B (q4_k_m, K=6.41 bpv)
+
+| K type | K bpv | pp512 (t/s) | tg128 (t/s) | pp vs f16 | tg vs f16 |
+|--------|-------|-------------|-------------|-----------|-----------|
+| f16    | 16.00 | 495.6 ± 0.3 | 51.4 ± 0.0 | — | — |
+| q8_0   | 8.50  | 417.2 ± 0.4 | 41.6 ± 0.1 | -16% | -19% |
+| **TQ** | **6.41** | **472.1 ± 0.1** | **25.2 ± 0.0** | **-5%** | **-51%** |
+
+### Analysis
+
+**Prompt processing (pp)**: TQ is only 5-8% slower than f16 — faster than q8_0 on both models. The FA kernel with TQ K dequant is efficient for batch processing.
+
+**Token generation (tg)**: TQ is 49-51% slower than f16. The per-token decode path (vec FA kernel) has higher overhead from flex config activation + centroid lookup per layer. This is the main performance bottleneck.
+
+q8_0 is also significantly slower than f16 (19-39% for tg), suggesting Metal FA with quantized K types has general overhead vs f16 — not specific to TQ.
+
+**Tradeoff**: TQ saves 2.5-2.6x K cache memory at the cost of ~50% slower token generation. For memory-bound deployments (long context, large batch), the memory savings outweigh the speed loss. For latency-critical single-user scenarios, f16 K is faster.
