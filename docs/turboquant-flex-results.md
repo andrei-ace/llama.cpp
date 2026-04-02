@@ -1,10 +1,14 @@
 # TurboQuant: Adaptive K Cache Compression
 
-> **Highly experimental research prototype.** Unoptimized, API will change, CPU and Apple Metal only, no CUDA. ~50% slower token generation than f16 KV. Not suitable for any production use — this is a proof of concept for exploring adaptive KV cache compression.
+> **Highly experimental research prototype.** API will change. Not suitable for any production use — this is a proof of concept for exploring adaptive KV cache compression.
 
 ## Scope
 
-**Backend support**: TurboQuant Flex (`tqk_flex`, `tqk` auto per-layer) is supported on **CPU and Metal only**. CUDA is not yet supported — using `-ctk tqk_flex` or `-ctk tqk` with TQFC configs on a CUDA build will error at context creation. The fixed TQ types (tqk4_sj, tqk3_sjj, etc.) have CUDA support.
+**Backend support**: TurboQuant Flex (`tqk_flex`, `tqk` auto per-layer) is supported on **CPU, Apple Metal, and CUDA**.
+
+CUDA performance (RTX A6000, Qwen2.5 1.5B Q4_K_M):
+- pp512: 2284 t/s, tg128: 138 t/s (38% of f16 tg speed)
+- PPL verified on all 3 models (within +0.6% of CPU results)
 
 **V cache**: TurboQuant currently compresses **only the K cache**. All results below use f16 V.
 
@@ -741,3 +745,13 @@ All TQ results fall within noise of f16, consistent with Metal results.
 **CUDA vs Metal comparison**: Metal tg overhead is ~50% (TQ vs f16). CUDA tg overhead is 42-62%. The gap is narrower on larger models. The CUDA implementation uses shared memory centroid tables and specialized bit-unpack to minimize per-element overhead in the FA vec_dot kernel.
 
 **q8_0 reference**: q8_0 on CUDA is 72-84% of f16 tg, showing that quantized K cache types have general FA overhead on CUDA — not specific to TQ.
+
+## Future Direction: Simpler Hi-Channel Handling
+
+The current split configs use 9–10 bit MSE centroids on the 32 outlier channels. This requires large centroid tables (512–1024 entries), lookup/binary-search in quantize, and takes up shared memory on GPU. But at 9–10 bits the quantization error is already tiny — the Lloyd-Max optimal placement barely gains over simple linear quantization at that precision.
+
+A potentially better design: keep the 32 outlier channels in q8_0 (or even f16) and only apply FWHT + MSE centroids to the 96 regular channels, where low-bit centroids genuinely matter. This would:
+- eliminate centroid tables for the hi group entirely
+- remove the need for FWHT on the hi channels
+- simplify GPU kernels significantly
+- potentially use fewer bits (32 × 8 = 256 bits for q8_0 hi, vs 32 × 10 = 320 bits for 10-bit MSE)
