@@ -1335,17 +1335,29 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
     const bool bc_mask = op->src[3] && (op->src[3]->ne[1] % 8 != 0);
 
     // For mixed TQK+other V types, include both K and V type names
+    // For TQK_FLEX: use "tqk_flex" (split) or "tqk_flex_nosplit" based on active layer config
+    const char * k_type_name = ggml_type_name(op->src[1]->type);
+    char k_type_buf[64];
+    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+        int layer = 0;
+        const char * lp = strstr(op->src[1]->name, "_l");
+        if (lp) layer = atoi(lp + 2);
+        tq_flex_activate_layer(layer);
+        snprintf(k_type_buf, 64, "tqk_flex%s", tq_flex_get_split() ? "" : "_nosplit");
+        k_type_name = k_type_buf;
+    }
+
     const bool is_mixed_tq = (op->src[1]->type != op->src[2]->type);
     if (is_mixed_tq) {
         snprintf(base, 256, "kernel_%s_%s_%s_dk%d_dv%d",
                 "flash_attn_ext",
-                ggml_type_name(op->src[1]->type),
+                k_type_name,
                 ggml_type_name(op->src[2]->type),
                 dk, dv);
     } else {
         snprintf(base, 256, "kernel_%s_%s_dk%d_dv%d",
                 "flash_attn_ext",
-                ggml_type_name(op->src[1]->type),
+                k_type_name,
                 dk, dv);
     }
 
@@ -1432,17 +1444,28 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
     const int32_t ns10 = op->src[1]->nb[1]/op->src[1]->nb[0];
     const int32_t ns20 = op->src[2]->nb[1]/op->src[2]->nb[0];
 
+    const char * k_type_name_vec = ggml_type_name(op->src[1]->type);
+    char k_type_buf_vec[64];
+    if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+        int layer = 0;
+        const char * lp = strstr(op->src[1]->name, "_l");
+        if (lp) layer = atoi(lp + 2);
+        tq_flex_activate_layer(layer);
+        snprintf(k_type_buf_vec, 64, "tqk_flex%s", tq_flex_get_split() ? "" : "_nosplit");
+        k_type_name_vec = k_type_buf_vec;
+    }
+
     const bool is_mixed_tq_vec = (op->src[1]->type != op->src[2]->type);
     if (is_mixed_tq_vec) {
         snprintf(base, 256, "kernel_%s_%s_%s_dk%d_dv%d",
                 "flash_attn_ext_vec",
-                ggml_type_name(op->src[1]->type),
+                k_type_name_vec,
                 ggml_type_name(op->src[2]->type),
                 dk, dv);
     } else {
         snprintf(base, 256, "kernel_%s_%s_dk%d_dv%d",
                 "flash_attn_ext_vec",
-                ggml_type_name(op->src[1]->type),
+                k_type_name_vec,
                 dk, dv);
     }
 
