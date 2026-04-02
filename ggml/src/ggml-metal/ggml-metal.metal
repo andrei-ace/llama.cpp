@@ -904,6 +904,59 @@ void dequantize_iq4_xs(device const block_iq4_xs * xb, short il, thread type4x4 
 
 #define QJL_SCALE_F 1.2533141f
 
+// Barrier-free FWHT-128 using simd_shuffle_xor (32 threads, 4 values each)
+// Each thread holds q[0..3] = data[tiisg*4 .. tiisg*4+3]
+inline void tq_fwht128_simd(thread half4 & q, ushort tiisg) {
+    // Step 1: pairs (0,1), (2,3) — intra-thread
+    { half a = q[0], b = q[1]; q[0] = a + b; q[1] = a - b; }
+    { half a = q[2], b = q[3]; q[2] = a + b; q[3] = a - b; }
+
+    // Step 2: pairs (0,2), (1,3) — intra-thread
+    { half a = q[0], b = q[2]; q[0] = a + b; q[2] = a - b; }
+    { half a = q[1], b = q[3]; q[1] = a + b; q[3] = a - b; }
+
+    // Steps 4,8,16,32,64: cross-thread via simd_shuffle_xor
+    for (ushort mask = 1; mask <= 16; mask *= 2) {
+        for (short k = 0; k < 4; k++) {
+            half b = simd_shuffle_xor(q[k], mask);
+            q[k] = (tiisg & mask) == 0 ? (q[k] + b) : (b - q[k]);
+        }
+    }
+
+    // Normalize
+    const half s = half(1.0h / sqrt(128.0h));
+    q *= s;
+}
+
+// Barrier-free FWHT-32 using simd_shuffle_xor (32 threads, 1 value each)
+// Thread tiisg holds data[tiisg]
+inline half tq_fwht32_simd(half val, ushort tiisg) {
+    for (ushort mask = 1; mask <= 16; mask *= 2) {
+        half b = simd_shuffle_xor(val, mask);
+        val = (tiisg & mask) == 0 ? (val + b) : (b - val);
+    }
+    return val * half(1.0h / sqrt(32.0h));
+}
+
+// Barrier-free FWHT-64 using simd_shuffle_xor (32 threads, 2 values each)
+// Thread tiisg holds data[tiisg*2] and data[tiisg*2+1]
+inline void tq_fwht64_simd(thread half & v0, thread half & v1, ushort tiisg) {
+    // Step 1: intra-thread
+    { half a = v0, b = v1; v0 = a + b; v1 = a - b; }
+
+    // Steps 2,4,8,16,32: cross-thread
+    for (ushort mask = 1; mask <= 16; mask *= 2) {
+        half b0 = simd_shuffle_xor(v0, mask);
+        half b1 = simd_shuffle_xor(v1, mask);
+        v0 = (tiisg & mask) == 0 ? (v0 + b0) : (b0 - v0);
+        v1 = (tiisg & mask) == 0 ? (v1 + b1) : (b1 - v1);
+    }
+
+    const half s = half(1.0h / sqrt(64.0h));
+    v0 *= s;
+    v1 *= s;
+}
+
 // In-place FWHT (Walsh-Hadamard Transform), normalized, self-inverse
 static void tq_fwht_metal(thread float * x, int n) {
     for (int step = 1; step < n; step *= 2) {
@@ -921,8 +974,8 @@ static void tq_fwht_metal(thread float * x, int n) {
 
 static int tq_up3(device const uint8_t * q, int j) {
     int bp = j * 3, bi = bp / 8, sh = bp % 8;
-    uint32_t val = (uint32_t)q[bi];
-    if (sh > 5) val |= (uint32_t)q[bi + 1] << 8;
+    // Always read 2 bytes to avoid branch (device reads are cached)
+    uint32_t val = (uint32_t)q[bi] | ((uint32_t)q[bi + 1] << 8);
     return (int)((val >> sh) & 7);
 }
 
@@ -946,66 +999,104 @@ constant float tq_c4_d128[4] = {
     -0.1330415202f, -0.0399915952f, 0.0399915952f, 0.1330415202f,
 };
 
-// TQ3J dequant: outputs FWHT-space coefficients (pointwise, fast)
-// Q must be pre-FWHT-transformed for correct dot product
+// TQ3J dequant: pre-scaled centroid lookup + sign select (no per-element multiply)
 // block_tq3j = { norm(2), rnorm(2), qs[48], signs[16] } = 68 bytes, 128 values, nl_k=8
 template <typename type4x4>
 void dequantize_tq3j(device const block_tq3j * xb, short il, thread type4x4 & reg) {
-    float norm = float(xb->norm);
-    float qjl  = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+    // Pre-scale 8 centroids + precompute ±qjl
+    const float norm = float(xb->norm);
+    const float qjl_pos = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+    const float qjl_neg = -qjl_pos;
+    float sc[8];
+    for (int k = 0; k < 8; k++) sc[k] = norm * tq_c8_d128[k];
+
     float4x4 reg_f;
+    const int base = il * 16;
+    // Read 6 bytes of packed 3-bit indices for 16 values (16*3=48 bits = 6 bytes)
+    const int byte_off = (base * 3) / 8;
+    uint32_t bits0 = (uint32_t)xb->qs[byte_off] | ((uint32_t)xb->qs[byte_off+1] << 8) |
+                     ((uint32_t)xb->qs[byte_off+2] << 16) | ((uint32_t)xb->qs[byte_off+3] << 24);
+    uint32_t bits1 = (uint32_t)xb->qs[byte_off+4] | ((uint32_t)xb->qs[byte_off+5] << 8);
+    int sh = (base * 3) % 8;
+    // Read 2 bytes of signs
+    const uint16_t sign_bits = (uint16_t)xb->signs[base/8] | ((uint16_t)xb->signs[base/8 + 1] << 8);
+
     for (int i = 0; i < 16; i++) {
-        int j = il * 16 + i;
-        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
-        reg_f[i/4][i%4] = norm * tq_c8_d128[tq_up3(xb->qs, j)] + qjl * sign;
+        int idx;
+        int bpos = sh + i*3;
+        if (bpos < 32) {
+            idx = (bits0 >> bpos) & 7;
+        } else {
+            idx = ((bits0 >> bpos) | (bits1 << (32 - bpos))) & 7;
+        }
+        float qjl = (sign_bits >> i) & 1 ? qjl_pos : qjl_neg;
+        reg_f[i/4][i%4] = sc[idx] + qjl;
     }
     reg = (type4x4) reg_f;
 }
 
-// TQ2J dequant: outputs FWHT-space coefficients (pointwise, fast)
+// TQ2J dequant: pre-scaled centroid lookup + sign select
 // block_tq2j = { norm(2), rnorm(2), qs[32], signs[16] } = 52 bytes, 128 values, nl_k=8
 template <typename type4x4>
 void dequantize_tq2j(device const block_tq2j * xb, short il, thread type4x4 & reg) {
-    float norm = float(xb->norm);
-    float qjl  = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+    const float norm = float(xb->norm);
+    const float qjl_pos = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+    const float qjl_neg = -qjl_pos;
+    float sc[4];
+    for (int k = 0; k < 4; k++) sc[k] = norm * tq_c4_d128[k];
+
     float4x4 reg_f;
+    const int base = il * 16;
+    // Read 4 bytes of packed 2-bit indices (16 values * 2 bits = 32 bits)
+    const uint32_t idx_bits = *(device const uint32_t *)(xb->qs + base/4);
+    const uint16_t sign_bits = (uint16_t)xb->signs[base/8] | ((uint16_t)xb->signs[base/8 + 1] << 8);
+
     for (int i = 0; i < 16; i++) {
-        int j = il * 16 + i;
-        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
-        reg_f[i/4][i%4] = norm * tq_c4_d128[tq_up2(xb->qs, j)] + qjl * sign;
+        int idx = (idx_bits >> (i*2)) & 3;
+        float qjl = (sign_bits >> i) & 1 ? qjl_pos : qjl_neg;
+        reg_f[i/4][i%4] = sc[idx] + qjl;
     }
     reg = (type4x4) reg_f;
 }
 
-// TQL dequant: outputs FWHT-space coefficients for 3-segment layout
-// Segments: hi[0:31] q8 in FWHT-32 space, mid[32:63] 3mse+qjl in FWHT-32 space,
-//           low[64:127] 2mse+qjl in FWHT-64 space
-// Q must be pre-transformed: FWHT-32 on [0:31], FWHT-32 on [32:63], FWHT-64 on [64:127]
+// TQL dequant: pre-scaled centroid lookup per segment
 template <typename type4x4>
 void dequantize_tql(device const block_tql * xb, short il, thread type4x4 & reg) {
     float4x4 reg_f;
-    int base = il * 16;
+    const int base = il * 16;
 
-    for (int i = 0; i < 16; i++) {
-        int j = base + i;
-        float val;
-        if (j < 32) {
-            // hi: q8 coefficients in FWHT-32 space
-            val = float(xb->d_hi) * float(xb->qs_hi[j]);
-        } else if (j < 64) {
-            // mid: 3-bit centroid + QJL in FWHT-32 space
-            int mj = j - 32;
-            float sign = ((xb->signs_mid[mj / 8] >> (mj % 8)) & 1) ? 1.0f : -1.0f;
-            val = float(xb->norm_mid) * tq_c8_d32[tq_up3(xb->qs_mid, mj)]
-                + QJL_SCALE_F / 32.0f * float(xb->rnorm_mid) * sign;
-        } else {
-            // low: 2-bit centroid + QJL in FWHT-64 space
-            int lj = j - 64;
-            float sign = ((xb->signs_low[lj / 8] >> (lj % 8)) & 1) ? 1.0f : -1.0f;
-            val = float(xb->norm_low) * tq_c4_d64[tq_up2(xb->qs_low, lj)]
-                + QJL_SCALE_F / 64.0f * float(xb->rnorm_low) * sign;
+    if (base < 32) {
+        // hi segment: q8 — just scale * int8
+        const float d = float(xb->d_hi);
+        for (int i = 0; i < 16; i++) {
+            reg_f[i/4][i%4] = d * float(xb->qs_hi[base + i]);
         }
-        reg_f[i/4][i%4] = val;
+    } else if (base < 64) {
+        // mid segment: 3-bit centroids + QJL
+        const float norm = float(xb->norm_mid);
+        const float qjl_pos = QJL_SCALE_F / 32.0f * float(xb->rnorm_mid);
+        const float qjl_neg = -qjl_pos;
+        float sc[8];
+        for (int k = 0; k < 8; k++) sc[k] = norm * tq_c8_d32[k];
+        const int mbase = base - 32;
+        for (int i = 0; i < 16; i++) {
+            int mj = mbase + i;
+            float qjl = ((xb->signs_mid[mj/8] >> (mj%8)) & 1) ? qjl_pos : qjl_neg;
+            reg_f[i/4][i%4] = sc[tq_up3(xb->qs_mid, mj)] + qjl;
+        }
+    } else {
+        // low segment: 2-bit centroids + QJL
+        const float norm = float(xb->norm_low);
+        const float qjl_pos = QJL_SCALE_F / 64.0f * float(xb->rnorm_low);
+        const float qjl_neg = -qjl_pos;
+        float sc[4];
+        for (int k = 0; k < 4; k++) sc[k] = norm * tq_c4_d64[k];
+        const int lbase = base - 64;
+        for (int i = 0; i < 16; i++) {
+            int lj = lbase + i;
+            float qjl = ((xb->signs_low[lj/8] >> (lj%8)) & 1) ? qjl_pos : qjl_neg;
+            reg_f[i/4][i%4] = sc[tq_up2(xb->qs_low, lj)] + qjl;
+        }
     }
     reg = (type4x4) reg_f;
 }
@@ -1014,23 +1105,39 @@ void dequantize_tql(device const block_tql * xb, short il, thread type4x4 & reg)
 
 template <typename type4>
 void dequantize_tq3j_t4(device const block_tq3j * xb, short il, thread type4 & reg) {
-    float norm = float(xb->norm);
-    float qjl  = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+    const half norm = xb->norm;
+    const half qjl_pos = half(QJL_SCALE_F / 128.0f) * xb->rnorm;
+    const int base = il * 4;
+    // Bulk read index + sign bytes
+    const int bp = base * 3;
+    const int bi = bp / 8;
+    uint32_t bits = (uint32_t)xb->qs[bi] | ((uint32_t)xb->qs[bi+1] << 8);
+    int sh = bp % 8;
+    uint8_t signs = xb->signs[base / 8];
+    int sb = base % 8;
     for (int i = 0; i < 4; i++) {
-        int j = il * 4 + i;
-        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
-        reg[i] = norm * tq_c8_d128[tq_up3(xb->qs, j)] + qjl * sign;
+        int idx = (bits >> sh) & 7;
+        sh += 3;
+        if (sh >= 16) { bits = (uint32_t)xb->qs[bi + 2] | ((uint32_t)xb->qs[bi+3] << 8); sh -= 16; }
+        half qjl = ((signs >> (sb + i)) & 1) ? qjl_pos : -qjl_pos;
+        reg[i] = half(norm * half(tq_c8_d128[idx])) + qjl;
     }
 }
 
 template <typename type4>
 void dequantize_tq2j_t4(device const block_tq2j * xb, short il, thread type4 & reg) {
-    float norm = float(xb->norm);
-    float qjl  = QJL_SCALE_F / 128.0f * float(xb->rnorm);
+    const half norm = xb->norm;
+    const half qjl_pos = half(QJL_SCALE_F / 128.0f) * xb->rnorm;
+    const int base = il * 4;
+    uint8_t idx_byte = xb->qs[base / 4];
+    uint8_t signs = xb->signs[base / 8];
+    int sb = base % 8;
+    int ib = (base % 4) * 2;
     for (int i = 0; i < 4; i++) {
-        int j = il * 4 + i;
-        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
-        reg[i] = norm * tq_c4_d128[tq_up2(xb->qs, j)] + qjl * sign;
+        int idx = (idx_byte >> ib) & 3;
+        ib += 2;
+        half qjl = ((signs >> (sb + i)) & 1) ? qjl_pos : -qjl_pos;
+        reg[i] = half(norm * half(tq_c4_d128[idx])) + qjl;
     }
 }
 
@@ -5844,77 +5951,45 @@ void kernel_flash_attn_ext_impl(
         }
     }
 
-    // TurboQuant: FWHT-transform Q in shared memory for FWHT-space dot product
-    // For TQ3J/TQ2J: full FWHT-DK on Q
-    // For TQL: FWHT-32 on [0:31], FWHT-32 on [32:63], FWHT-64 on [64:127]
+    // TurboQuant: FWHT-transform Q using barrier-free simd_shuffle
     if (FC_flash_attn_ext_tq_fwht) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
+            threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
             if (iq1 + j < args.ne01) {
-                threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
-                // FWHT using SIMD-parallel butterfly
-                for (short step = 1; step < DK; step *= 2) {
-                    for (short idx = tiisg; idx < DK/2; idx += NW) {
-                        short i = (idx / step) * (2 * step) + (idx % step);
-                        half a = sq_j[i];
-                        half b = sq_j[i + step];
-                        sq_j[i]        = a + b;
-                        sq_j[i + step] = a - b;
-                    }
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
-                }
-                const half s = half(1.0f / sqrt(float(DK)));
-                for (short i = tiisg; i < DK; i += NW) {
-                    sq_j[i] *= s;
-                }
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+                // Load 4 values per thread, FWHT-128 via simd_shuffle, write back
+                half4 qv = {sq_j[tiisg*4], sq_j[tiisg*4+1], sq_j[tiisg*4+2], sq_j[tiisg*4+3]};
+                tq_fwht128_simd(qv, tiisg);
+                sq_j[tiisg*4]   = qv[0];
+                sq_j[tiisg*4+1] = qv[1];
+                sq_j[tiisg*4+2] = qv[2];
+                sq_j[tiisg*4+3] = qv[3];
             }
         }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (FC_flash_attn_ext_tq_fwht_split) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
+            threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
             if (iq1 + j < args.ne01) {
-                threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
-                // FWHT-32 on [0:31]
-                for (short step = 1; step < 32; step *= 2) {
-                    for (short idx = tiisg; idx < 16; idx += NW) {
-                        short i = (idx / step) * (2 * step) + (idx % step);
-                        half a = sq_j[i]; half b = sq_j[i + step];
-                        sq_j[i] = a + b; sq_j[i + step] = a - b;
-                    }
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
-                }
-                half s32 = half(1.0f / sqrt(32.0f));
-                for (short i = tiisg; i < 32; i += NW) sq_j[i] *= s32;
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+                // FWHT-32 on [0:31]: thread holds 1 value
+                half v0 = (tiisg < 32) ? tq_fwht32_simd(sq_j[tiisg], tiisg) : sq_j[tiisg];
+                sq_j[tiisg] = v0;
                 // FWHT-32 on [32:63]
-                for (short step = 1; step < 32; step *= 2) {
-                    for (short idx = tiisg; idx < 16; idx += NW) {
-                        short i = (idx / step) * (2 * step) + (idx % step);
-                        half a = sq_j[32+i]; half b = sq_j[32+i+step];
-                        sq_j[32+i] = a + b; sq_j[32+i+step] = a - b;
-                    }
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
-                }
-                for (short i = tiisg; i < 32; i += NW) sq_j[32+i] *= s32;
-                simdgroup_barrier(mem_flags::mem_threadgroup);
-                // FWHT-64 on [64:127]
-                for (short step = 1; step < 64; step *= 2) {
-                    for (short idx = tiisg; idx < 32; idx += NW) {
-                        short i = (idx / step) * (2 * step) + (idx % step);
-                        half a = sq_j[64+i]; half b = sq_j[64+i+step];
-                        sq_j[64+i] = a + b; sq_j[64+i+step] = a - b;
-                    }
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
-                }
-                half s64 = half(1.0f / sqrt(64.0f));
-                for (short i = tiisg; i < 64; i += NW) sq_j[64+i] *= s64;
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+                half v1 = (tiisg < 32) ? tq_fwht32_simd(sq_j[32 + tiisg], tiisg) : sq_j[32 + tiisg];
+                sq_j[32 + tiisg] = v1;
+                // FWHT-64 on [64:127]: thread holds 2 values
+                half lo0 = sq_j[64 + tiisg*2];
+                half lo1 = sq_j[64 + tiisg*2 + 1];
+                tq_fwht64_simd(lo0, lo1, tiisg);
+                sq_j[64 + tiisg*2]     = lo0;
+                sq_j[64 + tiisg*2 + 1] = lo1;
             }
         }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     // zero out
@@ -6767,60 +6842,35 @@ kernel void kernel_flash_attn_ext_vec(
         }
     }
 
-    // TurboQuant: FWHT-transform Q in shared memory
+    // TurboQuant: FWHT-transform Q using barrier-free simd_shuffle
     if (FC_flash_attn_ext_vec_tq_fwht) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup half * sq_h = (threadgroup half *) sq4;
-        for (short step = 1; step < DK; step *= 2) {
-            for (short idx = tiisg; idx < DK/2; idx += NW) {
-                short i = (idx / step) * (2 * step) + (idx % step);
-                half a = sq_h[i], b = sq_h[i + step];
-                sq_h[i] = a + b; sq_h[i + step] = a - b;
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
+        if (iq1 < args.ne01) {
+            half4 qv = {sq_h[tiisg*4], sq_h[tiisg*4+1], sq_h[tiisg*4+2], sq_h[tiisg*4+3]};
+            tq_fwht128_simd(qv, tiisg);
+            sq_h[tiisg*4]   = qv[0];
+            sq_h[tiisg*4+1] = qv[1];
+            sq_h[tiisg*4+2] = qv[2];
+            sq_h[tiisg*4+3] = qv[3];
         }
-        half s = half(1.0f / sqrt(float(DK)));
-        for (short i = tiisg; i < DK; i += NW) sq_h[i] *= s;
-        simdgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (FC_flash_attn_ext_vec_tq_fwht_split) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup half * sq_h = (threadgroup half *) sq4;
-        // FWHT-32 on [0:31]
-        for (short step = 1; step < 32; step *= 2) {
-            for (short idx = tiisg; idx < 16; idx += NW) {
-                short i = (idx / step) * (2 * step) + (idx % step);
-                half a = sq_h[i], b = sq_h[i + step];
-                sq_h[i] = a + b; sq_h[i + step] = a - b;
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
+        if (iq1 < args.ne01) {
+            half v0 = (tiisg < 32) ? tq_fwht32_simd(sq_h[tiisg], tiisg) : sq_h[tiisg];
+            sq_h[tiisg] = v0;
+            half v1 = (tiisg < 32) ? tq_fwht32_simd(sq_h[32 + tiisg], tiisg) : sq_h[32 + tiisg];
+            sq_h[32 + tiisg] = v1;
+            half lo0 = sq_h[64 + tiisg*2];
+            half lo1 = sq_h[64 + tiisg*2 + 1];
+            tq_fwht64_simd(lo0, lo1, tiisg);
+            sq_h[64 + tiisg*2]     = lo0;
+            sq_h[64 + tiisg*2 + 1] = lo1;
         }
-        half s32 = half(1.0f / sqrt(32.0f));
-        for (short i = tiisg; i < 32; i += NW) sq_h[i] *= s32;
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        // FWHT-32 on [32:63]
-        for (short step = 1; step < 32; step *= 2) {
-            for (short idx = tiisg; idx < 16; idx += NW) {
-                short i = (idx / step) * (2 * step) + (idx % step);
-                half a = sq_h[32+i], b = sq_h[32+i+step];
-                sq_h[32+i] = a + b; sq_h[32+i+step] = a - b;
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-        }
-        for (short i = tiisg; i < 32; i += NW) sq_h[32+i] *= s32;
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        // FWHT-64 on [64:127]
-        for (short step = 1; step < 64; step *= 2) {
-            for (short idx = tiisg; idx < 32; idx += NW) {
-                short i = (idx / step) * (2 * step) + (idx % step);
-                half a = sq_h[64+i], b = sq_h[64+i+step];
-                sq_h[64+i] = a + b; sq_h[64+i+step] = a - b;
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-        }
-        half s64 = half(1.0f / sqrt(64.0f));
-        for (short i = tiisg; i < 64; i += NW) sq_h[64+i] *= s64;
-        simdgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     // zero out so
