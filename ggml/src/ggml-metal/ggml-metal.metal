@@ -8438,6 +8438,19 @@ kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_flex_metal, 8,
 template [[host_name("kernel_flash_attn_ext_tqk_flex_nosplit_q4_0_dk128_dv128")]]
 kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_flex_metal, 8, dequantize_flex, block_q4_0, 2, dequantize_q4_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 
+// TQK_FLEX FA: split + q8_0 V
+template [[host_name("kernel_flash_attn_ext_tqk_flex_q8_0_dk128_dv128")]]
+kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_flex_metal, 8, dequantize_flex, block_q8_0, 2, dequantize_q8_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// TQK_FLEX FA: non-split + q8_0 V
+template [[host_name("kernel_flash_attn_ext_tqk_flex_nosplit_q8_0_dk128_dv128")]]
+kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_flex_metal, 8, dequantize_flex, block_q8_0, 2, dequantize_q8_0, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
+
+// TQK_FLEX FA: split + q4_1 V
+template [[host_name("kernel_flash_attn_ext_tqk_flex_q4_1_dk128_dv128")]]
+kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_flex_metal, 8, dequantize_flex, block_q4_1, 2, dequantize_q4_1, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true>;
+// TQK_FLEX FA: non-split + q4_1 V
+template [[host_name("kernel_flash_attn_ext_tqk_flex_nosplit_q4_1_dk128_dv128")]]
+kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_flex_metal, 8, dequantize_flex, block_q4_1, 2, dequantize_q4_1, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, true>;
 
 // TQK 2hi_1lo (tqk2_sjj) FA
 template [[host_name("kernel_flash_attn_ext_tqk2_sjj_f16_dk128_dv128")]]        kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_tqk_2hi_1lo, 8, dequantize_2hi_1lo_had, half4x4, 1, dequantize_f16, 128, 128, OP_FLASH_ATTN_EXT_NQPSG, OP_FLASH_ATTN_EXT_NCPSG, false, true, true>;

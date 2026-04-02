@@ -4,7 +4,14 @@
 
 **Backend support**: TurboQuant Flex (`tqk_flex`, `tqk` auto per-layer) is supported on **CPU and Metal only**. CUDA is not yet supported — using `-ctk tqk_flex` or `-ctk tqk` with TQFC configs on a CUDA build will error at context creation. The fixed TQ types (tqk4_sj, tqk3_sjj, etc.) have CUDA support.
 
-**V cache**: TurboQuant currently compresses **only the K cache**. The V cache can be f16, q8_0, q4_0, q4_1, or tqv4_0. All results below use f16 V. tqv4_0 (`GGML_TYPE_TQV_HAD_MSE4`) applies the same FWHT rotation + 4-bit Lloyd-Max MSE quantization to V vectors (4.125 bpv). FA templates exist for TQ K + tqv4_0 V combinations but V compression was not evaluated in this work.
+**V cache**: TurboQuant currently compresses **only the K cache**. All results below use f16 V.
+
+Supported V cache types with TQ K:
+- **f16**: ✅ full support, recommended
+- **q4_0**: ✅ works (Metal FA template exists at d=128)
+- **tqv4_0**: ✅ works for fixed TQ K types, untested with flex K. tqv4_0 (`GGML_TYPE_TQV_HAD_MSE4`) applies FWHT + 4-bit Lloyd-Max MSE to V vectors (4.125 bpv).
+- **q8_0**: ❌ no Metal FA template at d=128 (upstream llama.cpp limitation, not TQ-specific). Produces garbage with TQ K. Runtime guard auto-switches to f16 V.
+- **q4_1**: ❌ same as q8_0
 
 For a model where K and V are the same size, the total KV cache savings are:
 - K: 16.0 → 6.21 bpv (2.6x compression)

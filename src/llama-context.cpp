@@ -2993,7 +2993,7 @@ llama_context * llama_init_from_model(
                 params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
                 LLAMA_LOG_INFO("%s: TurboQuant detected — forcing flash_attn on\n", __func__);
             }
-            // TQ K supports f16, q8_0, q4_1, q4_0, and tqv V cache types
+            // TQ K supports f16, q8_0, q4_0, q4_1, and tqv V cache types
             if ((tq_k || tq_flex_k) && !tq_v &&
                 params.type_v != GGML_TYPE_F16 &&
                 params.type_v != GGML_TYPE_Q8_0 &&
