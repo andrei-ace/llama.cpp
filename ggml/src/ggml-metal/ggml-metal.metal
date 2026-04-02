@@ -1161,19 +1161,23 @@ void dequantize_tq2j_t4(device const block_tq2j * xb_struct, short il, thread ty
     }
 }
 
-// TQ3/TQ2: MSE-only dequant (no QJL) — for V cache
-// Block layout: [norm:fp16(2)][qs:BLK_DIM*3/8] or [norm:fp16(2)][qs:BLK_DIM/4]
+// TQ3/TQ2: MSE-only dequant for V cache — FULL reconstruction with inverse FWHT
+// V values must be in original space (no dot-product trick for weighted sums)
+// Each call reconstructs the entire block then outputs 16 (or 4) values for il
 template <short BLK_DIM = 128, typename type4x4>
 void dequantize_tq3(device const block_tq3 * xb_struct, short il, thread type4x4 & reg) {
     device const uint8_t * xb = (device const uint8_t *)xb_struct;
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
+
+    // Reconstruct all BLK_DIM values then inverse FWHT
+    float buf[BLK_DIM];
+    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up3(qs, j)];
+    tq_fwht_metal(buf, BLK_DIM);
+
     float4x4 reg_f;
-    for (int i = 0; i < 16; i++) {
-        int j = il * 16 + i;
-        reg_f[i/4][i%4] = norm * c[tq_up3(qs, j)];
-    }
+    for (int i = 0; i < 16; i++) reg_f[i/4][i%4] = buf[il * 16 + i];
     reg = (type4x4) reg_f;
 }
 
@@ -1183,11 +1187,13 @@ void dequantize_tq2(device const block_tq2 * xb_struct, short il, thread type4x4
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
+
+    float buf[BLK_DIM];
+    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up2(qs, j)];
+    tq_fwht_metal(buf, BLK_DIM);
+
     float4x4 reg_f;
-    for (int i = 0; i < 16; i++) {
-        int j = il * 16 + i;
-        reg_f[i/4][i%4] = norm * c[tq_up2(qs, j)];
-    }
+    for (int i = 0; i < 16; i++) reg_f[i/4][i%4] = buf[il * 16 + i];
     reg = (type4x4) reg_f;
 }
 
@@ -1197,10 +1203,12 @@ void dequantize_tq3_t4(device const block_tq3 * xb_struct, short il, thread type
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
-    for (int i = 0; i < 4; i++) {
-        int j = il * 4 + i;
-        reg[i] = norm * c[tq_up3(qs, j)];
-    }
+
+    float buf[BLK_DIM];
+    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up3(qs, j)];
+    tq_fwht_metal(buf, BLK_DIM);
+
+    for (int i = 0; i < 4; i++) reg[i] = buf[il * 4 + i];
 }
 
 template <short BLK_DIM = 128, typename type4>
@@ -1209,10 +1217,12 @@ void dequantize_tq2_t4(device const block_tq2 * xb_struct, short il, thread type
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
-    for (int i = 0; i < 4; i++) {
-        int j = il * 4 + i;
-        reg[i] = norm * c[tq_up2(qs, j)];
-    }
+
+    float buf[BLK_DIM];
+    for (int j = 0; j < BLK_DIM; j++) buf[j] = norm * c[tq_up2(qs, j)];
+    tq_fwht_metal(buf, BLK_DIM);
+
+    for (int i = 0; i < 4; i++) reg[i] = buf[il * 4 + i];
 }
 
 template <typename type4>
