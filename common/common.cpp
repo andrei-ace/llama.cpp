@@ -1141,6 +1141,73 @@ static void common_init_sampler_from_model(
     get_float(llama_model_meta_key_str(LLAMA_MODEL_META_KEY_SAMPLING_MIROSTAT_ETA),    sparams.mirostat_eta,    common_params_sampling_config::COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA);
 }
 
+bool common_tq_load_perms(const std::string & perms_file, ggml_type type_k) {
+    FILE * fp = fopen(perms_file.c_str(), "rb");
+    if (!fp) {
+        LOG_ERR("%s: failed to open TQ perms file '%s'\n", __func__, perms_file.c_str());
+        return false;
+    }
+    uint32_t magic, version, nl, nh, hd, pr, nlm;
+    fread(&magic, 4, 1, fp); fread(&version, 4, 1, fp);
+    fread(&nl, 4, 1, fp); fread(&nh, 4, 1, fp); fread(&hd, 4, 1, fp);
+    fread(&pr, 4, 1, fp); fread(&nlm, 4, 1, fp);
+
+    if (magic != 0x54515045 || version != 1) {
+        LOG_ERR("%s: invalid TQ perms file\n", __func__);
+        fclose(fp); return false;
+    }
+
+    // Skip layer map and permutations
+    fseek(fp, nlm * 4 + (size_t)nl * nh * hd, SEEK_CUR);
+
+    // Read TQLT section (per-layer type recommendations)
+    uint32_t type_magic = 0;
+    if (fread(&type_magic, 4, 1, fp) == 1 && type_magic == 0x54514C54) {
+        uint32_t n_entries = 0;
+        fread(&n_entries, 4, 1, fp);
+        std::vector<int32_t> layer_types(n_entries);
+        std::vector<float> outlier_pcts(n_entries);
+        fread(layer_types.data(), sizeof(int32_t), n_entries, fp);
+        fread(outlier_pcts.data(), sizeof(float), n_entries, fp);
+        tq_set_layer_type_recommendations(layer_types.data(), outlier_pcts.data(), (int)n_entries);
+        LOG_INF("%s: loaded per-layer type recommendations (%u layers)\n", __func__, n_entries);
+
+        // Read optional TQFC section (per-layer flex configs)
+        uint32_t fc_magic = 0;
+        if (fread(&fc_magic, 4, 1, fp) == 1 && fc_magic == 0x43465154) {
+            uint32_t n_fc = 0;
+            fread(&n_fc, 4, 1, fp);
+            std::vector<tq_flex_layer_config_t> lc(n_fc);
+            fread(lc.data(), sizeof(tq_flex_layer_config_t), n_fc, fp);
+            tq_flex_set_layer_configs(lc.data(), (int)n_fc);
+
+            int max_blk = 0;
+            for (uint32_t i = 0; i < n_fc; i++) {
+                if (lc[i].block_bytes > max_blk) max_blk = lc[i].block_bytes;
+            }
+            for (uint32_t i = 0; i < n_fc; i++) {
+                if (lc[i].hi_bits > 0) {
+                    tq_flex_configure(lc[i].split, lc[i].hi_bits, lc[i].lo_bits,
+                                     lc[i].hi_res_bits, lc[i].qjl_hi, lc[i].qjl_lo);
+                    break;
+                }
+            }
+            ggml_type_set_size(GGML_TYPE_TQK_FLEX, (size_t)max_blk);
+            tq_flex_set_block_bytes_override(max_blk);
+
+            int n_flex = 0;
+            for (uint32_t i = 0; i < n_fc; i++) if (lc[i].hi_bits > 0) n_flex++;
+            LOG_INF("%s: loaded per-layer flex configs (%u layers, %d flex, max %d bytes/block)\n",
+                    __func__, n_fc, n_flex, max_blk);
+        }
+    } else {
+        LOG_ERR("%s: no TQLT section in perms file\n", __func__);
+        fclose(fp); return false;
+    }
+    fclose(fp);
+    return true;
+}
+
 struct common_init_result::impl {
     impl() = default;
     ~impl() = default;
@@ -1248,86 +1315,10 @@ common_init_result::common_init_result(common_params & params) :
     }
 
     // TurboQuant auto: pre-load per-layer type recommendations before context creation
-    // so the KV cache allocator can use per-layer types
     if (cparams.type_k == GGML_TYPE_TQK_AUTO && !params.tq_perms_file.empty()) {
-        FILE * fp = fopen(params.tq_perms_file.c_str(), "rb");
-        if (!fp) {
-            LOG_ERR("%s: -ctk tqk requires --tq-perms file, failed to open '%s'\n",
-                    __func__, params.tq_perms_file.c_str());
+        if (!common_tq_load_perms(params.tq_perms_file, cparams.type_k)) {
             return;
         }
-        uint32_t magic, version, nl, nh, hd, pr, nlm;
-        fread(&magic,   4, 1, fp);
-        fread(&version, 4, 1, fp);
-        fread(&nl,      4, 1, fp);
-        fread(&nh,      4, 1, fp);
-        fread(&hd,      4, 1, fp);
-        fread(&pr,      4, 1, fp);
-        fread(&nlm,     4, 1, fp);
-
-        if (magic != 0x54515045 || version != 1) {
-            LOG_ERR("%s: invalid TQ perms file for auto mode\n", __func__);
-            fclose(fp);
-            return;
-        }
-        // Skip layer map and permutations to reach type section
-        fseek(fp, nlm * 4 + (size_t)nl * nh * hd, SEEK_CUR);
-
-        uint32_t type_magic = 0;
-        if (fread(&type_magic, 4, 1, fp) == 1 && type_magic == 0x54514C54) {
-            uint32_t n_entries = 0;
-            fread(&n_entries, 4, 1, fp);
-            std::vector<int32_t> layer_type_indices(n_entries);
-            std::vector<float>   layer_outlier_pcts(n_entries);
-            fread(layer_type_indices.data(), sizeof(int32_t), n_entries, fp);
-            fread(layer_outlier_pcts.data(), sizeof(float), n_entries, fp);
-
-            tq_set_layer_type_recommendations(
-                layer_type_indices.data(), layer_outlier_pcts.data(), (int)n_entries);
-
-            LOG_INF("%s: pre-loaded per-layer type recommendations (%u layers) for -ctk tqk\n",
-                    __func__, n_entries);
-
-            // Read optional TQFC section (per-layer flex configs)
-            uint32_t fc_magic = 0;
-            if (fread(&fc_magic, 4, 1, fp) == 1 && fc_magic == 0x43465154) { // "TQFC"
-                uint32_t n_fc = 0;
-                fread(&n_fc, 4, 1, fp);
-                std::vector<tq_flex_layer_config_t> lc(n_fc);
-                fread(lc.data(), sizeof(tq_flex_layer_config_t), n_fc, fp);
-                tq_flex_set_layer_configs(lc.data(), (int)n_fc);
-
-                // Configure flex with the largest block size across all layers
-                int max_blk = 0;
-                for (uint32_t i = 0; i < n_fc; i++) {
-                    if (lc[i].block_bytes > max_blk) max_blk = lc[i].block_bytes;
-                }
-                // Set default flex config from first flex layer (for FA pipeline compilation)
-                for (uint32_t i = 0; i < n_fc; i++) {
-                    if (lc[i].hi_bits > 0) {
-                        tq_flex_configure(lc[i].split, lc[i].hi_bits, lc[i].lo_bits,
-                                         lc[i].hi_res_bits, lc[i].qjl_hi, lc[i].qjl_lo);
-                        break;
-                    }
-                }
-                ggml_type_set_size(GGML_TYPE_TQK_FLEX, (size_t)max_blk);
-                // Force flex block_bytes to max so quantize/dequant stride matches type_size
-                tq_flex_configure(lc[0].split, lc[0].hi_bits, lc[0].lo_bits,
-                                  lc[0].hi_res_bits, lc[0].qjl_hi, lc[0].qjl_lo);
-                // Re-set to max after configure (configure computes from config, we need the max)
-                tq_flex_set_block_bytes_override(max_blk);
-
-                int n_flex = 0;
-                for (uint32_t i = 0; i < n_fc; i++) if (lc[i].hi_bits > 0) n_flex++;
-                LOG_INF("%s: loaded per-layer flex configs (%u layers, %d flex, max %d bytes/block)\n",
-                        __func__, n_fc, n_flex, max_blk);
-            }
-        } else {
-            LOG_ERR("%s: -ctk tqk requires per-layer type recommendations in perms file (not found)\n", __func__);
-            fclose(fp);
-            return;
-        }
-        fclose(fp);
     } else if (cparams.type_k == GGML_TYPE_TQK_AUTO && params.tq_perms_file.empty()) {
         LOG_ERR("%s: -ctk tqk requires --tq-perms file with per-layer type recommendations\n", __func__);
         return;

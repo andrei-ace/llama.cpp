@@ -351,6 +351,7 @@ struct cmd_params {
     bool                             no_warmup;
     output_formats                   output_format;
     output_formats                   output_format_stderr;
+    std::string                      tq_perms_file;
 };
 
 static const cmd_params cmd_params_defaults = {
@@ -432,6 +433,7 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -ub, --ubatch-size <n>                      (default: %s)\n", join(cmd_params_defaults.n_ubatch, ",").c_str());
     printf("  -ctk, --cache-type-k <t>                    (default: %s)\n", join(transform_to_str(cmd_params_defaults.type_k, ggml_type_name), ",").c_str());
     printf("  -ctv, --cache-type-v <t>                    (default: %s)\n", join(transform_to_str(cmd_params_defaults.type_v, ggml_type_name), ",").c_str());
+    printf("  --tq-perms <file>                           TurboQuant perms file (for -ctk tqk/tqk_flex)\n");
     printf("  -t, --threads <n>                           (default: %s)\n", join(cmd_params_defaults.n_threads, ",").c_str());
     printf("  -C, --cpu-mask <hex,hex>                    (default: %s)\n", join(cmd_params_defaults.cpu_mask, ",").c_str());
     printf("  --cpu-strict <0|1>                          (default: %s)\n", join(cmd_params_defaults.cpu_strict, ",").c_str());
@@ -524,6 +526,12 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     }
     if (s == "tqv4_0") {
         return GGML_TYPE_TQV_HAD_MSE4;
+    }
+    if (s == "tqk_flex") {
+        return GGML_TYPE_TQK_FLEX;
+    }
+    if (s == "tqk") {
+        return GGML_TYPE_TQK_AUTO;
     }
 
     return GGML_TYPE_COUNT;
@@ -653,6 +661,9 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                     break;
                 }
                 params.type_k.insert(params.type_k.end(), types.begin(), types.end());
+            } else if (arg == "--tq-perms") {
+                if (++i >= argc) { invalid_param = true; break; }
+                params.tq_perms_file = argv[i];
             } else if (arg == "-ctv" || arg == "--cache-type-v") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -2195,6 +2206,20 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             prev_inst = &inst;
+        }
+
+        // Load TQ perms before context creation (needed for -ctk tqk / tqk_flex)
+        if (!params.tq_perms_file.empty() &&
+            (inst.type_k == GGML_TYPE_TQK_FLEX || inst.type_k == GGML_TYPE_TQK_AUTO)) {
+            static bool tq_perms_loaded = false;
+            if (!tq_perms_loaded) {
+                if (!common_tq_load_perms(params.tq_perms_file, inst.type_k)) {
+                    fprintf(stderr, "%s: error: failed to load TQ perms from '%s'\n", __func__, params.tq_perms_file.c_str());
+                    llama_model_free(lmodel);
+                    return 1;
+                }
+                tq_perms_loaded = true;
+            }
         }
 
         llama_context * ctx = llama_init_from_model(lmodel, inst.to_llama_cparams());

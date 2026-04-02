@@ -864,6 +864,11 @@ using common_init_result_ptr = std::unique_ptr<common_init_result>;
 
 common_init_result_ptr common_init_from_params(common_params & params);
 
+// Load TQ perms file and configure flex/per-layer types.
+// Call before llama_init_from_model when using -ctk tqk or tqk_flex.
+// Returns true on success.
+bool common_tq_load_perms(const std::string & perms_file, ggml_type type_k);
+
 struct llama_model_params     common_model_params_to_llama  (      common_params & params);
 struct llama_context_params   common_context_params_to_llama(const common_params & params);
 struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const cpu_params & params);
