@@ -63,42 +63,114 @@ Available tables: d=32 (2-10 bit), d=96 (1-8 bit), d=128 (3-8 bit). Stored in `t
 
 ## Usage
 
+There are two modes of operation:
+
+### Mode 1: Per-layer adaptive (`-ctk tqk`) — recommended
+
+Calibrate once, then run. Each layer gets its own quantization config based on outlier concentration.
+
 ```bash
 # Step 1: Calibrate (once per model architecture)
-llama-tq-calibrate -m model.gguf -f ptb.txt -o perms.bin \
+llama-tq-calibrate -m model.gguf -f ptb/ptb.train.txt -o perms.bin \
     --flex-extreme 1:9:4:1:1 \
     --flex-high 1:9:4:1:1 \
     --flex-moderate 0:6:0:0:0 \
     --flex-threshold-high 70
 
-# Step 2: Run
+# Step 2: Run inference
 llama-completion -m model.gguf -p "prompt" \
     -ctk tqk --tq-perms perms.bin -ngl 99
+
+# Step 2b: Run perplexity
+llama-perplexity -m model.gguf -f wikitext-2-raw/wiki.test.raw --chunks 20 \
+    -ctk tqk --tq-perms perms.bin -ngl 99
+
+# Step 2c: Run benchmark
+llama-bench -m model.gguf --tq-perms perms.bin \
+    -ctk f16,q8_0,tqk -ctv f16 -fa 1 -ngl 99
 ```
 
-### Flex spec format
+The perms file contains:
+- Channel permutations (which channels are outliers, per layer per head)
+- Per-layer type recommendations (TQLT section)
+- Per-layer flex configs (TQFC section) — the bit widths, split/non-split, QJL flags
+
+### Mode 2: Uniform flex (`-ctk tqk_flex`) — for experimentation
+
+Apply the same quantization config to all layers. Useful for sweeping bit widths.
+
+```bash
+# First calibrate to get channel permutations (without --flex-* flags)
+llama-tq-calibrate -m model.gguf -f ptb/ptb.train.txt -o perms.bin
+
+# Then experiment with different configs
+llama-perplexity -m model.gguf -f wikitext-2-raw/wiki.test.raw --chunks 3 \
+    -ctk tqk_flex --tq-split --tq-hi-bits 9 --tq-lo-bits 3 --tq-qjl hi \
+    --tq-perms perms.bin -ngl 99
+
+# Non-split mode (uniform bits on all 128 channels)
+llama-perplexity -m model.gguf -f wikitext-2-raw/wiki.test.raw --chunks 3 \
+    -ctk tqk_flex --tq-hi-bits 8 --tq-qjl none \
+    --tq-perms perms.bin -ngl 99
+```
+
+`tqk_flex` flags:
+- `--tq-split` — enable 32/96 channel split (requires calibrated perms)
+- `--tq-hi-bits N` — MSE bits for outlier channels (split) or all channels (non-split)
+- `--tq-lo-bits N` — MSE bits for regular channels (split only)
+- `--tq-qjl none|hi|both` — QJL correction: none, on outliers only, or on both subsets
+- `--tq-perms FILE` — calibration file (required for split, optional for non-split)
+
+### Flex spec format (for `--flex-*` calibrate flags)
 
 `split:hi_bits:lo_bits:qjl_hi:qjl_lo`
 
 | Field | Description |
 |-------|-------------|
 | split | 1 = split into 32 outlier + 96 regular channels, 0 = uniform 128-dim |
-| hi_bits | bits per outlier channel (split) or per channel (non-split) |
-| lo_bits | bits per regular channel (split only, ignored if split=0) |
+| hi_bits | bits per outlier channel (split) or per channel (non-split). Range: 2-10 |
+| lo_bits | bits per regular channel (split only, ignored if split=0). Range: 1-8 |
 | qjl_hi | 1 = QJL on outliers (split) or all channels (non-split) |
 | qjl_lo | 1 = per-element QJL on regular channels (split only) |
 
+Examples:
+- `1:9:4:1:1` — split, 9-bit hi, 4-bit lo, QJL on both (6.75 bpv)
+- `1:10:5:1:0` — split, 10-bit hi, 5-bit lo, QJL on hi only (6.88 bpv)
+- `0:6:0:0:0` — non-split, 6-bit uniform, no QJL (6.125 bpv)
+- `0:5:0:1:0` — non-split, 5-bit uniform, QJL (6.25 bpv)
+
 ### Calibration
 
-The calibrate tool captures K vectors during a short inference pass and identifies which channels have the highest variance per layer per head. This produces:
+The calibrate tool (`llama-tq-calibrate`) runs a short inference pass on calibration text and measures per-channel K variance:
 
-- **Channel permutations**: per-layer, per-head reordering that puts outlier channels first
-- **Outlier concentration %**: how much variance the top-32 channels hold
-- **Per-layer flex configs** (TQFC section): which quantization scheme each layer gets
+```bash
+llama-tq-calibrate -m model.gguf -f ptb/ptb.train.txt -o perms.bin [options]
+
+Options:
+  --pre-rope        Capture pre-RoPE K (default, required)
+  --metric var      Outlier = highest variance (default)
+  -n 4096           Calibration tokens (default: 4096)
+  -c 512            Context size (default: 512)
+
+Per-layer flex (appends TQFC section):
+  --flex-extreme S:H:L:JH:JL   Config for extreme layers (>threshold_extreme)
+  --flex-high    S:H:L:JH:JL   Config for high outlier layers (>threshold_high)
+  --flex-moderate S:H:L:JH:JL  Config for moderate/uniform layers
+  --flex-threshold-extreme N    % threshold for extreme (default: 90)
+  --flex-threshold-high N       % threshold for high (default: 60)
+```
+
+The output perms file contains:
+1. **Header**: magic, version, n_layers, n_heads, head_dim, pre_rope flag
+2. **Channel permutations**: per-layer, per-head reordering (outlier channels first)
+3. **TQLT section**: per-layer type recommendations (ggml_type per layer)
+4. **TQFC section** (optional): per-layer flex configs (split, bits, QJL per layer)
 
 **Calibration is architecture-specific, not weight-specific.** The outlier channel structure is determined by the model architecture (attention weight matrices), not the precision of those weights. Perms calibrated on fp16, q8_0, or q4_k_m of the same model produce 96%+ identical outlier sets.
 
-This means you can calibrate on a small quantized model and use the perms on any quantization of that model. The only requirement is **pre-RoPE capture** — post-RoPE calibration produces garbage because RoPE rotates the channel variance structure.
+This means you can calibrate on any quantization of a model and use the perms on all other quantizations. The only requirement is **pre-RoPE capture** (the default) — post-RoPE calibration produces garbage because RoPE rotates the channel variance structure.
+
+**Calibration data**: Use Penn Treebank (PTB) train set or similar. Do NOT calibrate on the evaluation data (wikitext). ~4096 tokens is sufficient.
 
 ## How We Found the Best Configuration
 
