@@ -1,4 +1,4 @@
-# TurboQuant Flex: KV Cache Quantization
+# TurboQuant: Adaptive K Cache Compression
 
 > **Experimental.** This is a research prototype — unoptimized, API subject to change, tested on CPU and Apple Metal only. Token generation is ~50% slower than f16 KV due to unoptimized vec FA kernels. CUDA is not supported. Use for experimentation and memory-constrained deployments, not production latency-sensitive workloads.
 
