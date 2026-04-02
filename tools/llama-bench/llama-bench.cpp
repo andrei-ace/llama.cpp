@@ -483,6 +483,15 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "iq4_nl") {
         return GGML_TYPE_IQ4_NL;
     }
+    if (s == "tql") {
+        return GGML_TYPE_TQL;
+    }
+    if (s == "tq3j") {
+        return GGML_TYPE_TQ3J;
+    }
+    if (s == "tq2j") {
+        return GGML_TYPE_TQ2J;
+    }
 
     return GGML_TYPE_COUNT;
 }
