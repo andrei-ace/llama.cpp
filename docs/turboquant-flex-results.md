@@ -2,7 +2,9 @@
 
 ## Scope
 
-TurboQuant currently compresses **only the K cache**. The V cache remains at f16 in all results below.
+**Backend support**: TurboQuant Flex (`tqk_flex`, `tqk` auto per-layer) is supported on **CPU and Metal only**. CUDA is not yet supported — using `-ctk tqk_flex` or `-ctk tqk` with TQFC configs on a CUDA build will error at context creation. The fixed TQ types (tqk4_sj, tqk3_sjj, etc.) have CUDA support.
+
+**V cache**: TurboQuant currently compresses **only the K cache**. The V cache can be f16, q8_0, q4_0, q4_1, or tqv4_0. All results below use f16 V.
 
 For a model where K and V are the same size, the total KV cache savings are:
 - K: 16.0 → 6.21 bpv (2.6x compression)

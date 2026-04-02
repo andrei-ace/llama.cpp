@@ -2977,6 +2977,14 @@ llama_context * llama_init_from_model(
                           (params.type_k == GGML_TYPE_TQK_5R3_SJ);
         const bool tq_v = (params.type_v >= GGML_TYPE_TQK_5HI_3LO_HAD && params.type_v <= GGML_TYPE_TQK_6HI_3LO_HAD_JJ_D256) ||
                           (params.type_v == GGML_TYPE_TQK_5R3_SJ);
+        // TQK_FLEX / TQK_AUTO with TQFC: only supported on CPU and Metal (no CUDA kernels yet)
+#ifdef GGML_USE_CUDA
+        if (tq_flex_k) {
+            LLAMA_LOG_ERROR("%s: TQK_FLEX is not supported on CUDA — use CPU or Metal backend\n", __func__);
+            return nullptr;
+        }
+#endif
+
         if (tq_flex_k || tq_k || tq_v) {
             if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
                 LLAMA_LOG_WARN("%s: TurboQuant without flash_attn — using CPU mul_mat path (slower)\n", __func__);
@@ -2985,8 +2993,12 @@ llama_context * llama_init_from_model(
                 params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
                 LLAMA_LOG_INFO("%s: TurboQuant detected — forcing flash_attn on\n", __func__);
             }
-            // TQ K types only support f16 or tqv4_0 V cache (FA templates exist only for these combos)
-            if ((tq_k || tq_flex_k) && !tq_v && params.type_v != GGML_TYPE_F16) {
+            // TQ K supports f16, q8_0, q4_1, q4_0, and tqv V cache types
+            if ((tq_k || tq_flex_k) && !tq_v &&
+                params.type_v != GGML_TYPE_F16 &&
+                params.type_v != GGML_TYPE_Q8_0 &&
+                params.type_v != GGML_TYPE_Q4_0 &&
+                params.type_v != GGML_TYPE_Q4_1) {
                 LLAMA_LOG_WARN("%s: TurboQuant K with %s V is not supported — switching V to f16\n",
                         __func__, ggml_type_name(params.type_v));
                 params.type_v = GGML_TYPE_F16;
