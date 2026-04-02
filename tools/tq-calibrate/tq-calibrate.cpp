@@ -175,6 +175,36 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "       --metric mag      Outlier = highest mean |K|\n");
     fprintf(stderr, "       --metric both     Outlier = |K| × std(K)\n");
     fprintf(stderr, "       --stats FILE      Dump per-channel stats CSV (for visualization)\n");
+    fprintf(stderr, "\n  Per-layer flex config (appends TQFC section to perms file):\n");
+    fprintf(stderr, "       --flex-extreme S:H:L:JH:JL   Config for extreme layers (>90%% outlier)\n");
+    fprintf(stderr, "       --flex-high    S:H:L:JH:JL   Config for high layers (60-90%%)\n");
+    fprintf(stderr, "       --flex-moderate S:H:L:JH:JL  Config for moderate layers (<60%%)\n");
+    fprintf(stderr, "       --flex-all     S:H:L:JH:JL   Config for all layers (overrides tiers)\n");
+    fprintf(stderr, "       --flex-threshold-extreme N    Outlier %% threshold for extreme (default: 90)\n");
+    fprintf(stderr, "       --flex-threshold-high N       Outlier %% threshold for high (default: 60)\n");
+    fprintf(stderr, "  Format: split:hi_bits:lo_bits:qjl_hi:qjl_lo  e.g. 1:9:3:1:1\n");
+}
+
+struct flex_spec {
+    int split, hi, lo, qjl_hi, qjl_lo;
+    bool set;
+};
+
+static flex_spec parse_flex_spec(const char * s) {
+    flex_spec f = {0, 0, 0, 0, 0, false};
+    if (sscanf(s, "%d:%d:%d:%d:%d", &f.split, &f.hi, &f.lo, &f.qjl_hi, &f.qjl_lo) == 5) {
+        f.set = true;
+    }
+    return f;
+}
+
+static int compute_flex_block_bytes(const flex_spec & f) {
+    int sz = 0;
+    if (f.split) { sz+=4; sz+=(32*f.hi+7)/8; sz+=(96*f.lo+7)/8;
+        if(f.qjl_hi) sz+=6; if(f.qjl_lo) sz+=14;
+    } else { sz+=2; sz+=(128*f.hi+7)/8;
+        if(f.qjl_hi) sz+=18; }
+    return sz;
 }
 
 int main(int argc, char ** argv) {
@@ -182,6 +212,8 @@ int main(int argc, char ** argv) {
     int n_tokens_max = 4096, n_ctx = 512, n_gpu_layers = 99;
     bool pre_rope = true;
     calib_metric_t metric = METRIC_VAR;
+    flex_spec flex_extreme = {}, flex_high = {}, flex_moderate = {}, flex_all = {};
+    float threshold_extreme = 90.0f, threshold_high = 60.0f;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -194,6 +226,12 @@ int main(int argc, char ** argv) {
         else if (arg == "--pre-rope") pre_rope = true;
         else if (arg == "--post-rope") pre_rope = false;
         else if (arg == "--stats" && i+1 < argc) stats_path = argv[++i];
+        else if (arg == "--flex-extreme"  && i+1 < argc) flex_extreme  = parse_flex_spec(argv[++i]);
+        else if (arg == "--flex-high"     && i+1 < argc) flex_high     = parse_flex_spec(argv[++i]);
+        else if (arg == "--flex-moderate" && i+1 < argc) flex_moderate = parse_flex_spec(argv[++i]);
+        else if (arg == "--flex-all"      && i+1 < argc) flex_all      = parse_flex_spec(argv[++i]);
+        else if (arg == "--flex-threshold-extreme" && i+1 < argc) threshold_extreme = std::atof(argv[++i]);
+        else if (arg == "--flex-threshold-high"    && i+1 < argc) threshold_high    = std::atof(argv[++i]);
         else if (arg == "--metric" && i+1 < argc) {
             std::string m = argv[++i];
             if (m == "mag") metric = METRIC_MAG;
@@ -442,12 +480,74 @@ int main(int argc, char ** argv) {
         fwrite(layer_types.data(), sizeof(int32_t), n_kv_layers, fp);
         fwrite(outlier_pct.data(), sizeof(float), n_kv_layers, fp);
     }
+    // Append TQFC section if any --flex-* flags were given
+    bool has_flex = flex_all.set || flex_extreme.set || flex_high.set || flex_moderate.set;
+    if (has_flex) {
+        // Override TQLT types to TQK_FLEX for flex layers
+        // Rewind to rewrite TQLT types
+        fseek(fp, 28 + n_layer*4 + (size_t)nl*nh*hd + 4 + 4, SEEK_SET); // after TQLT magic+n_entries
+
+        struct { int8_t split, hi, lo, res, qjl_hi, qjl_lo; int16_t blk; } tqfc[512];
+        int max_blk = 0;
+        for (int l = 0; l < n_kv_layers; l++) {
+            float pct = outlier_pct[l];
+            flex_spec fs = {};
+            if (flex_all.set) {
+                fs = flex_all;
+            } else if (pct >= threshold_extreme && flex_extreme.set) {
+                fs = flex_extreme;
+            } else if (pct >= threshold_high && flex_high.set) {
+                fs = flex_high;
+            } else if (flex_moderate.set) {
+                fs = flex_moderate;
+            }
+            if (fs.set) {
+                layer_types[l] = 70; // GGML_TYPE_TQK_FLEX
+                int blk = compute_flex_block_bytes(fs);
+                tqfc[l] = {(int8_t)fs.split, (int8_t)fs.hi, (int8_t)fs.lo, 0,
+                           (int8_t)fs.qjl_hi, (int8_t)fs.qjl_lo, (int16_t)blk};
+                if (blk > max_blk) max_blk = blk;
+            } else {
+                // f16 layer
+                layer_types[l] = 1; // GGML_TYPE_F16
+                tqfc[l] = {0, 0, 0, 0, 0, 0, 0};
+            }
+            fwrite(&layer_types[l], sizeof(int32_t), 1, fp);
+        }
+        fwrite(outlier_pct.data(), sizeof(float), n_kv_layers, fp);
+
+        // Write TQFC section
+        uint32_t fc_magic = 0x43465154; // "TQFC"
+        uint32_t fc_n = n_kv_layers;
+        fwrite(&fc_magic, 4, 1, fp);
+        fwrite(&fc_n, 4, 1, fp);
+        fwrite(tqfc, 8, n_kv_layers, fp);
+
+        // Print flex summary
+        int n_flex_layers = 0;
+        float total_bpv = 0;
+        for (int l = 0; l < n_kv_layers; l++) {
+            if (tqfc[l].hi > 0) {
+                n_flex_layers++;
+                total_bpv += tqfc[l].blk * 8.0f / 128.0f;
+                const char * tier = outlier_pct[l] >= threshold_extreme ? "extreme" :
+                                    outlier_pct[l] >= threshold_high ? "high" : "moderate";
+                fprintf(stderr, "  layer %2d (%s, %.0f%%): split=%d %d/%d qjl=%d/%d -> %dB (%.2f bpv)\n",
+                        l, tier, outlier_pct[l], tqfc[l].split, tqfc[l].hi, tqfc[l].lo,
+                        tqfc[l].qjl_hi, tqfc[l].qjl_lo, tqfc[l].blk, tqfc[l].blk*8.0f/128.0f);
+            } else {
+                total_bpv += 16.0f;
+            }
+        }
+        float avg_bpv = total_bpv / n_kv_layers;
+        fprintf(stderr, "TQFC: %d flex + %d f16 layers, avg %.2f bpv, max block %d bytes\n",
+                n_flex_layers, n_kv_layers - n_flex_layers, avg_bpv, max_blk);
+    }
+
     fclose(fp);
 
-    size_t type_section_size = 4 + 4 + n_kv_layers * sizeof(int32_t) + n_kv_layers * sizeof(float);
-    fprintf(stderr, "saved %zu bytes to '%s' (%d layers × %d heads × %d ch, %s)\n",
-            28 + n_layer*4 + all_perms.size() + type_section_size, output_path.c_str(),
-            n_kv_layers, n_kv_heads, head_dim, pre_rope ? "pre-RoPE" : "post-RoPE");
+    fprintf(stderr, "saved to '%s' (%d layers × %d heads × %d ch, %s)\n",
+            output_path.c_str(), n_kv_layers, n_kv_heads, head_dim, pre_rope ? "pre-RoPE" : "post-RoPE");
     fprintf(stderr, "outlier channels per head: %d (top %d%%)\n", n_hi, 100*n_hi/head_dim);
 
     // Print per-layer type recommendation summary

@@ -12,6 +12,9 @@ extern "C" {
     void tq_free_outlier_masks(void);
     int  tq_get_layer_type(int layer);
     int  tq_get_n_recommended_layers(void);
+    int  tq_flex_get_layer_block_bytes(int layer);
+    int  tq_flex_get_n_layer_configs(void);
+    void ggml_type_set_size(enum ggml_type type, size_t size);
 }
 
 #include <algorithm>

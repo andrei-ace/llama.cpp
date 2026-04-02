@@ -9,6 +9,8 @@
 #include "vec.h"
 #include "quants.h"
 
+extern "C" void tq_flex_activate_layer(int layer);
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -4931,7 +4933,7 @@ static void ggml_compute_forward_set_rows_f32(
         int layer = -1; int is_k = 1;
         if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
         else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
-        if (layer >= 0) { tq_set_current_layer(layer, is_k); }
+        if (layer >= 0) { tq_set_current_layer(layer, is_k); tq_flex_activate_layer(layer); }
     }
 
     const int ith = params->ith;
@@ -8203,7 +8205,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         while (v_root->view_src) v_root = v_root->view_src;
         sscanf(v_root->name, "cache_v_l%d", &tq_v_layer);
 
-        if (tq_k_layer >= 0) { tq_set_current_layer(tq_k_layer, 1); }
+        if (tq_k_layer >= 0) { tq_set_current_layer(tq_k_layer, 1); tq_flex_activate_layer(tq_k_layer); }
     }
 
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)

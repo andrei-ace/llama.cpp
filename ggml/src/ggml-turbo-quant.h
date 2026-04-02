@@ -78,6 +78,22 @@ int  tq_flex_get_lo_bits(void);
 int  tq_flex_get_hi_res_bits(void);
 int  tq_flex_get_qjl_hi(void);
 int  tq_flex_get_qjl_lo(void);
+void tq_flex_set_block_bytes_override(int bytes);
+
+// Per-layer flex configs (TQFC section in perms file)
+// Each layer can have its own (split, hi_bits, lo_bits, hi_res_bits, qjl_hi, qjl_lo).
+// Call tq_flex_set_layer_config for each layer, then tq_flex_activate_layer(layer)
+// before any quantize/dequant/vec_dot to swap the globals.
+typedef struct {
+    int8_t split, hi_bits, lo_bits, hi_res_bits, qjl_hi, qjl_lo;
+    int16_t block_bytes; // computed from the above
+} tq_flex_layer_config_t;
+
+void tq_flex_set_layer_configs(const tq_flex_layer_config_t * configs, int n_layers);
+void tq_flex_activate_layer(int layer); // swap globals to this layer's config
+int  tq_flex_get_layer_block_bytes(int layer); // block size for a specific layer
+int  tq_flex_get_n_layer_configs(void);
+const tq_flex_layer_config_t * tq_flex_get_layer_config(int layer);
 
 #ifdef __cplusplus
 }

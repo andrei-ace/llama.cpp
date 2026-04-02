@@ -3596,6 +3596,58 @@ int tq_flex_get_lo_bits(void) { return tq_flex_lo_bits; }
 int tq_flex_get_hi_res_bits(void) { return tq_flex_hi_res_bits; }
 int tq_flex_get_qjl_hi(void) { return tq_flex_qjl_hi; }
 int tq_flex_get_qjl_lo(void) { return tq_flex_qjl_lo; }
+void tq_flex_set_block_bytes_override(int bytes) { tq_flex_block_bytes = bytes; }
+
+// Per-layer flex configs
+static tq_flex_layer_config_t * tq_flex_layer_configs = NULL;
+static int tq_flex_n_layer_configs = 0;
+
+static int tq_flex_compute_block_bytes(int split, int hi, int lo, int res, int qjl_hi, int qjl_lo) {
+    int sz = 0;
+    if (split) { sz+=4; sz+=(32*hi+7)/8; sz+=(96*lo+7)/8;
+        if(res>0) sz+=2+(32*res+7)/8; if(qjl_hi) sz+=6; if(qjl_lo) sz+=14;
+    } else { sz+=2; sz+=(128*hi+7)/8;
+        if(res>0) sz+=2+(128*res+7)/8; if(qjl_hi) sz+=18; }
+    return sz;
+}
+
+void tq_flex_set_layer_configs(const tq_flex_layer_config_t * configs, int n_layers) {
+    free(tq_flex_layer_configs);
+    tq_flex_layer_configs = (tq_flex_layer_config_t *)malloc(n_layers * sizeof(tq_flex_layer_config_t));
+    memcpy(tq_flex_layer_configs, configs, n_layers * sizeof(tq_flex_layer_config_t));
+    tq_flex_n_layer_configs = n_layers;
+}
+
+void tq_flex_activate_layer(int layer) {
+    if (!tq_flex_layer_configs || layer < 0 || layer >= tq_flex_n_layer_configs) return;
+    const tq_flex_layer_config_t * c = &tq_flex_layer_configs[layer];
+    static int last_layer = -1;
+    if (layer != last_layer) {
+        fprintf(stderr, "tq_flex_activate(%d): %d/%d blk=%d\n",
+                layer, c->hi_bits, c->lo_bits, c->block_bytes);
+        last_layer = layer;
+    }
+    tq_flex_split = c->split;
+    tq_flex_hi_bits = c->hi_bits;
+    tq_flex_lo_bits = c->lo_bits;
+    tq_flex_hi_res_bits = c->hi_res_bits;
+    tq_flex_qjl_hi = c->qjl_hi;
+    tq_flex_qjl_lo = c->qjl_lo;
+    // Keep block_bytes at max (set by ggml_type_set_size) for stride consistency.
+    // Smaller configs write fewer bytes but stride must match type_size.
+}
+
+int tq_flex_get_layer_block_bytes(int layer) {
+    if (!tq_flex_layer_configs || layer < 0 || layer >= tq_flex_n_layer_configs) return tq_flex_block_bytes;
+    return tq_flex_layer_configs[layer].block_bytes;
+}
+
+int tq_flex_get_n_layer_configs(void) { return tq_flex_n_layer_configs; }
+
+const tq_flex_layer_config_t * tq_flex_get_layer_config(int layer) {
+    if (!tq_flex_layer_configs || layer < 0 || layer >= tq_flex_n_layer_configs) return NULL;
+    return &tq_flex_layer_configs[layer];
+}
 
 int tq_flex_map_to_real_type(void) {
     // Map flex config to a known ggml_type for FA dispatch.

@@ -17,6 +17,16 @@ extern "C" {
     int  tq_flex_get_block_bytes(void);
     int  tq_flex_map_to_real_type(void);
     void ggml_type_set_size(enum ggml_type type, size_t size);
+
+    typedef struct {
+        int8_t split, hi_bits, lo_bits, hi_res_bits, qjl_hi, qjl_lo;
+        int16_t block_bytes;
+    } tq_flex_layer_config_t;
+    void tq_flex_set_layer_configs(const tq_flex_layer_config_t * configs, int n_layers);
+    void tq_flex_activate_layer(int layer);
+    int  tq_flex_get_layer_block_bytes(int layer);
+    int  tq_flex_get_n_layer_configs(void);
+    void tq_flex_set_block_bytes_override(int bytes);
 }
 
 #include <algorithm>
@@ -1277,6 +1287,41 @@ common_init_result::common_init_result(common_params & params) :
 
             LOG_INF("%s: pre-loaded per-layer type recommendations (%u layers) for -ctk tqk\n",
                     __func__, n_entries);
+
+            // Read optional TQFC section (per-layer flex configs)
+            uint32_t fc_magic = 0;
+            if (fread(&fc_magic, 4, 1, fp) == 1 && fc_magic == 0x43465154) { // "TQFC"
+                uint32_t n_fc = 0;
+                fread(&n_fc, 4, 1, fp);
+                std::vector<tq_flex_layer_config_t> lc(n_fc);
+                fread(lc.data(), sizeof(tq_flex_layer_config_t), n_fc, fp);
+                tq_flex_set_layer_configs(lc.data(), (int)n_fc);
+
+                // Configure flex with the largest block size across all layers
+                int max_blk = 0;
+                for (uint32_t i = 0; i < n_fc; i++) {
+                    if (lc[i].block_bytes > max_blk) max_blk = lc[i].block_bytes;
+                }
+                // Set default flex config from first flex layer (for FA pipeline compilation)
+                for (uint32_t i = 0; i < n_fc; i++) {
+                    if (lc[i].hi_bits > 0) {
+                        tq_flex_configure(lc[i].split, lc[i].hi_bits, lc[i].lo_bits,
+                                         lc[i].hi_res_bits, lc[i].qjl_hi, lc[i].qjl_lo);
+                        break;
+                    }
+                }
+                ggml_type_set_size(GGML_TYPE_TQK_FLEX, (size_t)max_blk);
+                // Force flex block_bytes to max so quantize/dequant stride matches type_size
+                tq_flex_configure(lc[0].split, lc[0].hi_bits, lc[0].lo_bits,
+                                  lc[0].hi_res_bits, lc[0].qjl_hi, lc[0].qjl_lo);
+                // Re-set to max after configure (configure computes from config, we need the max)
+                tq_flex_set_block_bytes_override(max_blk);
+
+                int n_flex = 0;
+                for (uint32_t i = 0; i < n_fc; i++) if (lc[i].hi_bits > 0) n_flex++;
+                LOG_INF("%s: loaded per-layer flex configs (%u layers, %d flex, max %d bytes/block)\n",
+                        __func__, n_fc, n_flex, max_blk);
+            }
         } else {
             LOG_ERR("%s: -ctk tqk requires per-layer type recommendations in perms file (not found)\n", __func__);
             fclose(fp);
@@ -1289,9 +1334,10 @@ common_init_result::common_init_result(common_params & params) :
     }
 
     // TQK_FLEX: configure runtime parameters and patch type_size before context creation
-    // Also configure flex when -ctk tqk is used with flex flags (per-layer mode)
-    if (cparams.type_k == GGML_TYPE_TQK_FLEX ||
-        (cparams.type_k == GGML_TYPE_TQK_AUTO && params.tq_flex_hi_bits > 0)) {
+    // Skip if TQFC per-layer configs were already loaded from perms file
+    if ((cparams.type_k == GGML_TYPE_TQK_FLEX ||
+         (cparams.type_k == GGML_TYPE_TQK_AUTO && params.tq_flex_hi_bits > 0))
+        && tq_flex_get_n_layer_configs() == 0) {
         tq_flex_configure(
             params.tq_flex_split,
             params.tq_flex_hi_bits,

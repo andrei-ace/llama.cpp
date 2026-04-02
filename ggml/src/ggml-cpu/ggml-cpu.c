@@ -18,6 +18,7 @@
 // TurboQuant per-head context for vec_dot channel permutation
 extern void tq_set_current_layer(int layer, int is_k);
 extern void tq_set_current_head(int head);
+extern void tq_flex_activate_layer(int layer);
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
@@ -1333,6 +1334,7 @@ static void ggml_compute_forward_mul_mat_one_chunk(
                     int layer = -1;
                     if (sscanf(root->name, "cache_k_l%d", &layer) == 1) {
                         tq_set_current_layer(layer, 1);
+                        tq_flex_activate_layer(layer);
                         tq_set_current_head((int)i02);
                     }
                 }

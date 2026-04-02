@@ -12955,8 +12955,9 @@ kernel void kernel_get_rows_flex(
     const int iblk = tiitg;
     if (iblk >= args.ne00 / 128) return;
 
+    const int blk_stride = args.nb01 / (args.ne00 / 128); // per-head stride in src
     device const uint8_t * raw = (device const uint8_t *)
-        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk * flex_block_bytes;
+        ((const device char *)src0 + i03*args.nb03 + i02*args.nb02 + r*args.nb01) + iblk * blk_stride;
 
     device float * out = dst + (i10*args.ne00 + iblk*128) + i02*args.nb2/4 + i03*args.nb3/4;
 
@@ -13176,7 +13177,8 @@ kernel void kernel_set_rows_flex(
     if (iblk >= args.nk0) return;
 
     device const float * src = (device const float *)((const device char *)src0 + i*args.nb01 + i02*args.nb02 + i03*args.nb03) + iblk * 128;
-    device uint8_t * blk = (device uint8_t *)((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk * flex_block_bytes;
+    const int blk_stride = args.nb1 / args.nk0; // per-head stride in dst (may be > flex_block_bytes for per-layer flex)
+    device uint8_t * blk = (device uint8_t *)((device char *)dst + i1*args.nb1 + i02*args.nb2 + i03*args.nb3) + iblk * blk_stride;
 
     if (flex_split) {
         // --- SPLIT MODE: 32 hi channels + 96 lo channels ---

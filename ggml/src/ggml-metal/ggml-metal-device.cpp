@@ -16,7 +16,11 @@ extern "C" {
     int tq_flex_get_hi_res_bits(void);
     int tq_flex_get_qjl_hi(void);
     int tq_flex_get_qjl_lo(void);
+    void tq_flex_activate_layer(int layer);
 }
+
+#include <cstring>
+#include <cstdlib>
 
 struct ggml_metal_device_deleter {
     void operator()(ggml_metal_device_t ctx) {
@@ -1383,7 +1387,13 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
         ggml_metal_cv_set_int32(cv, nsg,  FC_FLASH_ATTN_EXT + 22);
 
         // TQK_FLEX: set runtime config as function constants (shared base FC_TQ_FLEX)
+        // Per-layer: activate this layer's config first (layer extracted from K tensor name)
         if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+            int layer = 0;
+            const char * lp = strstr(op->src[1]->name, "_l");
+            if (lp) layer = atoi(lp + 2);
+            tq_flex_activate_layer(layer);
+
             ggml_metal_cv_set_bool (cv, tq_flex_get_split(),       FC_TQ_FLEX + 0);
             ggml_metal_cv_set_int32(cv, tq_flex_get_hi_bits(),     FC_TQ_FLEX + 1);
             ggml_metal_cv_set_int32(cv, tq_flex_get_lo_bits(),     FC_TQ_FLEX + 2);
@@ -1470,6 +1480,11 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         ggml_metal_cv_set_int32(cv, nwg,  FC_FLASH_ATTN_EXT_VEC + 23);
 
         if (op->src[1]->type == GGML_TYPE_TQK_FLEX) {
+            int layer = 0;
+            const char * lp = strstr(op->src[1]->name, "_l");
+            if (lp) layer = atoi(lp + 2);
+            tq_flex_activate_layer(layer);
+
             ggml_metal_cv_set_bool (cv, tq_flex_get_split(),       FC_TQ_FLEX + 0);
             ggml_metal_cv_set_int32(cv, tq_flex_get_hi_bits(),     FC_TQ_FLEX + 1);
             ggml_metal_cv_set_int32(cv, tq_flex_get_lo_bits(),     FC_TQ_FLEX + 2);

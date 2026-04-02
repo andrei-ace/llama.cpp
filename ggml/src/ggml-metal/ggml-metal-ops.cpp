@@ -20,6 +20,7 @@ extern "C" {
     int tq_flex_get_qjl_hi(void);
     int tq_flex_get_qjl_lo(void);
     int tq_flex_get_block_bytes(void);
+    void tq_flex_activate_layer(int layer);
 }
 #include <cmath>
 
@@ -1440,6 +1441,8 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
 
             // TQK_FLEX: pass runtime config as extra constant arguments (indices 7-13)
             if (dst_type == GGML_TYPE_TQK_FLEX) {
+                // Per-layer flex: activate this layer's config before reading globals
+                tq_flex_activate_layer(layer_idx);
                 int32_t fhi   = tq_flex_get_hi_bits();
                 int32_t flo   = tq_flex_get_lo_bits();
                 int32_t fres  = tq_flex_get_hi_res_bits();
