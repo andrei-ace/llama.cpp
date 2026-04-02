@@ -1506,11 +1506,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     if (params.cache_type_k == GGML_TYPE_TQL  || params.cache_type_k == GGML_TYPE_TQ3J ||
         params.cache_type_k == GGML_TYPE_TQ2J || params.cache_type_k == GGML_TYPE_TQ3  ||
         params.cache_type_k == GGML_TYPE_TQ2  || params.cache_type_v == GGML_TYPE_TQ3  ||
-        params.cache_type_v == GGML_TYPE_TQ2 ||
-        params.cache_type_k == GGML_TYPE_TQ3J_256 || params.cache_type_k == GGML_TYPE_TQ2J_256 ||
-        params.cache_type_k == GGML_TYPE_TQ3J_512 || params.cache_type_k == GGML_TYPE_TQ2J_512 ||
-        params.cache_type_v == GGML_TYPE_TQ3_256  || params.cache_type_v == GGML_TYPE_TQ2_256  ||
-        params.cache_type_v == GGML_TYPE_TQ3_512  || params.cache_type_v == GGML_TYPE_TQ2_512) {
+        params.cache_type_v == GGML_TYPE_TQ2) {
         cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     }
     cparams.cb_eval           = params.cb_eval;

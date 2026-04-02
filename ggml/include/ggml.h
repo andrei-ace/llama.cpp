@@ -431,17 +431,9 @@ extern "C" {
         GGML_TYPE_TQL     = 41, // TurboQuant Layered: 32×q8 + 32×(3mse+1qjl) + 64×(2mse+1qjl)
         GGML_TYPE_TQ3J    = 42, // TurboQuant 3-bit MSE + 1-bit QJL (FWHT-128)
         GGML_TYPE_TQ2J    = 43, // TurboQuant 2-bit MSE + 1-bit QJL (FWHT-128)
-        GGML_TYPE_TQ3     = 44, // TurboQuant 3-bit MSE only (FWHT-128, for V cache)
-        GGML_TYPE_TQ2     = 45, // TurboQuant 2-bit MSE only (FWHT-128, for V cache)
-        GGML_TYPE_TQ3J_256 = 46, // TurboQuant 3-bit MSE + 1-bit QJL (FWHT-256)
-        GGML_TYPE_TQ2J_256 = 47, // TurboQuant 2-bit MSE + 1-bit QJL (FWHT-256)
-        GGML_TYPE_TQ3_256  = 48, // TurboQuant 3-bit MSE only (FWHT-256, for V cache)
-        GGML_TYPE_TQ2_256  = 49, // TurboQuant 2-bit MSE only (FWHT-256, for V cache)
-        GGML_TYPE_TQ3J_512 = 50, // TurboQuant 3-bit MSE + 1-bit QJL (FWHT-512)
-        GGML_TYPE_TQ2J_512 = 51, // TurboQuant 2-bit MSE + 1-bit QJL (FWHT-512)
-        GGML_TYPE_TQ3_512  = 52, // TurboQuant 3-bit MSE only (FWHT-512, for V cache)
-        GGML_TYPE_TQ2_512  = 53, // TurboQuant 2-bit MSE only (FWHT-512, for V cache)
-        GGML_TYPE_COUNT   = 54,
+        GGML_TYPE_TQ3     = 44, // TurboQuant 3-bit MSE only (for V cache)
+        GGML_TYPE_TQ2     = 45, // TurboQuant 2-bit MSE only (for V cache)
+        GGML_TYPE_COUNT   = 46,
     };
 
     // precision

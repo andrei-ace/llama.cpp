@@ -2638,11 +2638,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
                 op->src[1]->type == GGML_TYPE_TQL  || op->src[1]->type == GGML_TYPE_TQ3J ||
                 op->src[1]->type == GGML_TYPE_TQ2J || op->src[1]->type == GGML_TYPE_TQ3  ||
                 op->src[1]->type == GGML_TYPE_TQ2  || op->src[2]->type == GGML_TYPE_TQ3  ||
-                op->src[2]->type == GGML_TYPE_TQ2 ||
-                op->src[1]->type == GGML_TYPE_TQ3J_256 || op->src[1]->type == GGML_TYPE_TQ2J_256 ||
-                op->src[1]->type == GGML_TYPE_TQ3J_512 || op->src[1]->type == GGML_TYPE_TQ2J_512 ||
-                op->src[2]->type == GGML_TYPE_TQ3_256  || op->src[2]->type == GGML_TYPE_TQ2_256  ||
-                op->src[2]->type == GGML_TYPE_TQ3_512  || op->src[2]->type == GGML_TYPE_TQ2_512);
+                op->src[2]->type == GGML_TYPE_TQ2);
 
     //GGML_ASSERT(ggml_are_same_shape (src1, src2));
     GGML_ASSERT(ne11 == ne21);

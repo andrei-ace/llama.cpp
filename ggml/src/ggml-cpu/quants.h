@@ -116,31 +116,6 @@ void quantize_row_tq2_ref (const float * GGML_RESTRICT x, void * GGML_RESTRICT y
 void dequantize_row_tq2   (const void  * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 void ggml_vec_dot_tq2_f32 (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 
-void quantize_row_tq3j_256_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq3j_256(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq3j_256_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-void quantize_row_tq2j_256_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq2j_256(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq2j_256_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-void quantize_row_tq3_256_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq3_256(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq3_256_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-void quantize_row_tq2_256_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq2_256(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq2_256_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-void quantize_row_tq3j_512_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq3j_512(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq3j_512_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-void quantize_row_tq2j_512_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq2j_512(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq2j_512_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-void quantize_row_tq3_512_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq3_512(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq3_512_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-void quantize_row_tq2_512_ref(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
-void dequantize_row_tq2_512(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-void ggml_vec_dot_tq2_512_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
-
 #ifdef __cplusplus
 }
 #endif

@@ -1,30 +1,6 @@
 #include "llama-kv-cache.h"
 
 #include "llama-impl.h"
-
-// TurboQuant: resolve virtual type → concrete type by head dimension
-static ggml_type tq_resolve_type(ggml_type type, int head_dim) {
-    switch (type) {
-        case GGML_TYPE_TQ3J:
-            if (head_dim == 256) return GGML_TYPE_TQ3J_256;
-            if (head_dim >= 512) return GGML_TYPE_TQ3J_512;
-            return GGML_TYPE_TQ3J;
-        case GGML_TYPE_TQ2J:
-            if (head_dim == 256) return GGML_TYPE_TQ2J_256;
-            if (head_dim >= 512) return GGML_TYPE_TQ2J_512;
-            return GGML_TYPE_TQ2J;
-        case GGML_TYPE_TQ3:
-            if (head_dim == 256) return GGML_TYPE_TQ3_256;
-            if (head_dim >= 512) return GGML_TYPE_TQ3_512;
-            return GGML_TYPE_TQ3;
-        case GGML_TYPE_TQ2:
-            if (head_dim == 256) return GGML_TYPE_TQ2_256;
-            if (head_dim >= 512) return GGML_TYPE_TQ2_512;
-            return GGML_TYPE_TQ2;
-        default:
-            return type;
-    }
-}
 #include "llama-io.h"
 #include "llama-model.h"
 #include "llama-context.h"
@@ -36,6 +12,14 @@ static ggml_type tq_resolve_type(ggml_type type, int head_dim) {
 #include <limits>
 #include <map>
 #include <stdexcept>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+void tq_set_block_size(int head_dim);
+#ifdef __cplusplus
+}
+#endif
 
 static bool ggml_is_power_of_2(int n) {
     return (n & (n - 1)) == 0;
@@ -117,12 +101,8 @@ llama_kv_cache::llama_kv_cache(
     model(model), hparams(model.hparams), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type) {
 
-    // TurboQuant: resolve virtual type to concrete type based on head dimension
-    {
-        const int hd = (int)hparams.n_embd_head_k();
-        type_k = tq_resolve_type(type_k, hd);
-        type_v = tq_resolve_type(type_v, hd);
-    }
+    // TurboQuant: set block size to head dimension for FWHT-256/512
+    tq_set_block_size((int)hparams.n_embd_head_k());
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
