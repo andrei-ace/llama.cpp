@@ -1012,23 +1012,19 @@ void dequantize_tq3j(device const block_tq3j * xb, short il, thread type4x4 & re
 
     float4x4 reg_f;
     const int base = il * 16;
-    // Read 6 bytes of packed 3-bit indices for 16 values (16*3=48 bits = 6 bytes)
-    const int byte_off = (base * 3) / 8;
-    uint32_t bits0 = (uint32_t)xb->qs[byte_off] | ((uint32_t)xb->qs[byte_off+1] << 8) |
-                     ((uint32_t)xb->qs[byte_off+2] << 16) | ((uint32_t)xb->qs[byte_off+3] << 24);
-    uint32_t bits1 = (uint32_t)xb->qs[byte_off+4] | ((uint32_t)xb->qs[byte_off+5] << 8);
-    int sh = (base * 3) % 8;
-    // Read 2 bytes of signs
+    // Read 8 bytes for 16×3-bit indices (48 bits needed, start at bit base*3)
+    const int bp0 = base * 3;
+    const int bi0 = bp0 / 8;
+    // Use 64-bit to avoid UB with shifts >= 32
+    uint64_t bits = (uint64_t)xb->qs[bi0]   | ((uint64_t)xb->qs[bi0+1] << 8) |
+                    ((uint64_t)xb->qs[bi0+2] << 16) | ((uint64_t)xb->qs[bi0+3] << 24) |
+                    ((uint64_t)xb->qs[bi0+4] << 32) | ((uint64_t)xb->qs[bi0+5] << 40);
+    int sh = bp0 % 8;
     const uint16_t sign_bits = (uint16_t)xb->signs[base/8] | ((uint16_t)xb->signs[base/8 + 1] << 8);
 
     for (int i = 0; i < 16; i++) {
-        int idx;
-        int bpos = sh + i*3;
-        if (bpos < 32) {
-            idx = (bits0 >> bpos) & 7;
-        } else {
-            idx = ((bits0 >> bpos) | (bits1 << (32 - bpos))) & 7;
-        }
+        int idx = (int)((bits >> sh) & 7);
+        sh += 3;
         float qjl = (sign_bits >> i) & 1 ? qjl_pos : qjl_neg;
         reg_f[i/4][i%4] = sc[idx] + qjl;
     }
