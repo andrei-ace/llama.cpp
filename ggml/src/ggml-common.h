@@ -267,6 +267,45 @@ typedef struct {
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
 //
+// TurboQuant KV cache types (FWHT decorrelation + MSE centroids + QJL correction)
+//
+
+#define QK_TQL 128
+
+// TQL: 32×q8 + 32×(3mse+1qjl) + 64×(2mse+1qjl) = 5.125 bpv
+typedef struct {
+    ggml_half d_hi;          // q8 scale for hi 32
+    int8_t    qs_hi[32];     // q8 values
+    ggml_half norm_mid;      // L2 norm for mid 32
+    ggml_half rnorm_mid;     // QJL residual norm
+    uint8_t   qs_mid[12];   // 3-bit centroid indices (32×3=96 bits)
+    uint8_t   signs_mid[4]; // QJL signs (32 bits)
+    ggml_half norm_low;      // L2 norm for low 64
+    ggml_half rnorm_low;     // QJL residual norm
+    uint8_t   qs_low[16];   // 2-bit centroid indices (64×2=128 bits)
+    uint8_t   signs_low[8]; // QJL signs (64 bits)
+} block_tql;
+static_assert(sizeof(block_tql) == 82, "wrong tql block size");
+
+// TQ3J: FWHT-128 + 3-bit MSE + 1-bit QJL = 4.125 bpv
+typedef struct {
+    ggml_half norm;          // L2 norm
+    ggml_half rnorm;         // QJL residual norm
+    uint8_t   qs[48];       // 3-bit centroid indices (128×3=384 bits)
+    uint8_t   signs[16];    // QJL signs (128 bits)
+} block_tq3j;
+static_assert(sizeof(block_tq3j) == 68, "wrong tq3j block size");
+
+// TQ2J: FWHT-128 + 2-bit MSE + 1-bit QJL = 3.125 bpv
+typedef struct {
+    ggml_half norm;          // L2 norm
+    ggml_half rnorm;         // QJL residual norm
+    uint8_t   qs[32];       // 2-bit centroid indices (128×2=256 bits)
+    uint8_t   signs[16];    // QJL signs (128 bits)
+} block_tq2j;
+static_assert(sizeof(block_tq2j) == 52, "wrong tq2j block size");
+
+//
 // Super-block quantization structures
 //
 

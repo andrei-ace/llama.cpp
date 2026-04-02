@@ -898,6 +898,232 @@ void dequantize_iq4_xs(device const block_iq4_xs * xb, short il, thread type4x4 
     }
 }
 
+// ---------------------------------------------------------------------------
+// TurboQuant dequantize functions for Flash Attention
+// ---------------------------------------------------------------------------
+
+#define QJL_SCALE_F 1.2533141f
+
+// In-place FWHT (Walsh-Hadamard Transform), normalized, self-inverse
+static void tq_fwht_metal(thread float * x, int n) {
+    for (int step = 1; step < n; step *= 2) {
+        for (int i = 0; i < n; i += 2 * step) {
+            for (int j = 0; j < step; j++) {
+                float a = x[i + j], b = x[i + j + step];
+                x[i + j]        = a + b;
+                x[i + j + step] = a - b;
+            }
+        }
+    }
+    float s = 1.0f / sqrt((float)n);
+    for (int i = 0; i < n; i++) x[i] *= s;
+}
+
+static int tq_up3(device const uint8_t * q, int j) {
+    int bp = j * 3, bi = bp / 8, sh = bp % 8;
+    uint32_t val = (uint32_t)q[bi];
+    if (sh > 5) val |= (uint32_t)q[bi + 1] << 8;
+    return (int)((val >> sh) & 7);
+}
+
+static int tq_up2(device const uint8_t * q, int j) {
+    return (q[j / 4] >> (2 * (j % 4))) & 3;
+}
+
+// Centroid tables (same as CPU)
+constant float tq_c8_d32[8] = {
+    -0.3662682422f, -0.2324605670f, -0.1317560968f, -0.0428515156f,
+     0.0428515156f,  0.1317560968f,  0.2324605670f,  0.3662682422f,
+};
+constant float tq_c4_d64[4] = {
+    -0.1874968494f, -0.0565148688f,  0.0565148688f,  0.1874968494f,
+};
+constant float tq_c8_d128[8] = {
+    -0.1883971860f, -0.1181397670f, -0.0665856080f, -0.0216043106f,
+     0.0216043106f,  0.0665856080f,  0.1181397670f,  0.1883971860f,
+};
+constant float tq_c4_d128[4] = {
+    -0.1330415202f, -0.0399915952f, 0.0399915952f, 0.1330415202f,
+};
+
+// TQ3J dequant: FWHT-128 + 3-bit MSE + 1-bit QJL
+// block_tq3j = { norm(2), rnorm(2), qs[48], signs[16] } = 68 bytes, 128 values
+// nl_k = 128/16 = 8
+template <typename type4x4>
+void dequantize_tq3j(device const block_tq3j * xb, short il, thread type4x4 & reg) {
+    float norm  = xb->norm;
+    float rnorm = xb->rnorm;
+    float qjl_scale = QJL_SCALE_F / 128.0f * rnorm;
+
+    // Reconstruct all 128 FWHT coefficients
+    float buf[128];
+    for (int j = 0; j < 128; j++) {
+        float centroid_val = norm * tq_c8_d128[tq_up3(xb->qs, j)];
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        buf[j] = centroid_val + qjl_scale * sign;
+    }
+
+    // Inverse FWHT
+    tq_fwht_metal(buf, 128);
+
+    // Output 16 values for this il
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        reg_f[i/4][i%4] = buf[il * 16 + i];
+    }
+    reg = (type4x4) reg_f;
+}
+
+// TQ2J dequant: FWHT-128 + 2-bit MSE + 1-bit QJL
+// block_tq2j = { norm(2), rnorm(2), qs[32], signs[16] } = 52 bytes, 128 values
+// nl_k = 128/16 = 8
+template <typename type4x4>
+void dequantize_tq2j(device const block_tq2j * xb, short il, thread type4x4 & reg) {
+    float norm  = xb->norm;
+    float rnorm = xb->rnorm;
+    float qjl_scale = QJL_SCALE_F / 128.0f * rnorm;
+
+    float buf[128];
+    for (int j = 0; j < 128; j++) {
+        float centroid_val = norm * tq_c4_d128[tq_up2(xb->qs, j)];
+        float sign = ((xb->signs[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+        buf[j] = centroid_val + qjl_scale * sign;
+    }
+
+    tq_fwht_metal(buf, 128);
+
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        reg_f[i/4][i%4] = buf[il * 16 + i];
+    }
+    reg = (type4x4) reg_f;
+}
+
+// TQL dequant: layered 32×q8 + 32×(3mse+1qjl) + 64×(2mse+1qjl)
+// block_tql = 82 bytes, 128 values
+// nl_k = 128/16 = 8
+template <typename type4x4>
+void dequantize_tql(device const block_tql * xb, short il, thread type4x4 & reg) {
+    float out[128];
+
+    // hi: 32 dims, q8 + inverse FWHT-32
+    {
+        float d_hi = xb->d_hi;
+        float hi[32];
+        for (int j = 0; j < 32; j++) hi[j] = d_hi * (float)xb->qs_hi[j];
+        tq_fwht_metal(hi, 32);
+        for (int j = 0; j < 32; j++) out[j] = hi[j];
+    }
+
+    // mid: 32 dims, 3mse + qjl + inverse FWHT-32
+    {
+        float norm_mid  = xb->norm_mid;
+        float rnorm_mid = xb->rnorm_mid;
+        float qjl_scale = QJL_SCALE_F / 32.0f * rnorm_mid;
+        float mid[32];
+        for (int j = 0; j < 32; j++) {
+            float cval = norm_mid * tq_c8_d32[tq_up3(xb->qs_mid, j)];
+            float sign = ((xb->signs_mid[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+            mid[j] = cval + qjl_scale * sign;
+        }
+        tq_fwht_metal(mid, 32);
+        for (int j = 0; j < 32; j++) out[32 + j] = mid[j];
+    }
+
+    // low: 64 dims, 2mse + qjl + inverse FWHT-64
+    {
+        float norm_low  = xb->norm_low;
+        float rnorm_low = xb->rnorm_low;
+        float qjl_scale = QJL_SCALE_F / 64.0f * rnorm_low;
+        float lo[64];
+        for (int j = 0; j < 64; j++) {
+            float cval = norm_low * tq_c4_d64[tq_up2(xb->qs_low, j)];
+            float sign = ((xb->signs_low[j / 8] >> (j % 8)) & 1) ? 1.0f : -1.0f;
+            lo[j] = cval + qjl_scale * sign;
+        }
+        tq_fwht_metal(lo, 64);
+        for (int j = 0; j < 64; j++) out[64 + j] = lo[j];
+    }
+
+    float4x4 reg_f;
+    for (int i = 0; i < 16; i++) {
+        reg_f[i/4][i%4] = out[il * 16 + i];
+    }
+    reg = (type4x4) reg_f;
+}
+
+// TQ vec dequant: produce 4 values at a time (for vec FA kernels)
+// il ranges 0..31 for 128 values (32 groups of 4)
+
+template <typename type4>
+void dequantize_tq3j_t4(device const block_tq3j * xb, short il, thread type4 & reg) {
+    // Full dequant then pick 4 values
+    float norm  = xb->norm;
+    float rnorm = xb->rnorm;
+    float qjl_scale = QJL_SCALE_F / 128.0f * rnorm;
+
+    float buf[128];
+    for (int j = 0; j < 128; j++) {
+        buf[j] = norm * tq_c8_d128[tq_up3(xb->qs, j)]
+               + qjl_scale * (((xb->signs[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f);
+    }
+    tq_fwht_metal(buf, 128);
+
+    for (int i = 0; i < 4; i++) reg[i] = buf[il * 4 + i];
+}
+
+template <typename type4>
+void dequantize_tq2j_t4(device const block_tq2j * xb, short il, thread type4 & reg) {
+    float norm  = xb->norm;
+    float rnorm = xb->rnorm;
+    float qjl_scale = QJL_SCALE_F / 128.0f * rnorm;
+
+    float buf[128];
+    for (int j = 0; j < 128; j++) {
+        buf[j] = norm * tq_c4_d128[tq_up2(xb->qs, j)]
+               + qjl_scale * (((xb->signs[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f);
+    }
+    tq_fwht_metal(buf, 128);
+
+    for (int i = 0; i < 4; i++) reg[i] = buf[il * 4 + i];
+}
+
+template <typename type4>
+void dequantize_tql_t4(device const block_tql * xb, short il, thread type4 & reg) {
+    float out[128];
+
+    // hi
+    float d_hi = xb->d_hi;
+    float hi[32];
+    for (int j = 0; j < 32; j++) hi[j] = d_hi * (float)xb->qs_hi[j];
+    tq_fwht_metal(hi, 32);
+    for (int j = 0; j < 32; j++) out[j] = hi[j];
+
+    // mid
+    float norm_mid = xb->norm_mid, rnorm_mid = xb->rnorm_mid;
+    float qs_mid = QJL_SCALE_F / 32.0f * rnorm_mid;
+    float mid[32];
+    for (int j = 0; j < 32; j++) {
+        mid[j] = norm_mid * tq_c8_d32[tq_up3(xb->qs_mid, j)]
+               + qs_mid * (((xb->signs_mid[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f);
+    }
+    tq_fwht_metal(mid, 32);
+    for (int j = 0; j < 32; j++) out[32 + j] = mid[j];
+
+    // low
+    float norm_low = xb->norm_low, rnorm_low = xb->rnorm_low;
+    float qs_low = QJL_SCALE_F / 64.0f * rnorm_low;
+    float lo[64];
+    for (int j = 0; j < 64; j++) {
+        lo[j] = norm_low * tq_c4_d64[tq_up2(xb->qs_low, j)]
+              + qs_low * (((xb->signs_low[j/8] >> (j%8)) & 1) ? 1.0f : -1.0f);
+    }
+    tq_fwht_metal(lo, 64);
+    for (int j = 0; j < 64; j++) out[64 + j] = lo[j];
+
+    for (int i = 0; i < 4; i++) reg[i] = out[il * 4 + i];
+}
+
 enum ggml_sort_order {
     GGML_SORT_ORDER_ASC,
     GGML_SORT_ORDER_DESC,
@@ -6402,6 +6628,15 @@ template [[host_name("kernel_flash_attn_ext_q8_0_dk320_dv256")]] kernel flash_at
 template [[host_name("kernel_flash_attn_ext_q8_0_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q8_0, 2, dequantize_q8_0, block_q8_0, 2, dequantize_q8_0, 512, 512>;
 template [[host_name("kernel_flash_attn_ext_q8_0_dk576_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_q8_0, 2, dequantize_q8_0, block_q8_0, 2, dequantize_q8_0, 576, 512>;
 
+// TurboQuant: K=TQ type, V=f16 (TQ types are K-cache only, block_size=128)
+// nl_k=8 for 4x4 kernels (128/16=8), DK must be multiple of 128
+template [[host_name("kernel_flash_attn_ext_tql_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_tql,  8, dequantize_tql,  half4x4, 1, dequantize_f16, 128, 128>;
+template [[host_name("kernel_flash_attn_ext_tql_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_tql,  8, dequantize_tql,  half4x4, 1, dequantize_f16, 256, 256>;
+template [[host_name("kernel_flash_attn_ext_tq3j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 128, 128>;
+template [[host_name("kernel_flash_attn_ext_tq3j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_tq3j, 8, dequantize_tq3j, half4x4, 1, dequantize_f16, 256, 256>;
+template [[host_name("kernel_flash_attn_ext_tq2j_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 128, 128>;
+template [[host_name("kernel_flash_attn_ext_tq2j_dk256_dv256")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES,    block_tq2j, 8, dequantize_tq2j, half4x4, 1, dequantize_f16, 256, 256>;
+
 #undef FA_TYPES
 #undef FA_TYPES_BF
 #undef FA_TYPES_F32
@@ -7002,6 +7237,14 @@ template [[host_name("kernel_flash_attn_ext_vec_q4_1_dk576_dv512")]] kernel flas
 template [[host_name("kernel_flash_attn_ext_vec_q5_0_dk576_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_0, 8, dequantize_q5_0_t4, block_q5_0,  8, dequantize_q5_0_t4, 576, 512, 2>;
 template [[host_name("kernel_flash_attn_ext_vec_q5_1_dk576_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q5_1, 8, dequantize_q5_1_t4, block_q5_1,  8, dequantize_q5_1_t4, 576, 512, 2>;
 template [[host_name("kernel_flash_attn_ext_vec_q8_0_dk576_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_q8_0, 8, dequantize_q8_0_t4, block_q8_0,  8, dequantize_q8_0_t4, 576, 512, 2>;
+
+// TurboQuant vec kernels: K=TQ type (nl_k=32), V=f16 (nl_v=4), DK must be >= 128
+template [[host_name("kernel_flash_attn_ext_vec_tql_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_tql,  32, dequantize_tql_t4,  half4, 4, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_tql_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_tql,  32, dequantize_tql_t4,  half4, 4, dequantize_f16_t4, 256, 256, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_tq3j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_tq3j, 32, dequantize_tq3j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_tq2j_dk256_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     block_tq2j, 32, dequantize_tq2j_t4, half4, 4, dequantize_f16_t4, 256, 256, 1>;
 
 #undef FA_TYPES
 #undef FA_TYPES_F32

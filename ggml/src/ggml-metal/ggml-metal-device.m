@@ -1157,7 +1157,15 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 return false;
             }
             if (op->src[1]->type != op->src[2]->type) {
-                return false;
+                // Allow TQ K types with f16 V (DK must be >= 128)
+                if ((op->src[1]->type == GGML_TYPE_TQL  ||
+                     op->src[1]->type == GGML_TYPE_TQ3J ||
+                     op->src[1]->type == GGML_TYPE_TQ2J) &&
+                    op->src[0]->ne[0] >= 128) {
+                    // OK - TQ K with f16 V
+                } else {
+                    return false;
+                }
             }
             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
         case GGML_OP_SSM_CONV:

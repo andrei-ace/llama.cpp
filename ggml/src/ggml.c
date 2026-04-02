@@ -9,6 +9,7 @@
 
 // FIXME: required here for quantization functions
 #include "ggml-quants.h"
+#include "ggml-turbo-quant.h"
 
 #ifdef GGML_USE_CPU_HBM
 #include <hbwmalloc.h>
@@ -903,6 +904,30 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .blck_size                = 0,
         .type_size                = 0,
         .is_quantized             = false,
+    },
+    [GGML_TYPE_TQL] = {
+        .type_name                = "tql",
+        .blck_size                = QK_TQL,
+        .type_size                = sizeof(block_tql),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tql,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tql_ref,
+    },
+    [GGML_TYPE_TQ3J] = {
+        .type_name                = "tq3j",
+        .blck_size                = QK_TQL,
+        .type_size                = sizeof(block_tq3j),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq3j,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq3j_ref,
+    },
+    [GGML_TYPE_TQ2J] = {
+        .type_name                = "tq2j",
+        .blck_size                = QK_TQL,
+        .type_size                = sizeof(block_tq2j),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_tq2j,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_tq2j_ref,
     },
 };
 
@@ -7666,6 +7691,9 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_Q6_K:    result = quantize_q6_K(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ1_0:   result = quantize_tq1_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ2_0:   result = quantize_tq2_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQL:     result = quantize_tql  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ3J:    result = quantize_tq3j (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TQ2J:    result = quantize_tq2j (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ2_XXS: result = quantize_iq2_xxs(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ2_XS:  result = quantize_iq2_xs (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ3_XXS: result = quantize_iq3_xxs(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

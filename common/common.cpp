@@ -4,6 +4,11 @@
 #include "common.h"
 #include "log.h"
 #include "llama.h"
+
+// TurboQuant permutation API (defined in ggml-turbo-quant.c)
+extern "C" void tq_init_perms(const uint8_t * perms, int n_layers, int n_heads, int head_dim,
+                               const int32_t * layer_map, int n_model_layers);
+extern "C" void tq_free_perms(void);
 #include "sampling.h"
 #include "unicode.h"
 
@@ -1160,6 +1165,33 @@ common_init_result::common_init_result(common_params & params) :
     }
 
     pimpl->model.reset(model);
+
+    // Load TurboQuant channel permutations if specified
+    if (!params.tq_perms_file.empty()) {
+        FILE * fp = fopen(params.tq_perms_file.c_str(), "rb");
+        if (!fp) {
+            LOG_ERR("%s: failed to open TQ perms file '%s'\n", __func__, params.tq_perms_file.c_str());
+        } else {
+            uint32_t magic, version, nl, nh, hd, pr, nlm;
+            fread(&magic, 4, 1, fp); fread(&version, 4, 1, fp);
+            fread(&nl, 4, 1, fp); fread(&nh, 4, 1, fp); fread(&hd, 4, 1, fp);
+            fread(&pr, 4, 1, fp); fread(&nlm, 4, 1, fp);
+
+            if (magic != 0x54515045) {
+                LOG_ERR("%s: invalid TQ perms file (bad magic)\n", __func__);
+            } else {
+                std::vector<int32_t> layer_map(nlm);
+                fread(layer_map.data(), sizeof(int32_t), nlm, fp);
+                std::vector<uint8_t> perms((size_t)nl * nh * hd);
+                fread(perms.data(), 1, perms.size(), fp);
+                tq_init_perms(perms.data(), (int)nl, (int)nh, (int)hd,
+                              layer_map.data(), (int)nlm);
+                LOG_INF("%s: loaded TQ perms: %u layers, %u heads, %u dims (%s)\n",
+                        __func__, nl, nh, hd, pr ? "pre-RoPE" : "post-RoPE");
+            }
+            fclose(fp);
+        }
+    }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
