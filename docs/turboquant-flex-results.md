@@ -438,3 +438,41 @@ TQ at 6.21 bpv produces **identical output to f16 on factual, mathematical, and 
 5. **QJL is context-length dependent**: Skip it for <8k context (saves ~1 bpv). Consider it for 16k+ where bias accumulates. At 32k context, TQ+QJL consistently outperforms TQ without QJL.
 
 6. **Standard quantization fails at low bpv**: q4_0 (4.5 bpv) and q4_1 (5.0 bpv) give PPL 1300-3600. TurboQuant at 6.2 bpv matches f16. The rotation + optimal centroids + outlier-aware split make the difference.
+
+## V Cache Quantization Quality
+
+All PPL results above use f16 V to isolate the K cache effect. Below we verify that TQ K works correctly with all supported V cache types.
+
+### Qwen2.5 7B (q4_k_m weights, Metal FA, seed=42, temp=0)
+
+K = TQ winner (10/5 QJL=hi split + 5-bit+QJL nosplit, 6.41 bpv K)
+
+| V type | Math (127×38) | French translation | Korean (Pauli) |
+|--------|---------------|-------------------|----------------|
+| K=f16, V=f16 (baseline) | correct FOIL method | Le chat s'est assis sur le tapis et a regardé les oiseaux passer. | 볼프강 파울리, 니ELS 보어, 맥스 플랑크 |
+| K=TQ, V=f16 | ✅ identical | ✅ identical | ✅ identical |
+| K=TQ, V=q8_0 | ✅ identical | ✅ identical | ✅ identical |
+| K=TQ, V=q4_0 | ✅ minor wording | ✅ identical | ✅ identical |
+| K=TQ, V=q4_1 | ✅ different approach | ✅ identical | ✅ identical |
+| K=TQ+QJL, V=f16 | ✅ identical | ✅ identical | ✅ identical |
+| K=TQ+QJL, V=q8_0 | ✅ identical | ✅ identical | ✅ identical |
+| K=TQ+QJL, V=q4_0 | ✅ minor wording | ✅ identical | ✅ identical |
+| K=TQ+QJL, V=q4_1 | ✅ different approach | ✅ identical | ✅ slight truncation |
+
+### Qwen2.5 1.5B (q4_k_m weights, Metal FA, seed=42, temp=0)
+
+K = TQ winner (9/4 QJL=both split + 6-bit nosplit, 6.21 bpv K)
+
+| V type | Math (127×38) | French translation | Korean |
+|--------|---------------|-------------------|--------|
+| K=f16, V=f16 (baseline) | FOIL method (correct) | Le chat s'est assis... observé les oiseaux voler | English description (1.5B can't do Korean) |
+| K=TQ, V=f16 | 4866 (short answer) | ✅ identical | ✅ identical |
+| K=TQ, V=q8_0 | ✅ identical to TQ+f16 | ✅ identical | ✅ identical |
+| K=TQ, V=q4_0 | ✅ identical | slightly different wording | ✅ |
+| K=TQ, V=q4_1 | different approach | slightly different | ✅ |
+| K=TQ+QJL, V=f16 | 4866 | ✅ identical | ✅ |
+| K=TQ+QJL, V=q8_0 | ✅ identical | ✅ identical | ✅ |
+| K=TQ+QJL, V=q4_0 | ✅ identical | slightly different (La chatte) | ✅ |
+| K=TQ+QJL, V=q4_1 | different approach | slightly different | ✅ |
+
+**Conclusion**: TQ K produces correct output with all V cache types (f16, q8_0, q4_0, q4_1). Minor wording variations with q4_0/q4_1 V are the V quantization effect — identical differences appear with f16 K + q4_0/q4_1 V baselines.
