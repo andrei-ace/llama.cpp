@@ -3871,16 +3871,17 @@ int tq_flex_map_to_real_type(void) {
 
 static void flex_pack(uint8_t*buf,int idx,int val,int bits){
     int bp=idx*bits,bi=bp/8,sh=bp%8;
-    buf[bi]|=(uint8_t)((val&((1<<bits)-1))<<sh);
-    if(sh+bits>8)buf[bi+1]|=(uint8_t)(val>>(8-sh));
-    if(sh+bits>16)buf[bi+2]|=(uint8_t)(val>>(16-sh));
+    int v=val&((1<<bits)-1);
+    buf[bi]|=(uint8_t)(v<<sh);
+    if(sh+bits>8) buf[bi+1]|=(uint8_t)(v>>(8-sh));
+    if(sh+bits>16)buf[bi+2]|=(uint8_t)(v>>(16-sh));
 }
 static int flex_unpack(const uint8_t*buf,int idx,int bits){
     int bp=idx*bits,bi=bp/8,sh=bp%8;
-    int val=buf[bi]>>sh;
-    if(sh+bits>8)val|=buf[bi+1]<<(8-sh);
-    if(sh+bits>16)val|=buf[bi+2]<<(16-sh);
-    return val&((1<<bits)-1);
+    uint32_t val=(uint32_t)buf[bi];
+    if(sh+bits>8) val|=(uint32_t)buf[bi+1]<<8;
+    if(sh+bits>16)val|=(uint32_t)buf[bi+2]<<16;
+    return (int)((val>>sh)&((1u<<bits)-1u));
 }
 static float flex_centroid_buf[1024];
 static const float*flex_get_centroids(int bits,int dim){

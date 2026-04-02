@@ -336,7 +336,15 @@ The Pauli test checks if TQ preserves attention precision for rare cross-script 
 | Avg bpv | 6.21 | 6.41 |
 | PPL vs f16 | +0.5% | +0.7% |
 
-The 7B needs 10-bit hi (vs 9-bit for 1.5B) because the Pauli test fails at 9-bit with QJL. This is likely due to a QJL precision bug at 9-bit that affects multilingual attention — under investigation. The 1.5B was only tested on English where this doesn't manifest.
+The 7B needs 10-bit hi (vs 9-bit for 1.5B) because the Pauli test fails at 9-bit with QJL=hi. Investigation confirmed this is NOT a code bug but a precision limitation: at 9-bit MSE, the QJL 1-bit correction (`sqrt(π/2)/32 * rnorm * ±1`) adds a perturbation large enough to shift attention weights for rare cross-script tokens (Korean). At 10-bit MSE, the quantization error is smaller, the QJL residual is smaller, and the correction doesn't corrupt.
+
+Key findings from QJL investigation:
+- 9/6 QJL=none: ✅ identical to f16 (Korean perfect)
+- 9/6 QJL=hi: ❌ mixed Korean/Latin output
+- 10/5 QJL=hi: ✅ identical to f16 (Korean perfect)
+- Bug reproduces on both CPU and Metal FA paths → not a backend issue
+- Confirmed on both uniform flex and per-layer flex
+- The 1.5B was only tested on English where this doesn't manifest
 
 ## Generation Quality Comparison
 

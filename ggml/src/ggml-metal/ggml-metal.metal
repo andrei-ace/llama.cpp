@@ -940,14 +940,15 @@ constexpr constant static float tq_c1024_d128[1024] = {
 struct block_tqk_flex_metal { uint8_t _dummy; };
 
 // Generic bit unpacking from device memory: extract 'bits'-wide value at index 'idx'
+// Uses uint32_t accumulator to avoid signed-promotion edge cases on GPU compilers.
 inline int flex_unpack_metal(device const uint8_t * buf, int idx, int bits) {
     int bp = idx * bits;
     int bi = bp / 8;
     int sh = bp % 8;
-    int val = buf[bi] >> sh;
-    if (sh + bits > 8)  val |= buf[bi + 1] << (8 - sh);
-    if (sh + bits > 16) val |= buf[bi + 2] << (16 - sh);
-    return val & ((1 << bits) - 1);
+    uint32_t val = (uint32_t)buf[bi];
+    if (sh + bits > 8)  val |= (uint32_t)buf[bi + 1] << 8;
+    if (sh + bits > 16) val |= (uint32_t)buf[bi + 2] << 16;
+    return (int)((val >> sh) & ((1u << bits) - 1u));
 }
 
 // Generic bit packing to device memory: pack 'bits'-wide value at index 'idx'
@@ -956,9 +957,10 @@ inline void flex_pack_metal(device uint8_t * buf, int idx, int val, int bits) {
     int bp = idx * bits;
     int bi = bp / 8;
     int sh = bp % 8;
-    buf[bi] |= (uint8_t)(((val) & ((1 << bits) - 1)) << sh);
-    if (sh + bits > 8)  buf[bi + 1] |= (uint8_t)((val) >> (8 - sh));
-    if (sh + bits > 16) buf[bi + 2] |= (uint8_t)((val) >> (16 - sh));
+    int v = val & ((1 << bits) - 1);
+    buf[bi] |= (uint8_t)(v << sh);
+    if (sh + bits > 8)  buf[bi + 1] |= (uint8_t)(v >> (8 - sh));
+    if (sh + bits > 16) buf[bi + 2] |= (uint8_t)(v >> (16 - sh));
 }
 
 // Centroid lookup for d=32 by bit width
