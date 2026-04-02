@@ -257,6 +257,25 @@ Offset  Size   Field
 2       96     qs[96] — 6-bit × 128 packed centroid indices
 ```
 
+## Results: Qwen2.5 7B Instruct
+
+Model: q4_k_m weights, Metal FA, wikitext-2, 20 chunks.
+
+Calibration: 7 split layers (0,1,2,3,13,19,27) + 21 non-split, avg 6.28 bpv.
+
+The 7B has more extreme early layers than the 1.5B: layers 0-3 are all >70% outlier concentration (100%, 92%, 72%, 87%), plus layer 13 (76%), 19 (80%), and 27 (100%). The middle layers (4-12, 14-18, 20-26) are uniformly 50-65%.
+
+| KV config | bpv | PPL | ±CI | vs f16 |
+|-----------|-----|-----|-----|--------|
+| f16 KV | 16.00 | 7.780 | ±0.297 | — |
+| q8_0 KV | 8.50 | 7.783 | ±0.298 | +0.03% |
+| TQ+QJL | 7.12 | 7.805 | ±0.298 | +0.3% |
+| **TQ best** | **6.28** | **7.816** | **±0.298** | **+0.5%** |
+
+All results fall within each other's 95% confidence intervals. TQ at 6.28 bpv achieves 2.5x K cache compression with +0.5% PPL degradation — matching the 1.5B results.
+
+The same architecture (threshold 70%, 9/4 split + 6-bit non-split) works on both models without any tuning changes, only the number of split layers differs (7 vs 4) based on each model's outlier distribution.
+
 ## Generation Quality Comparison
 
 Model: Qwen2.5 1.5B Instruct (q4_k_m), seed=42, temp=0, Metal FA.
