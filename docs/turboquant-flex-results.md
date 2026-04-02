@@ -218,7 +218,7 @@ Both TQ variants beat q8_0 in point estimate. TQ+QJL edges TQ best by 0.003 PPL 
 | q8_0 KV | 8.50 | 11.657 | +0.1% | 1.9x |
 | **TQ best** | **6.21** | **11.639** | **-0.01%** | **2.6x** |
 | TQ+QJL | 7.18 | 11.638 | -0.02% | 2.2x |
-| q4_1 KV | 4.50 | 1309.6 | +11,150% | — |
+| q4_1 KV | 5.00 | 1309.6 | +11,150% | — |
 | q4_0 KV | 4.50 | 3600.2 | +30,830% | — |
 
 ### Calibration Source Comparison
@@ -335,4 +335,4 @@ TQ at 6.21 bpv produces **identical output to f16 on factual, mathematical, and 
 
 5. **QJL is context-length dependent**: Skip it for <8k context (saves ~1 bpv). Consider it for 16k+ where bias accumulates. At 32k context, TQ+QJL consistently outperforms TQ without QJL.
 
-6. **Standard quantization fails at low bpv**: q4_0 and q4_1 at 4.5 bpv give PPL 1300-3600. TurboQuant at 6.2 bpv matches f16. The rotation + optimal centroids + outlier-aware split make the difference.
+6. **Standard quantization fails at low bpv**: q4_0 (4.5 bpv) and q4_1 (5.0 bpv) give PPL 1300-3600. TurboQuant at 6.2 bpv matches f16. The rotation + optimal centroids + outlier-aware split make the difference.
