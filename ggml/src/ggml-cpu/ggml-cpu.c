@@ -420,6 +420,15 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
+    // d=256/512 variants use same functions (tq_blk_size set per-layer)
+    [GGML_TYPE_TQ3J_256] = { .from_float = (ggml_from_float_t) quantize_row_tq3j_ref, .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq3j_f32, .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
+    [GGML_TYPE_TQ2J_256] = { .from_float = (ggml_from_float_t) quantize_row_tq2j_ref, .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq2j_f32, .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
+    [GGML_TYPE_TQ3_256]  = { .from_float = (ggml_from_float_t) quantize_row_tq3_ref,  .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq3_f32,  .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
+    [GGML_TYPE_TQ2_256]  = { .from_float = (ggml_from_float_t) quantize_row_tq2_ref,  .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq2_f32,  .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
+    [GGML_TYPE_TQ3J_512] = { .from_float = (ggml_from_float_t) quantize_row_tq3j_ref, .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq3j_f32, .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
+    [GGML_TYPE_TQ2J_512] = { .from_float = (ggml_from_float_t) quantize_row_tq2j_ref, .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq2j_f32, .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
+    [GGML_TYPE_TQ3_512]  = { .from_float = (ggml_from_float_t) quantize_row_tq3_ref,  .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq3_f32,  .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
+    [GGML_TYPE_TQ2_512]  = { .from_float = (ggml_from_float_t) quantize_row_tq2_ref,  .vec_dot = (ggml_vec_dot_t) ggml_vec_dot_tq2_f32,  .vec_dot_type = GGML_TYPE_F32, .nrows = 1, },
     [GGML_TYPE_I32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_i32,
     },

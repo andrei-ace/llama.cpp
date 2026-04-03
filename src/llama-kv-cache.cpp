@@ -13,13 +13,17 @@
 #include <map>
 #include <stdexcept>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-void tq_set_block_size(int head_dim);
-#ifdef __cplusplus
+// TurboQuant: resolve user-facing type to per-layer variant by head_dim
+static ggml_type tq_resolve_type(ggml_type type, int head_dim) {
+    if (head_dim <= 128) return type;
+    switch (type) {
+        case GGML_TYPE_TQ3J: return head_dim >= 512 ? GGML_TYPE_TQ3J_512 : GGML_TYPE_TQ3J_256;
+        case GGML_TYPE_TQ2J: return head_dim >= 512 ? GGML_TYPE_TQ2J_512 : GGML_TYPE_TQ2J_256;
+        case GGML_TYPE_TQ3:  return head_dim >= 512 ? GGML_TYPE_TQ3_512  : GGML_TYPE_TQ3_256;
+        case GGML_TYPE_TQ2:  return head_dim >= 512 ? GGML_TYPE_TQ2_512  : GGML_TYPE_TQ2_256;
+        default: return type;
+    }
 }
-#endif
 
 static bool ggml_is_power_of_2(int n) {
     return (n & (n - 1)) == 0;
@@ -100,9 +104,6 @@ llama_kv_cache::llama_kv_cache(
     const  layer_reuse_cb & reuse) :
     model(model), hparams(model.hparams), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type) {
-
-    // TurboQuant: set block size to head dimension for FWHT-256/512
-    tq_set_block_size((int)hparams.n_embd_head_k());
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
@@ -205,8 +206,12 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+        // TurboQuant: resolve to per-layer variant based on head_dim
+        const ggml_type layer_type_k = tq_resolve_type(type_k, (int)hparams.n_embd_head_k(il));
+        const ggml_type layer_type_v = tq_resolve_type(type_v, (int)hparams.n_embd_head_k(il));
+
+        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
         has_k && ggml_format_name(k, "cache_k_l%d", il);
         has_v && ggml_format_name(v, "cache_v_l%d", il);

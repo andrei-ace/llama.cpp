@@ -433,7 +433,17 @@ extern "C" {
         GGML_TYPE_TQ2J    = 43, // TurboQuant 2-bit MSE + 1-bit QJL (FWHT-128)
         GGML_TYPE_TQ3     = 44, // TurboQuant 3-bit MSE only (for V cache)
         GGML_TYPE_TQ2     = 45, // TurboQuant 2-bit MSE only (for V cache)
-        GGML_TYPE_COUNT   = 46,
+        // d=256 variants (internal — auto-selected per layer, not user-facing)
+        GGML_TYPE_TQ3J_256 = 46,
+        GGML_TYPE_TQ2J_256 = 47,
+        GGML_TYPE_TQ3_256  = 48,
+        GGML_TYPE_TQ2_256  = 49,
+        // d=512 variants
+        GGML_TYPE_TQ3J_512 = 50,
+        GGML_TYPE_TQ2J_512 = 51,
+        GGML_TYPE_TQ3_512  = 52,
+        GGML_TYPE_TQ2_512  = 53,
+        GGML_TYPE_COUNT   = 54,
     };
 
     // precision

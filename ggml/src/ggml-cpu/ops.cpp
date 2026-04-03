@@ -11,6 +11,7 @@
 // TurboQuant: thread-local layer/head context for permutation-aware quantize/dequant
 extern "C" void tq_set_current_layer(int layer, int is_k);
 extern "C" void tq_set_current_head(int head);
+extern "C" void tq_set_block_size(int dim);
 
 #include <algorithm>
 #include <cfloat>
@@ -4925,7 +4926,10 @@ static void ggml_compute_forward_set_rows_f32(
         int is_k = 1;
         if (sscanf(root->name, "cache_k_l%d", &layer) == 1) { is_k = 1; }
         else if (sscanf(root->name, "cache_v_l%d", &layer) == 1) { is_k = 0; }
-        if (layer >= 0) tq_set_current_layer(layer, is_k);
+        if (layer >= 0) {
+            tq_set_current_layer(layer, is_k);
+            tq_set_block_size((int)ggml_blck_size(dst->type));
+        }
     }
 
     const int ith = params->ith;
@@ -8192,7 +8196,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         const struct ggml_tensor * k_root = k;
         while (k_root->view_src) k_root = k_root->view_src;
         sscanf(k_root->name, "cache_k_l%d", &tq_k_layer);
-        if (tq_k_layer >= 0) tq_set_current_layer(tq_k_layer, 1);
+        if (tq_k_layer >= 0) {
+            tq_set_current_layer(tq_k_layer, 1);
+            tq_set_block_size((int)ggml_blck_size(k->type));
+        }
     }
 
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)

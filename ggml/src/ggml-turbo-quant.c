@@ -80,26 +80,8 @@ static const float * tq_get_c4(int d) {
 
 extern struct ggml_type_traits * ggml_get_type_traits_mut(enum ggml_type type);
 
-void tq_set_block_size(int head_dim) {
-    tq_blk_size = head_dim < 128 ? 128 : head_dim;
-    if (head_dim <= 128) return;
-
-    struct ggml_type_traits * t;
-    t = ggml_get_type_traits_mut(GGML_TYPE_TQ3J);
-    t->blck_size = head_dim;
-    t->type_size = 4 + (head_dim * 3 + 7) / 8 + head_dim / 8;
-
-    t = ggml_get_type_traits_mut(GGML_TYPE_TQ2J);
-    t->blck_size = head_dim;
-    t->type_size = 4 + head_dim / 4 + head_dim / 8;
-
-    t = ggml_get_type_traits_mut(GGML_TYPE_TQ3);
-    t->blck_size = head_dim;
-    t->type_size = 2 + (head_dim * 3 + 7) / 8;
-
-    t = ggml_get_type_traits_mut(GGML_TYPE_TQ2);
-    t->blck_size = head_dim;
-    t->type_size = 2 + head_dim / 4;
+void tq_set_block_size(int dim) {
+    tq_blk_size = dim < 128 ? 128 : dim;
 }
 
 // ---------------------------------------------------------------------------
