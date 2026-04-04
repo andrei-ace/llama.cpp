@@ -55,9 +55,12 @@ size_t quantize_tq2 (const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                      int64_t nrows, int64_t n_per_row, const float * imatrix);
 
 // Set TQ block size to match head dimension (call before KV cache creation)
-// Adjusts blck_size and type_size for TQ types to match the model's head_dim.
-// This enables FWHT-256 or FWHT-512 instead of the default FWHT-128.
 void tq_set_block_size(int head_dim);
+
+// Per-layer type recommendations (from calibration TQLT section)
+void tq_set_layer_types(const int32_t * types, const float * outlier_pcts, int n_layers);
+int  tq_get_layer_type(int calibration_layer_idx);  // returns ggml_type or 0
+const int32_t * tq_get_layer_map(int * out_n_model_layers);  // model_layer -> calibration_idx
 
 // ---------------------------------------------------------------------------
 // Per-channel permutation support (loaded from calibration file)

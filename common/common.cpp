@@ -5,12 +5,14 @@
 #include "log.h"
 #include "llama.h"
 
+#include "sampling.h"
+#include "unicode.h"
+
 // TurboQuant permutation API (defined in ggml-turbo-quant.c)
 extern "C" void tq_init_perms(const uint8_t * perms, int n_layers, int n_heads, int head_dim,
                                const int32_t * layer_map, int n_model_layers);
 extern "C" void tq_free_perms(void);
-#include "sampling.h"
-#include "unicode.h"
+extern "C" void tq_set_layer_types(const int32_t * types, const float * outlier_pcts, int n_layers);
 
 #include <algorithm>
 #include <cinttypes>
@@ -1188,6 +1190,24 @@ common_init_result::common_init_result(common_params & params) :
                               layer_map.data(), (int)nlm);
                 LOG_INF("%s: loaded TQ perms: %u layers, %u heads, %u dims (%s)\n",
                         __func__, nl, nh, hd, pr ? "pre-RoPE" : "post-RoPE");
+
+                // Read optional TQLT section (per-layer type recommendations)
+                uint32_t tqlt_magic = 0;
+                if (fread(&tqlt_magic, 4, 1, fp) == 1 && tqlt_magic == 0x54514C54) {
+                    uint32_t n_entries = 0;
+                    fread(&n_entries, 4, 1, fp);
+                    std::vector<int32_t> layer_types(n_entries);
+                    std::vector<float> outlier_pcts(n_entries);
+                    fread(layer_types.data(), sizeof(int32_t), n_entries, fp);
+                    fread(outlier_pcts.data(), sizeof(float), n_entries, fp);
+                    tq_set_layer_types(layer_types.data(), outlier_pcts.data(), (int)n_entries);
+                    int n_extreme = 0;
+                    for (uint32_t i = 0; i < n_entries; i++) {
+                        if (layer_types[i] != 0) n_extreme++;
+                    }
+                    LOG_INF("%s: loaded per-layer types: %u layers, %d extreme (q8_0)\n",
+                            __func__, n_entries, n_extreme);
+                }
             }
             fclose(fp);
         }

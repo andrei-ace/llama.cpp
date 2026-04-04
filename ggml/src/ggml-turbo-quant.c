@@ -85,6 +85,30 @@ void tq_set_block_size(int dim) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-layer type recommendations
+// ---------------------------------------------------------------------------
+
+static int32_t * tq_layer_types = NULL;
+static float   * tq_layer_outlier_pcts = NULL;
+static int       tq_n_type_layers = 0;
+
+void tq_set_layer_types(const int32_t * types, const float * pcts, int n) {
+    free(tq_layer_types); free(tq_layer_outlier_pcts);
+    tq_n_type_layers = n;
+    tq_layer_types = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+    tq_layer_outlier_pcts = (float *)malloc((size_t)n * sizeof(float));
+    memcpy(tq_layer_types, types, (size_t)n * sizeof(int32_t));
+    memcpy(tq_layer_outlier_pcts, pcts, (size_t)n * sizeof(float));
+}
+
+int tq_get_layer_type(int cidx) {
+    if (!tq_layer_types || cidx < 0 || cidx >= tq_n_type_layers) return 0;
+    return tq_layer_types[cidx];
+}
+
+// tq_get_layer_map is defined after tq_init_perms (needs tq_layer_map/tq_n_model_layers)
+
+// ---------------------------------------------------------------------------
 // Per-channel permutation support
 // ---------------------------------------------------------------------------
 
@@ -116,6 +140,11 @@ void tq_free_perms(void) {
     free(tq_perms);       tq_perms = NULL;
     free(tq_layer_map);   tq_layer_map = NULL;
     tq_n_layers = tq_n_heads = tq_head_dim = tq_n_model_layers = 0;
+}
+
+const int32_t * tq_get_layer_map(int * out_n) {
+    if (out_n) *out_n = tq_n_model_layers;
+    return tq_layer_map;
 }
 
 void tq_set_current_layer(int layer, int is_k) { tq_cur_layer = layer; tq_cur_is_k = is_k; }

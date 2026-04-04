@@ -13,7 +13,10 @@
 #include <map>
 #include <stdexcept>
 
-// TurboQuant: resolve user-facing type to per-layer variant by head_dim
+// TurboQuant: resolve user-facing type to per-layer variant
+extern "C" int tq_get_layer_type(int calibration_layer_idx);
+extern "C" const int32_t * tq_get_layer_map(int * out_n_model_layers);
+
 static ggml_type tq_resolve_type(ggml_type type, int head_dim) {
     if (head_dim <= 128) return type;
     switch (type) {
@@ -23,6 +26,16 @@ static ggml_type tq_resolve_type(ggml_type type, int head_dim) {
         case GGML_TYPE_TQ2:  return head_dim >= 512 ? GGML_TYPE_TQ2_512  : GGML_TYPE_TQ2_256;
         default: return type;
     }
+}
+
+// Check calibration data for per-layer type override
+static ggml_type tq_layer_override(ggml_type type, int model_layer, const int32_t * layer_map, int n_model_layers) {
+    if (!layer_map || model_layer < 0 || model_layer >= n_model_layers) return type;
+    int cidx = layer_map[model_layer];
+    if (cidx < 0) return type;
+    int recommended = tq_get_layer_type(cidx);
+    if (recommended > 0) return (ggml_type)recommended;
+    return type;
 }
 
 static bool ggml_is_power_of_2(int n) {
@@ -206,9 +219,18 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        // TurboQuant: resolve to per-layer variant based on head_dim
-        const ggml_type layer_type_k = tq_resolve_type(type_k, (int)hparams.n_embd_head_k(il));
-        const ggml_type layer_type_v = tq_resolve_type(type_v, (int)hparams.n_embd_head_k(il));
+        // TurboQuant: resolve to per-layer variant based on head_dim + calibration override
+        ggml_type layer_type_k = tq_resolve_type(type_k, (int)hparams.n_embd_head_k(il));
+        ggml_type layer_type_v = tq_resolve_type(type_v, (int)hparams.n_embd_head_k(il));
+        {
+            int n_ml = 0;
+            const int32_t * lmap = tq_get_layer_map(&n_ml);
+            ggml_type orig_k = layer_type_k;
+            layer_type_k = tq_layer_override(layer_type_k, il, lmap, n_ml);
+            if (layer_type_k != orig_k) {
+                layer_type_v = layer_type_k; // match V to overridden K (e.g. both q8_0)
+            }
+        }
 
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;

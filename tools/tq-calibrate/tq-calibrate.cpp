@@ -304,6 +304,8 @@ int main(int argc, char ** argv) {
 
     // Compute outlier concentration per layer (top 25% channels' share of total variance)
     const int n_hi = head_dim / 4;
+    std::vector<float> outlier_pcts(n_kv_layers);
+    std::vector<int32_t> layer_types(n_kv_layers);
     for (int l = 0; l < n_kv_layers; l++) {
         int old_cidx = kv_cidx_map[l];
         int64_t n = std::max(g_calib.counts[old_cidx], (int64_t)1);
@@ -325,8 +327,12 @@ int main(int argc, char ** argv) {
                 hi_var += var;
             }
         }
-        double pct = 100.0 * hi_var / (total_var + 1e-30);
-        fprintf(stderr, "  layer %2d: top %d channels hold %.1f%% of total variance\n", l, n_hi, pct);
+        float pct = (float)(100.0 * hi_var / (total_var + 1e-30));
+        outlier_pcts[l] = pct;
+        // Recommend type: extreme (>90%) -> q8_0, else -> 0 (use default TQ type)
+        layer_types[l] = (pct > 90.0f) ? GGML_TYPE_Q8_0 : 0;
+        const char * rec = (pct > 90.0f) ? "q8_0" : "tq";
+        fprintf(stderr, "  layer %2d: top %d channels hold %.1f%% of total variance -> %s\n", l, n_hi, pct, rec);
     }
 
     // Optional stats CSV
@@ -378,6 +384,16 @@ int main(int argc, char ** argv) {
         fwrite(&idx, 4, 1, fp);
     }
     fwrite(all_perms.data(), 1, all_perms.size(), fp);
+
+    // TQLT section: per-layer type recommendations + outlier percentages
+    {
+        uint32_t tqlt_magic = 0x54514C54; // "TQLT"
+        uint32_t n_entries = n_kv_layers;
+        fwrite(&tqlt_magic, 4, 1, fp);
+        fwrite(&n_entries, 4, 1, fp);
+        fwrite(layer_types.data(), sizeof(int32_t), n_kv_layers, fp);
+        fwrite(outlier_pcts.data(), sizeof(float), n_kv_layers, fp);
+    }
     fclose(fp);
 
     fprintf(stderr, "saved to '%s' (%d layers x %d heads x %d ch, %s)\n",
