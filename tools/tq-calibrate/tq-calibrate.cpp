@@ -180,6 +180,8 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "       --metric mag      Outlier = highest mean |K|\n");
     fprintf(stderr, "       --metric both     Outlier = |K| x std(K)\n");
     fprintf(stderr, "       --stats FILE      Dump per-channel stats CSV\n");
+    fprintf(stderr, "       --threshold N     Override layers with outlier%% > N to --override-type (default: 101 = none)\n");
+    fprintf(stderr, "       --override-type T Override type for extreme layers: f16, q8_0, q4_0 (default: q8_0)\n");
     fprintf(stderr, "\nOutput format: channels sorted by importance (most important first).\n");
     fprintf(stderr, "TQL uses top 32 = hi (q8), next 32 = mid (3mse+qjl), bottom 64 = low (2mse+qjl).\n");
 }
@@ -189,6 +191,8 @@ int main(int argc, char ** argv) {
     int n_tokens_max = 4096, n_ctx = 512, n_gpu_layers = 99;
     bool pre_rope = true;
     calib_metric_t metric = METRIC_VAR;
+    float tq_threshold = 101.0f; // default: no override
+    ggml_type tq_override_type = GGML_TYPE_Q8_0;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -201,6 +205,14 @@ int main(int argc, char ** argv) {
         else if (arg == "--pre-rope") pre_rope = true;
         else if (arg == "--post-rope") pre_rope = false;
         else if (arg == "--stats" && i+1 < argc) stats_path = argv[++i];
+        else if (arg == "--threshold" && i+1 < argc) tq_threshold = std::atof(argv[++i]);
+        else if (arg == "--override-type" && i+1 < argc) {
+            std::string t = argv[++i];
+            if (t == "f16")       tq_override_type = GGML_TYPE_F16;
+            else if (t == "q8_0") tq_override_type = GGML_TYPE_Q8_0;
+            else if (t == "q4_0") tq_override_type = GGML_TYPE_Q4_0;
+            else { fprintf(stderr, "error: unknown override type '%s'\n", t.c_str()); return 1; }
+        }
         else if (arg == "--metric" && i+1 < argc) {
             std::string m = argv[++i];
             if (m == "mag") metric = METRIC_MAG;
@@ -329,9 +341,13 @@ int main(int argc, char ** argv) {
         }
         float pct = (float)(100.0 * hi_var / (total_var + 1e-30));
         outlier_pcts[l] = pct;
-        // Recommend type: extreme (>90%) -> q8_0, else -> 0 (use default TQ type)
-        layer_types[l] = (pct > 90.0f) ? GGML_TYPE_Q8_0 : 0;
-        const char * rec = (pct > 90.0f) ? "q8_0" : "tq";
+        // Override layers above threshold
+        if (pct > tq_threshold) {
+            layer_types[l] = tq_override_type;
+        } else {
+            layer_types[l] = 0; // use default TQ type
+        }
+        const char * rec = layer_types[l] ? ggml_type_name((ggml_type)layer_types[l]) : "tq";
         fprintf(stderr, "  layer %2d: top %d channels hold %.1f%% of total variance -> %s\n", l, n_hi, pct, rec);
     }
 
