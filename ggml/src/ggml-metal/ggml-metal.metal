@@ -9926,14 +9926,15 @@ kernel void kernel_set_rows_tq_simd(
                 v[k] = (tiisg & mask) == 0 ? (v[k] + b) : (b - v[k]);
             }
         }
-        const float fwht_s = 1.0f / sqrt((float)DIM);
-        for (short k = 0; k < VPT; k++) v[k] *= fwht_s;
 
-        // L2 norm via SIMD reduction
+        // Skip 1/√DIM scaling — fold into norm instead (saves VPT multiplies)
+        // v[] is unscaled FWHT. norm_scaled = norm_unscaled * fwht_s.
+        // inv_norm = fwht_s / norm so that v[k] * inv_norm = v_scaled[k] / norm.
+        const float fwht_s = 1.0f / sqrt((float)DIM);
         float local_sq = 0.0f;
         for (short k = 0; k < VPT; k++) local_sq += v[k] * v[k];
-        float norm = sqrt(simd_sum(local_sq));
-        float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
+        float norm = sqrt(simd_sum(local_sq)) * fwht_s;
+        float inv_norm = (norm > 1e-12f) ? fwht_s / norm : 0.0f;
 
         // Nearest centroid per value — branchless boundary comparison
         // Cache centroid values to avoid re-lookup in QJL residual
@@ -9994,7 +9995,7 @@ kernel void kernel_set_rows_tq_simd(
             }
         }
 
-        // QJL signs + residual norm (uses cached cv[] — no constant memory re-read)
+        // QJL signs + residual norm (uses cached cv[], v[] is unscaled — apply fwht_s)
         if (HAS_QJL) {
             device uint8_t * signs = out + hdr + qs_bytes;
             float local_rnorm_sq = 0.0f;
@@ -10002,7 +10003,7 @@ kernel void kernel_set_rows_tq_simd(
             if (VPT == 4) {
                 uint8_t my_bits = 0;
                 for (short k = 0; k < 4; k++) {
-                    float res = v[k] - norm * cv[k];
+                    float res = v[k] * fwht_s - norm * cv[k];
                     local_rnorm_sq += res * res;
                     if (res >= 0.0f) my_bits |= (uint8_t)(1 << k);
                 }
@@ -10013,7 +10014,7 @@ kernel void kernel_set_rows_tq_simd(
             } else if (VPT == 8) {
                 uint8_t my_byte = 0;
                 for (short k = 0; k < 8; k++) {
-                    float res = v[k] - norm * cv[k];
+                    float res = v[k] * fwht_s - norm * cv[k];
                     local_rnorm_sq += res * res;
                     if (res >= 0.0f) my_byte |= (uint8_t)(1 << k);
                 }
@@ -10022,7 +10023,7 @@ kernel void kernel_set_rows_tq_simd(
                 for (short b = 0; b < 2; b++) {
                     uint8_t my_byte = 0;
                     for (short k = 0; k < 8; k++) {
-                        float res = v[b*8+k] - norm * cv[b*8+k];
+                        float res = v[b*8+k] * fwht_s - norm * cv[b*8+k];
                         local_rnorm_sq += res * res;
                         if (res >= 0.0f) my_byte |= (uint8_t)(1 << k);
                     }
