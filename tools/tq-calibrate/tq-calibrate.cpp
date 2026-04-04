@@ -128,7 +128,8 @@ static bool tq_collect_callback(struct ggml_tensor * t, bool ask, void *) {
     if (ask) {
         int il_tmp;
         if (sscanf(t->name, "Kcur-%d", &il_tmp) == 1) {
-            return g_calib.pre_rope ? (ggml_n_dims(t) == 2) : (ggml_n_dims(t) == 3);
+            // Accept both 2D and 3D Kcur (GPU may produce 3D even for pre-rope)
+            return true;
         }
         return false;
     }
@@ -148,7 +149,8 @@ static bool tq_collect_callback(struct ggml_tensor * t, bool ask, void *) {
         data = (const float *)g_tensor_buf.data();
     }
 
-    if (g_calib.pre_rope) {
+    // Handle both 2D [n_embd_k_gqa, n_tokens] and 3D [head_dim, n_heads, n_tokens]
+    if (ggml_n_dims(t) == 2) {
         g_calib.accumulate_2d(il, data, t->ne[0], t->ne[1]);
     } else {
         g_calib.accumulate(il, data, t->ne[2]);
