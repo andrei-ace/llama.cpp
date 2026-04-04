@@ -6805,31 +6805,40 @@ void kernel_flash_attn_ext_impl(
         }
     }
 
-    // TQ_FWHT_O: inverse FWHT on output (V was stored in FWHT space)
-    // Note: so/so4 are o_t = float, not half
+    // TQ_FWHT_O: inverse FWHT on output via registers + SIMD shuffles (barrier-free)
     if (TQ_FWHT_O) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        constexpr short OPT = DV / NW; // output elements per thread
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
             if (iq1 + j < args.ne01) {
                 const float scale = S[jj] == 0.0 ? 0.0f : 1.0f/S[jj];
                 threadgroup float * o_j = (threadgroup float *)so + j*PV;
-                // Scale then inverse FWHT in float
-                for (short i = tiisg; i < DV; i += NW) o_j[i] *= scale;
-                simdgroup_barrier(mem_flags::mem_threadgroup);
-                for (short step = 1; step < DV; step *= 2) {
-                    for (short idx = tiisg; idx < DV/2; idx += NW) {
-                        short i = (idx / step) * (2 * step) + (idx % step);
-                        float a = o_j[i], b = o_j[i + step];
-                        o_j[i] = a + b; o_j[i + step] = a - b;
+                // Load + scale into registers
+                float or_[OPT];
+                for (short k = 0; k < OPT; k++) or_[k] = o_j[tiisg * OPT + k] * scale;
+                // Intra-thread butterflies
+                for (short step = 1; step < OPT; step *= 2) {
+                    for (short i = 0; i < OPT; i += 2 * step) {
+                        for (short jj2 = 0; jj2 < step; jj2++) {
+                            float a = or_[i+jj2], b = or_[i+jj2+step];
+                            or_[i+jj2] = a + b; or_[i+jj2+step] = a - b;
+                        }
                     }
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
                 }
+                // Cross-thread via shuffle
+                for (ushort mask = 1; mask <= NW/2; mask *= 2) {
+                    for (short k = 0; k < OPT; k++) {
+                        float b = simd_shuffle_xor(or_[k], mask);
+                        or_[k] = (tiisg & mask) == 0 ? (or_[k] + b) : (b - or_[k]);
+                    }
+                }
+                // Write back normalized
                 const float s = 1.0f / sqrt((float)DV);
-                for (short i = tiisg; i < DV; i += NW) o_j[i] *= s;
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+                for (short k = 0; k < OPT; k++) o_j[tiisg * OPT + k] = or_[k] * s;
             }
         }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
         for (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
             if (iq1 + j >= args.ne01) break;
@@ -7616,21 +7625,28 @@ kernel void kernel_flash_attn_ext_vec(
 
         const float S = NWG == 1 ? (ss[0] == 0.0f ? 0.0f : 1.0f/ss[0]) : 1.0f;
 
-        // TQ_FWHT_O: inverse FWHT on output (V stored in FWHT space)
-        // FWHT is linear: reduce kernel can sum FWHT'd workgroup outputs correctly
+        // TQ_FWHT_O: inverse FWHT on output via registers + SIMD shuffles (barrier-free)
         if (TQ_FWHT_O) {
             threadgroup float * o_f = (threadgroup float *) so4;
-            for (short step = 1; step < DV; step *= 2) {
-                for (short idx = tiisg; idx < DV/2; idx += NW) {
-                    short i = (idx / step) * (2 * step) + (idx % step);
-                    float a = o_f[i], b = o_f[i + step];
-                    o_f[i] = a + b; o_f[i + step] = a - b;
+            constexpr short OPT = DV / NW;
+            float or_[OPT];
+            for (short k = 0; k < OPT; k++) or_[k] = o_f[tiisg * OPT + k];
+            for (short step = 1; step < OPT; step *= 2) {
+                for (short i = 0; i < OPT; i += 2 * step) {
+                    for (short j = 0; j < step; j++) {
+                        float a = or_[i+j], b = or_[i+j+step];
+                        or_[i+j] = a + b; or_[i+j+step] = a - b;
+                    }
                 }
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            for (ushort mask = 1; mask <= NW/2; mask *= 2) {
+                for (short k = 0; k < OPT; k++) {
+                    float b = simd_shuffle_xor(or_[k], mask);
+                    or_[k] = (tiisg & mask) == 0 ? (or_[k] + b) : (b - or_[k]);
+                }
             }
             float fwht_s = 1.0f / sqrt((float)DV);
-            for (short i = tiisg; i < DV; i += NW) o_f[i] *= fwht_s;
-            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (short k = 0; k < OPT; k++) o_f[tiisg * OPT + k] = or_[k] * fwht_s;
         }
 
         // interleave the workgroup data
