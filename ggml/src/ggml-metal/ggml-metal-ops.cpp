@@ -2941,8 +2941,8 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         const bool is_tq_k = (kt == GGML_TYPE_TQ3J || kt == GGML_TYPE_TQ2J ||
                                kt == GGML_TYPE_TQ3J_256 || kt == GGML_TYPE_TQ2J_256 ||
                                kt == GGML_TYPE_TQ3J_512 || kt == GGML_TYPE_TQ2J_512);
-        const int64_t tq_smem_extra = (is_tq_k ? 280 : 0); // aligned up
-#define FATTN_SMEM(nsg) (GGML_PAD(((GGML_PAD(ne00, 128) + 4*ncpsg + 2*GGML_PAD(ne20, 128))*(nsg))*(sizeof(float)/2) + tq_smem_extra, 16))
+        // TQ vec kernel uses fused dot product directly from device memory — no extra shmem needed
+#define FATTN_SMEM(nsg) (GGML_PAD(((GGML_PAD(ne00, 128) + 4*ncpsg + 2*GGML_PAD(ne20, 128))*(nsg))*(sizeof(float)/2), 16))
 
         int64_t nsg = 1;
 
@@ -2957,12 +2957,8 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         } else {
             nwg = 32;
             nsg = 1;
-            // TQ vec kernel uses shared Q and K scratch without per-simdgroup offsets,
-            // so nsg must stay 1 to avoid races on the FWHT transform and K block load
-            if (!is_tq_k) {
-                while (2*nwg*nsg*ncpsg < ne11 && nsg < 4) {
-                    nsg *= 2;
-                }
+            while (2*nwg*nsg*ncpsg < ne11 && nsg < 4) {
+                nsg *= 2;
             }
         }
 
