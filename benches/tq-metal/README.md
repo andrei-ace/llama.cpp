@@ -31,15 +31,16 @@
 
 ## Quality (31 tests: math, matrix, factual, logic, code, delayed-recall)
 
-| Config | Score | Pct | Notes |
-|:------:|:-----:|:---:|:------|
-| f16/f16 | 31/31 | 100% | |
-| q8_0/q8_0 | 31/31 | 100% | |
-| q4_0/q4_0 | 31/31 | 100% | |
-| **tq3j/q4_0** | **31/31** | **100%** | |
-| **tq3j/tq3** | **30/31** | **96.8%** | 1 empty (token budget, not quality) |
-| **tq2j/q4_0** | **30/31** | **96.8%** | 1 empty (token budget, not quality) |
-| tq2j/tq2 | 26/31 | 83.9% | 3 empty + 2 wrong answers |
+| Config | Score | Pct | KV bpv | Notes |
+|:------:|:-----:|:---:|:------:|:------|
+| f16/f16 | 31/31 | 100% | 32.0 | |
+| q8_0/q8_0 | 31/31 | 100% | 17.0 | |
+| q4_0/q4_0 | 31/31 | 100% | 9.0 | |
+| **tq3j/q4_0** | **31/31** | **100%** | **8.6** | |
+| **tq2j/q4_0** | **30/31** | **96.8%** | **7.6** | 1 empty (token budget, not quality) |
+| **tq3j/tq3** | **30/31** | **96.8%** | **7.1** | 1 empty (token budget, not quality) |
+| **tq2j/tq3** | **30/31** | **96.8%** | **6.1** | 1 empty (token budget, not quality) |
+| tq2j/tq2 | 26/31 | 83.9% | 5.1 | 3 empty + 2 wrong answers |
 
 ### Quality test details
 
@@ -56,11 +57,9 @@
 
 **tq3j/q4_0 (0 failures):** perfect score.
 
-**tq3j/tq3 (1 failure):**
-- `math06` (347×283=98201): empty response — model's chain-of-thought for large multiplication exceeded 1024 token budget. Not a quantization error.
-
-**tq2j/q4_0 (1 failure):**
-- `delayed_D2`: empty response — token budget. K-side tq2j is fine; the tq2j/tq2 failures were V-side (tq2).
+**tq3j/tq3, tq2j/q4_0, tq2j/tq3 (1 failure each):**
+- All fail on `math06` (347×283=98201) or `delayed_D2`: empty response — model's
+  chain-of-thought exceeded token budget. Not quantization errors.
 
 **tq2j/tq2 (5 failures):**
 - `math06`: empty (token budget)
@@ -76,15 +75,16 @@ Short prompt (~3K tokens, ~2.6K prompt tokens) and long prompt (~12K tokens with
 
 Tested via llama-server API with `max_tokens=2048`.
 
-| Config | Short (3K) | Long (12K) |
-|:------:|:----------:|:----------:|
-| f16/f16 | 8/8 | 8/8 |
-| q8_0/q8_0 | 8/8 | 8/8 |
-| q4_0/q4_0 | 8/8 | 8/8 |
-| tq3j/q4_0 | 8/8 | 8/8 |
-| tq2j/q4_0 | 8/8 | 8/8 |
-| tq3j/tq3 | 8/8 | 8/8 |
-| tq2j/tq2 | 0/8 | **0/8** |
+| Config | Short (3K) | Long (12K) | KV bpv |
+|:------:|:----------:|:----------:|:------:|
+| f16/f16 | 8/8 | 8/8 | 32.0 |
+| q8_0/q8_0 | 8/8 | 8/8 | 17.0 |
+| q4_0/q4_0 | 8/8 | 8/8 | 9.0 |
+| **tq3j/q4_0** | **8/8** | **8/8** | **8.6** |
+| **tq2j/q4_0** | **8/8** | **8/8** | **7.6** |
+| **tq3j/tq3** | **8/8** | **8/8** | **7.1** |
+| **tq2j/tq3** | **8/8** | **8/8** | **6.1** |
+| tq2j/tq2 | 0/8 | **0/8** | 5.1 |
 
 All configs except tq2j/tq2 pass 8/8 on both short and long NIAH.
 Initial batch run showed some 0/8 scores for tq3j/tq3 and tq2j/q4_0
