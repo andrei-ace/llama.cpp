@@ -128,6 +128,27 @@ Needles (exact values the model must retrieve):
 | Q7 | Handwritten note instructions | lighthouse at midnight, Rothschild documents |
 | Q8 | Carpet pigment + manufacturer | Prussian blue, Hargrove Mills (1987) |
 
+## Per-layer variance analysis
+
+Calibration on Gemma4 26B (512 tokens PTB). Top 25% of channels' share of total variance:
+
+| Layer | Type | dk | Top 25% variance |
+|:-----:|:----:|:--:|:-----------------:|
+| 0 | SWA | 256 | 79.6% |
+| 1 | SWA | 256 | 63.2% |
+| 5 | Global | 512 | 34.4% |
+| 6 | SWA | 256 | 57.9% |
+| 10 | SWA | 256 | 72.1% |
+| 11 | Global | 512 | 39.3% |
+| 17 | Global | 512 | 40.2% |
+| 22 | SWA | 256 | 77.1% |
+| 25 | SWA | 256 | 78.5% |
+| 29 | Global | 512 | 38.8% |
+
+SWA layers range 58–80%, global layers 34–42%. Currently all layers use the
+same quant type. Per-layer type selection would likely improve the
+quality/compression tradeoff.
+
 ## Recommendations
 
 | Use case | Config | KV bpv | Why |
