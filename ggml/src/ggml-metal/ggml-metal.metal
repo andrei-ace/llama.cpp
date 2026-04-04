@@ -1017,6 +1017,18 @@ constant float tq_c4_d512[4] = {
     -0.0667516583f, -0.0200102396f,  0.0200102396f,  0.0667516583f,
 };
 
+// --- TQ2J branchless centroid decode ---
+// For 2-bit indices with 4 symmetric centroids [-A, -B, B, A]:
+// Use vector select instead of 4 table lookups — pure ALU, no memory reads.
+template <short BLK_DIM>
+inline float4 tq2j_decode4(uint8_t byte) {
+    constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
+    int4 idx = int4((byte>>0)&3, (byte>>2)&3, (byte>>4)&3, (byte>>6)&3);
+    float4 lo = select(float4(c[0]), float4(c[1]), (idx & 1) != 0);
+    float4 hi = select(float4(c[2]), float4(c[3]), (idx & 1) != 0);
+    return select(lo, hi, (idx & 2) != 0);
+}
+
 // --- SET_ROWS helpers ---
 
 static void tq_pk3(device uint8_t * q, int j, int v) {
@@ -1410,8 +1422,8 @@ void dequantize_tq2_t4(device const block_tq2 * xb_struct, short il, thread type
 
 // --- Fused K·Q dot product functions ---
 // Skip dequant entirely: compute dot(q_fwht, k_quantized) directly from indices.
-// Saves per-element multiply by norm (1 multiply at end instead of 4) and eliminates
-// the intermediate k4_t register. Q is already in shared memory after FWHT rotation.
+// Reads block header once, loops over NI chunks of 4 elements each.
+// Q is already in shared memory after FWHT rotation.
 
 template <short BLK_DIM = 128>
 float kq_dot_tq3j(device const block_tq3j * xb_struct, short il, threadgroup const half4 * sq4, short qi) {
@@ -1431,33 +1443,35 @@ float kq_dot_tq3j(device const block_tq3j * xb_struct, short il, threadgroup con
     uint32_t sb   = (uint32_t)(signs[base >> 3] >> (base & 7));
 
     float4 q = float4(sq4[qi]);
-    float cdot = 0.0f, sdot = 0.0f;
+    float cdot = 0.0f;
     for (int i = 0; i < 4; i++) {
         cdot += q[i] * c[(bits >> (sh0 + i * 3)) & 7];
-        sdot += q[i] * ((sb >> i) & 1 ? 1.0f : -1.0f);
     }
-    return norm * cdot + rnorm * sdot;
+    float4 sv = float4(2.0f * float((sb>>0)&1) - 1.0f, 2.0f * float((sb>>1)&1) - 1.0f,
+                       2.0f * float((sb>>2)&1) - 1.0f, 2.0f * float((sb>>3)&1) - 1.0f);
+    return norm * cdot + rnorm * dot(q, sv);
 }
 
-template <short BLK_DIM = 128>
-float kq_dot_tq2j(device const block_tq2j * xb_struct, short il, threadgroup const half4 * sq4, short qi) {
-    device const uint8_t * xb = (device const uint8_t *)xb_struct;
+template <short BLK_DIM = 128, short NI = 1>
+float kq_dot_tq2j(device const uint8_t * xb, short tx, short nl, threadgroup const half4 * sq4) {
     const float norm  = float(*(device const half *)(xb));
     const float rnorm = QJL_SCALE_F / (float)BLK_DIM * float(*(device const half *)(xb + 2));
     device const uint8_t * qs = xb + 4;
     constexpr int signs_off = 4 + BLK_DIM / 4;
     device const uint8_t * signs = xb + signs_off;
-    constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
-    const int base = il * 4;
-
-    const uint32_t idx_byte = (uint32_t)(qs[base / 4] >> (2 * (base % 4)));
-    uint32_t sb = (uint32_t)(signs[base / 8] >> (base % 8));
-
-    float4 q = float4(sq4[qi]);
     float cdot = 0.0f, sdot = 0.0f;
-    for (int i = 0; i < 4; i++) {
-        cdot += q[i] * c[(idx_byte >> (i * 2)) & 3];
-        sdot += q[i] * ((sb >> i) & 1 ? 1.0f : -1.0f);
+    for (short ii = 0; ii < NI; ++ii) {
+        const int el = (tx + ii * nl) * 4;
+        // Branchless decode: 2 vector selects instead of 4 table lookups
+        float4 cv = tq2j_decode4<BLK_DIM>(qs[el / 4]);
+        uint32_t sb = (uint32_t)(signs[el / 8] >> (el & 7));
+
+        float4 q = float4(sq4[tx + ii * nl]);
+        cdot += dot(q, cv);
+        // Branchless sign: 2*bit - 1
+        float4 sv = float4(2.0f * float((sb>>0)&1) - 1.0f, 2.0f * float((sb>>1)&1) - 1.0f,
+                           2.0f * float((sb>>2)&1) - 1.0f, 2.0f * float((sb>>3)&1) - 1.0f);
+        sdot += dot(q, sv);
     }
     return norm * cdot + rnorm * sdot;
 }
@@ -7318,6 +7332,7 @@ kernel void kernel_flash_attn_ext_vec(
                         }
                     } else if (TQ_FWHT) {
                         // TQ path: fused dot product directly from device memory (no shmem, no barriers)
+                        // Header (norm/rnorm) read once, all DK4/NL chunks processed in single call
                         device const uint8_t * pk_raw = (device const uint8_t *) (k + ((ic + NE*cc + ty)*args.nb11));
 
                         if (is_same<kd4_t, block_tq3j>::value) {
@@ -7325,9 +7340,7 @@ kernel void kernel_flash_attn_ext_vec(
                                 mqk[cc] += kq_dot_tq3j<DK>((device const block_tq3j *)pk_raw, tx + ii*NL, sq4, tx + ii*NL);
                             }
                         } else if (is_same<kd4_t, block_tq2j>::value) {
-                            for (short ii = 0; ii < DK4/NL; ++ii) {
-                                mqk[cc] += kq_dot_tq2j<DK>((device const block_tq2j *)pk_raw, tx + ii*NL, sq4, tx + ii*NL);
-                            }
+                            mqk[cc] += kq_dot_tq2j<DK, DK4/NL>(pk_raw, tx, NL, sq4);
                         }
                     } else {
                         device const kd4_t * pk = (device const kd4_t *) (k + ((ic + NE*cc + ty)*args.nb11));
