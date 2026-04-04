@@ -6295,27 +6295,40 @@ void kernel_flash_attn_ext_impl(
         }
     }
 
-    // TurboQuant: FWHT-transform Q in shared memory (works for any DK)
-    // Use float precision for butterflies to avoid half-precision accumulation error
+    // TurboQuant: FWHT-transform Q in shared memory via registers + SIMD shuffles
+    // No barriers needed — intra-thread butterflies then cross-thread via simd_shuffle_xor
     if (TQ_FWHT) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        constexpr short QPT = DK / NW; // Q elements per thread
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
             const short j = jj*NSG + sgitg;
             if (iq1 + j < args.ne01) {
                 threadgroup half * sq_j = (threadgroup half *)sq + j*DK;
-                for (short step = 1; step < DK; step *= 2) {
-                    for (short idx = tiisg; idx < DK/2; idx += NW) {
-                        short i = (idx / step) * (2 * step) + (idx % step);
-                        float a = float(sq_j[i]), b = float(sq_j[i + step]);
-                        sq_j[i] = half(a + b); sq_j[i + step] = half(a - b);
+                // Load into registers
+                float qr[QPT];
+                for (short k = 0; k < QPT; k++) qr[k] = float(sq_j[tiisg * QPT + k]);
+                // Intra-thread butterflies
+                for (short step = 1; step < QPT; step *= 2) {
+                    for (short i = 0; i < QPT; i += 2 * step) {
+                        for (short jj2 = 0; jj2 < step; jj2++) {
+                            float a = qr[i+jj2], b = qr[i+jj2+step];
+                            qr[i+jj2] = a + b; qr[i+jj2+step] = a - b;
+                        }
                     }
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
                 }
+                // Cross-thread butterflies via shuffle
+                for (ushort mask = 1; mask <= NW/2; mask *= 2) {
+                    for (short k = 0; k < QPT; k++) {
+                        float b = simd_shuffle_xor(qr[k], mask);
+                        qr[k] = (tiisg & mask) == 0 ? (qr[k] + b) : (b - qr[k]);
+                    }
+                }
+                // Normalize and write back
                 const float s = 1.0f / sqrt((float)DK);
-                for (short i = tiisg; i < DK; i += NW) sq_j[i] = half(float(sq_j[i]) * s);
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+                for (short k = 0; k < QPT; k++) sq_j[tiisg * QPT + k] = half(qr[k] * s);
             }
         }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
     }
     // zero out
     FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
@@ -7226,23 +7239,34 @@ kernel void kernel_flash_attn_ext_vec(
         }
     }
 
-    // TurboQuant: FWHT-transform Q in shared memory (works for any DK)
-    // Only simdgroup 0 performs the transform to avoid races when nsg > 1
+    // TurboQuant: FWHT-transform Q via registers + SIMD shuffles (barrier-free)
+    // Only simdgroup 0 performs the transform; others wait at threadgroup_barrier
     if (TQ_FWHT) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (sgitg == 0) {
             threadgroup half * sq_h = (threadgroup half *) sq4;
             if (iq1 < args.ne01) {
-                for (short step = 1; step < DK; step *= 2) {
-                    for (short idx = tiisg; idx < DK/2; idx += NW) {
-                        short i = (idx / step) * (2 * step) + (idx % step);
-                        float a = float(sq_h[i]), b = float(sq_h[i + step]);
-                        sq_h[i] = half(a + b); sq_h[i + step] = half(a - b);
+                constexpr short QPT = DK / NW;
+                float qr[QPT];
+                for (short k = 0; k < QPT; k++) qr[k] = float(sq_h[tiisg * QPT + k]);
+                // Intra-thread butterflies
+                for (short step = 1; step < QPT; step *= 2) {
+                    for (short i = 0; i < QPT; i += 2 * step) {
+                        for (short j = 0; j < step; j++) {
+                            float a = qr[i+j], b = qr[i+j+step];
+                            qr[i+j] = a + b; qr[i+j+step] = a - b;
+                        }
                     }
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                // Cross-thread butterflies via shuffle
+                for (ushort mask = 1; mask <= NW/2; mask *= 2) {
+                    for (short k = 0; k < QPT; k++) {
+                        float b = simd_shuffle_xor(qr[k], mask);
+                        qr[k] = (tiisg & mask) == 0 ? (qr[k] + b) : (b - qr[k]);
+                    }
                 }
                 const float s = 1.0f / sqrt((float)DK);
-                for (short i = tiisg; i < DK; i += NW) sq_h[i] = half(float(sq_h[i]) * s);
+                for (short k = 0; k < QPT; k++) sq_h[tiisg * QPT + k] = half(qr[k] * s);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
