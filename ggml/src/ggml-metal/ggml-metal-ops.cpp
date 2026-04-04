@@ -2957,8 +2957,12 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         } else {
             nwg = 32;
             nsg = 1;
-            while (2*nwg*nsg*ncpsg < ne11 && nsg < 4) {
-                nsg *= 2;
+            // TQ vec kernel uses shared Q and K scratch without per-simdgroup offsets,
+            // so nsg must stay 1 to avoid races on the FWHT transform and K block load
+            if (!is_tq_k) {
+                while (2*nwg*nsg*ncpsg < ne11 && nsg < 4) {
+                    nsg *= 2;
+                }
             }
         }
 

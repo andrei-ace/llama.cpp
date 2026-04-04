@@ -259,11 +259,22 @@ llama_kv_cache::llama_kv_cache(
             int n_ml = 0;
             const int32_t * lmap = tq_get_layer_map(&n_ml);
             ggml_type orig_k = layer_type_k;
-            layer_type_k = tq_layer_override(layer_type_k, il, lmap, n_ml);
-            if (layer_type_k != orig_k) {
-                layer_type_v = layer_type_k; // match V to overridden K (e.g. both q8_0)
-                LLAMA_LOG_INFO("%s: layer %d: K/V overridden to %s (was %s)\n",
-                    __func__, il, ggml_type_name(layer_type_k), ggml_type_name(orig_k));
+            ggml_type override_k = tq_layer_override(layer_type_k, il, lmap, n_ml);
+            // Validate: re-resolve through tq_resolve_type to reject unsupported head dims
+            if (override_k != orig_k) {
+                if (tq_is_type(override_k)) {
+                    override_k = tq_resolve_type(override_k, (int)hparams.n_embd_head_k(il));
+                }
+                // Reject invalid enum values (must be a known ggml_type with a name)
+                if (override_k >= 0 && ggml_type_name(override_k) != nullptr) {
+                    layer_type_k = override_k;
+                    layer_type_v = override_k; // match V to overridden K (e.g. both q8_0)
+                    LLAMA_LOG_INFO("%s: layer %d: K/V overridden to %s (was %s)\n",
+                        __func__, il, ggml_type_name(layer_type_k), ggml_type_name(orig_k));
+                } else {
+                    LLAMA_LOG_WARN("%s: layer %d: ignoring invalid override type %d\n",
+                        __func__, il, (int)override_k);
+                }
             }
         }
 
