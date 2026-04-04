@@ -1,78 +1,91 @@
 # TurboQuant Metal Benchmarks
 
 **Model:** Gemma4 26B A4B-it Q4_K_M  
-**Hardware:** Apple M4 Pro (14-core, 36GB unified memory)  
-**Date:** 2026-04-04  
-**Branch:** `turboquant-gemma` @ `b949625ff`
+**Hardware:** Apple M4 Pro (14-core, 48GB unified memory)  
+**Date:** 2026-04-04 / 2026-04-05  
+**Branch:** `turboquant-gemma`
 
 **Benchmark scripts:**
 - [turboquant_quality.py](https://github.com/eullm/eullm/blob/main/bench/turboquant_quality.py)
 - [turboquant_math_accuracy.py](https://github.com/eullm/eullm/blob/main/bench/turboquant_math_accuracy.py)
 
-## Speed (llama-bench, tg128, pp512)
+## Speed (llama-bench, pp512 + tg128)
 
-| Config | pp512 (t/s) | tg128 (t/s) | vs q4_0 | KV bpv | KV MiB (262k ctx) |
-|:------:|:-----------:|:-----------:|:-------:|:------:|:-----------------:|
-| f16/f16 | 769 | 62.3 | +8.5% | 32.0 | ~7680 |
-| q8_0/q8_0 | 758 | 58.3 | +1.4% | 17.0 | ~4080 |
-| q4_0/q4_0 | 756 | 57.5 | baseline | 9.0 | ~1524 |
-| **tq3j/q4_0** | **747** | **57.6** | **+0.3%** | **8.6** | **~1450** |
-| **tq3j/tq3** | **745** | **56.5** | **-1.7%** | **7.1** | **~1202** |
-| tq2j/tq2 | — | ~55.9 | -2.6% | 5.1 | ~860 |
+| Config | pp512 (t/s) | tg128 (t/s) | vs q4_0 | KV bpv |
+|:------:|:-----------:|:-----------:|:-------:|:------:|
+| f16/f16 | 770 | 62.4 | +8.1% | 32.00 |
+| q8_0/q8_0 | 759 | 58.2 | +0.9% | 17.00 |
+| q4_0/q4_0 | 758 | 57.7 | baseline | 9.00 |
+| **tq3j/q4_0** | **750** | **57.9** | **+0.3%** | **8.62** |
+| **tq2j/q4_0** | **760** | **57.5** | **-0.3%** | **7.62** |
+| **tq3j/tq3** | **747** | **56.2** | **-2.6%** | **7.18** |
+| **tq2j/tq3** | **753** | **56.3** | **-2.4%** | **6.18** |
+| tq2j/tq2 | 757 | 56.8 | -1.6% | 5.18 |
 
-### Long context (tg128 at depth)
+### Long context (tg128 t/s at KV depth)
 
-| Config | d=128 | d=8192 | d=32768 |
-|:------:|:-----:|:------:|:-------:|
-| f16/f16 | 62.5 | 55.3 | 46.0 |
-| q4_0/q4_0 | 57.4 | 42.8 | — |
-| **tq3j/q4_0** | **57.3** | **45.6 (+7%)** | **32.1** |
-| tq3j/tq3 | 55.8 | 43.4 (+1%) | — |
+| Config | d=512 | d=4k | d=16k | d=32k | d=65k | d=131k | KV bpv |
+|:------:|:-----:|:----:|:-----:|:-----:|:-----:|:------:|:------:|
+| f16/f16 | 60.8 | 57.0 | 51.9 | 45.8 | 36.0 | 21.1 | 32.00 |
+| q8_0/q8_0 | 58.0 | 51.3 | 40.2 | 31.3 | 21.2 | 12.9 | 17.00 |
+| q4_0/q4_0 | 57.3 | 50.2 | 38.3 | 29.0 | 19.4 | 11.6 | 9.00 |
+| **tq3j/q4_0** | **57.6** | **51.8** | **41.1** | **31.9** | 19.0 | 13.7 | **8.62** |
+| **tq2j/q4_0** | **57.2** | **52.1** | **42.5** | **34.2** | **24.5** | **15.6** | **7.62** |
+| **tq3j/tq3** | **56.0** | **50.3** | **39.4** | **30.1** | 20.8 | 12.7 | **7.18** |
+| **tq2j/tq3** | **56.0** | **50.3** | **40.3** | **31.6** | **22.1** | **14.0** | **6.18** |
+| tq2j/tq2 | 56.4 | 51.9 | 43.2 | 35.1 | 22.4 | 16.8 | 5.18 |
 
-## Quality (31 tests: math, matrix, factual, logic, code, delayed-recall)
+### TQ vs q4_0/q4_0 speed advantage at depth
 
-| Config | Score | Pct | KV bpv | Notes |
-|:------:|:-----:|:---:|:------:|:------|
-| f16/f16 | 31/31 | 100% | 32.0 | |
-| q8_0/q8_0 | 31/31 | 100% | 17.0 | |
-| q4_0/q4_0 | 31/31 | 100% | 9.0 | |
-| **tq3j/q4_0** | **31/31** | **100%** | **8.6** | |
-| **tq2j/q4_0** | **31/31** | **100%** | **7.6** | 31/31 at max_tokens=4096 |
-| **tq3j/tq3** | **30/31** | **96.8%** | **7.1** | math06 empty even at 4096 tokens |
-| **tq2j/tq3** | **30/31** | **96.8%** | **6.1** | math06 empty even at 4096 tokens |
-| tq2j/tq2 | 26/31 | 83.9% | 5.1 | 3 empty + 2 wrong answers |
+| Config | d=4k | d=16k | d=32k | d=65k | d=131k |
+|:------:|:----:|:-----:|:-----:|:-----:|:------:|
+| tq3j/q4_0 | +3% | +7% | +10% | -2% | +18% |
+| **tq2j/q4_0** | **+4%** | **+11%** | **+18%** | **+26%** | **+34%** |
+| tq3j/tq3 | +0% | +3% | +4% | +7% | +9% |
+| **tq2j/tq3** | **+0%** | **+5%** | **+9%** | **+14%** | **+21%** |
+
+## Quality (37 tests, max_tokens=4096)
+
+Categories: math (7), matrix (5), factual (6), logic (5), code (5),
+Korean transliteration (6), delayed-recall matrix (3).
+
+| Config | Score | Pct | KV bpv | Failures |
+|:------:|:-----:|:---:|:------:|:---------|
+| f16/f16 | 37/37 | 100% | 32.00 | none |
+| q4_0/q4_0 | 37/37 | 100% | 9.00 | none |
+| **tq3j/q4_0** | **37/37** | **100%** | **8.62** | **none** |
+| **tq2j/q4_0** | **36/37** | **97.3%** | **7.62** | korean03 (empty) |
+| **tq3j/tq3** | **36/37** | **97.3%** | **7.18** | math06 (empty) |
+| **tq2j/tq3** | **36/37** | **97.3%** | **6.18** | math06 (empty) |
+| tq2j/tq2 | 27/37 | 73.0% | 5.18 | 10 failures (see below) |
 
 ### Quality test details
-
-28 direct tests + 3 delayed-recall matrix multiplication with ~500 tokens of filler:
 
 - **Math (7):** 17×19, 2^10, GCD(48,36), sum(1..10), log2(256), 347×283, is 997 prime?
 - **Matrix (5):** det([[3,8],[4,6]]), trace, det([[2,0],[0,5]]), 2×2 multiply (×2)
 - **Factual (6):** Ljubljana, W, Au, Canberra, 206 bones, Pacific ocean
 - **Logic (5):** roses syllogism, Fibonacci, geometric seq, discount price, distance
 - **Code (5):** FizzBuzz, HTTPS port, def keyword, SSH port, len()
+- **Korean (6):** Pauli→파울리, Bohr→보어, Schrödinger→슈뢰딩거, Heisenberg→하이젠베르크, Planck→플랑크, Fermi→페르미
 - **Delayed (3):** matrix A×B with 500 tokens of filler text between memorize and compute
 
 ### Failure analysis
 
 **tq3j/q4_0 (0 failures):** perfect score.
 
-**tq2j/q4_0 (0 failures at max_tokens=4096):** perfect score with higher budget.
-The 1024-token failure was token budget — rerun at 4096 passes.
+**tq2j/q4_0 (1 failure):**
+- `korean03` (Schrödinger→슈뢰딩거): empty response — token budget.
 
-**tq3j/tq3, tq2j/tq3 (1 failure each, persistent):**
+**tq3j/tq3, tq2j/tq3 (1 failure each):**
 - `math06` (347×283=98201): empty response even at max_tokens=4096. V=tq3
-  quantization makes the model's chain-of-thought for large multiplication
-  systematically longer (more verbose reasoning), exceeding even 4096 tokens.
-  Not a wrong answer — the model never finishes thinking. V=q4_0 configs
-  complete the same question within budget.
+  quantization makes the model's chain-of-thought systematically longer.
 
-**tq2j/tq2 (5 failures):**
-- `math06`: empty (token budget)
-- `mat04` ([[1,2],[3,4]]×[[5,6],[7,8]]): empty
-- `logic04` (discount price): empty
-- `delayed_D2`: empty
-- `delayed_D3` ([[3,1],[2,4]]×[[1,5],[3,2]]): truncated mid-thinking — 2-bit V quantization (tq2, no QJL) loses precision on recall-heavy tasks
+**tq2j/tq2 (10 failures):**
+- `math06`, `logic04`, `korean01`–`korean06`, `delayed_D2`, `delayed_D3`:
+  all empty responses. tq2 V quantization (2-bit MSE, no QJL) makes the
+  model's thinking chain systematically longer, exhausting the 4096 token
+  budget on more tests than other configs. Combined with NIAH garbage output,
+  tq2j/tq2 is not viable for production use.
 
 ## NIAH (Needle-in-a-Haystack)
 
@@ -83,14 +96,14 @@ Tested via llama-server API with `max_tokens=2048`.
 
 | Config | Short (3K) | Long (12K) | KV bpv |
 |:------:|:----------:|:----------:|:------:|
-| f16/f16 | 8/8 | 8/8 | 32.0 |
-| q8_0/q8_0 | 8/8 | 8/8 | 17.0 |
-| q4_0/q4_0 | 8/8 | 8/8 | 9.0 |
-| **tq3j/q4_0** | **8/8** | **8/8** | **8.6** |
-| **tq2j/q4_0** | **8/8** | **8/8** | **7.6** |
-| **tq3j/tq3** | **8/8** | **8/8** | **7.1** |
-| **tq2j/tq3** | **8/8** | **8/8** | **6.1** |
-| tq2j/tq2 | 0/8 | **0/8** | 5.1 |
+| f16/f16 | 8/8 | 8/8 | 32.00 |
+| q8_0/q8_0 | 8/8 | 8/8 | 17.00 |
+| q4_0/q4_0 | 8/8 | 8/8 | 9.00 |
+| **tq3j/q4_0** | **8/8** | **8/8** | **8.62** |
+| **tq2j/q4_0** | **8/8** | **8/8** | **7.62** |
+| **tq3j/tq3** | **8/8** | **8/8** | **7.18** |
+| **tq2j/tq3** | **8/8** | **8/8** | **6.18** |
+| tq2j/tq2 | 0/8 | **0/8** | 5.18 |
 
 All configs except tq2j/tq2 pass 8/8 on both short and long NIAH.
 Initial batch run showed some 0/8 scores for tq3j/tq3 and tq2j/q4_0
@@ -118,3 +131,12 @@ Measured at d=0 (pure SET_ROWS + matmul, no FA):
 | tq3j/tq3 (real) | 56.3 | 0.55 ms/token |
 
 SET_ROWS accounts for ~85% of the TQ overhead at short context.
+
+## Recommendations
+
+| Use case | Config | KV bpv | Why |
+|:---------|:------:|:------:|:----|
+| Best quality | **tq3j/q4_0** | 8.62 | 100% quality, matches q4_0 speed, +18% at 131k |
+| Best memory efficiency | **tq2j/tq3** | 6.18 | 97.3% quality, 31% less KV than q4_0, +21% at 131k |
+| Best long-context speed | **tq2j/q4_0** | 7.62 | 97.3% quality, +34% over q4_0 at 131k |
+| Avoid | tq2j/tq2 | 5.18 | 73% quality, Korean fails, NIAH garbage |

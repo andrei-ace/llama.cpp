@@ -1,203 +1,288 @@
+TurboQuant Quality Results
+Model: models/gemma-4-26B-A4B-it-Q4_K_M.gguf
+max_tokens: 4096
+Tests: 37
 
-==================================================
-=== f16/f16 (K=f16 V=f16) ===
-==================================================
-Server ready.
-  PASS  math01
-  PASS  math02
-  PASS  math03
-  PASS  math04
-  PASS  math05
-  PASS  math06
-  PASS  math07
-  PASS  mat01
-  PASS  mat02
-  PASS  mat03
-  PASS  mat04
-  PASS  mat05
-  PASS  fact01
-  PASS  fact02
-  PASS  fact03
-  PASS  fact04
-  PASS  fact05
-  PASS  fact06
-  PASS  logic01
-  PASS  logic02
-  PASS  logic03
-  PASS  logic04
-  PASS  logic05
-  PASS  code01
-  PASS  code02
-  PASS  code03
-  PASS  code04
-  PASS  code05
-  PASS  delayed_D1
-  PASS  delayed_D2
-  PASS  delayed_D3
-
-  f16/f16: 31/31 (100%)
-
-==================================================
-=== q8_0/q8_0 (K=q8_0 V=q8_0) ===
-==================================================
-Server ready.
-  PASS  math01
-  PASS  math02
-  PASS  math03
-  PASS  math04
-  PASS  math05
-  PASS  math06
-  PASS  math07
-  PASS  mat01
-  PASS  mat02
-  PASS  mat03
-  PASS  mat04
-  PASS  mat05
-  PASS  fact01
-  PASS  fact02
-  PASS  fact03
-  PASS  fact04
-  PASS  fact05
-  PASS  fact06
-  PASS  logic01
-  PASS  logic02
-  PASS  logic03
-  PASS  logic04
-  PASS  logic05
-  PASS  code01
-  PASS  code02
-  PASS  code03
-  PASS  code04
-  PASS  code05
-  PASS  delayed_D1
-  PASS  delayed_D2
-  PASS  delayed_D3
-
-  q8_0/q8_0: 31/31 (100%)
-
-==================================================
-=== q4_0/q4_0 (K=q4_0 V=q4_0) ===
-==================================================
-Server ready.
-  PASS  math01
-  PASS  math02
-  PASS  math03
-  PASS  math04
-  PASS  math05
-  PASS  math06
-  PASS  math07
-  PASS  mat01
-  PASS  mat02
-  PASS  mat03
-  PASS  mat04
-  PASS  mat05
-  PASS  fact01
-  PASS  fact02
-  PASS  fact03
-  PASS  fact04
-  PASS  fact05
-  PASS  fact06
-  PASS  logic01
-  PASS  logic02
-  PASS  logic03
-  PASS  logic04
-  PASS  logic05
-  PASS  code01
-  PASS  code02
-  PASS  code03
-  PASS  code04
-  PASS  code05
-  PASS  delayed_D1
-  PASS  delayed_D2
-  PASS  delayed_D3
-
-  q4_0/q4_0: 31/31 (100%)
-
-==================================================
-=== tq3j/tq3 (K=tq3j V=tq3) ===
-==================================================
-Server ready.
-  PASS  math01
-  PASS  math02
-  PASS  math03
-  PASS  math04
-  PASS  math05
-  FAIL  math06  expected=98201 got=(empty)
-  PASS  math07
-  PASS  mat01
-  PASS  mat02
-  PASS  mat03
-  PASS  mat04
-  PASS  mat05
-  PASS  fact01
-  PASS  fact02
-  PASS  fact03
-  PASS  fact04
-  PASS  fact05
-  PASS  fact06
-  PASS  logic01
-  PASS  logic02
-  PASS  logic03
-  PASS  logic04
-  PASS  logic05
-  PASS  code01
-  PASS  code02
-  PASS  code03
-  PASS  code04
-  PASS  code05
-  PASS  delayed_D1
-  PASS  delayed_D2
-  PASS  delayed_D3
-
-  tq3j/tq3: 30/31 (97%)
-  Failures: math06
-
-==================================================
-=== tq2j/tq2 (K=tq2j V=tq2) ===
-==================================================
-Server ready.
-  PASS  math01
-  PASS  math02
-  PASS  math03
-  PASS  math04
-  PASS  math05
-  FAIL  math06  expected=98201 got=(empty)
-  PASS  math07
-  PASS  mat01
-  PASS  mat02
-  PASS  mat03
-  FAIL  mat04  expected=[[19,22],[43,50]] got=(empty)
-  PASS  mat05
-  PASS  fact01
-  PASS  fact02
-  PASS  fact03
-  PASS  fact04
-  PASS  fact05
-  PASS  fact06
-  PASS  logic01
-  PASS  logic02
-  PASS  logic03
-  FAIL  logic04  expected=25 got=(empty)
-  PASS  logic05
-  PASS  code01
-  PASS  code02
-  PASS  code03
-  PASS  code04
-  PASS  code05
-  PASS  delayed_D1
-  FAIL  delayed_D2  expected=[[2,8],[15,6]] got=(empty)
-  FAIL  delayed_D3  expected=[[6,17],[14,18]] got=<|channel>-thought *   A = [[3, 1], [2, 4]]     *   B = [[1,
-
-  tq2j/tq2: 26/31 (84%)
-  Failures: math06, mat04, logic04, delayed_D2, delayed_D3
-
-==================================================
 SUMMARY
-==================================================
-  Config             Score    Pct  Failures
-  ------------------------------------------------------------
-  f16/f16          31/31   100.0%  none
-  q8_0/q8_0        31/31   100.0%  none
-  q4_0/q4_0        31/31   100.0%  none
-  tq3j/tq3         30/31    96.8%  math06
-  tq2j/tq2         26/31    83.9%  math06, mat04, logic04, delayed_D2, delayed_D3
+Config             Score    Pct  Failures
+------------------------------------------------------------
+f16/f16          37/37   100.0%  none
+q4_0/q4_0        37/37   100.0%  none
+tq3j/q4_0        37/37   100.0%  none
+tq2j/q4_0        36/37    97.3%  korean03
+tq3j/tq3         36/37    97.3%  math06
+tq2j/tq3         36/37    97.3%  math06
+
+DETAILS
+================================================================================
+f16/f16 | PASS | math01 | expected=323 | response=323
+f16/f16 | PASS | math02 | expected=1024 | response=1024
+f16/f16 | PASS | math03 | expected=12 | response=12
+f16/f16 | PASS | math04 | expected=55 | response=55
+f16/f16 | PASS | math05 | expected=8 | response=8
+f16/f16 | PASS | math06 | expected=98201 | response=98201
+f16/f16 | PASS | math07 | expected=yes | response=Yes
+f16/f16 | PASS | mat01 | expected=-14 | response=-14
+f16/f16 | PASS | mat02 | expected=15 | response=15
+f16/f16 | PASS | mat03 | expected=10 | response=10
+f16/f16 | PASS | mat04 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+f16/f16 | PASS | mat05 | expected=[[2,2],[2,2]] | response=[[2,2],[2,2]]
+f16/f16 | PASS | fact01 | expected=Ljubljana | response=Ljubljana
+f16/f16 | PASS | fact02 | expected=W | response=W
+f16/f16 | PASS | fact03 | expected=Au | response=Au
+f16/f16 | PASS | fact04 | expected=Canberra | response=Canberra
+f16/f16 | PASS | fact05 | expected=206 | response=206
+f16/f16 | PASS | fact06 | expected=Pacific | response=Pacific Ocean
+f16/f16 | PASS | logic01 | expected=no | response=No
+f16/f16 | PASS | logic02 | expected=21 | response=21
+f16/f16 | PASS | logic03 | expected=48 | response=48
+f16/f16 | PASS | logic04 | expected=25 | response=25
+f16/f16 | PASS | logic05 | expected=150 | response=150
+f16/f16 | PASS | code01 | expected=FizzBuzz | response=FizzBuzz
+f16/f16 | PASS | code02 | expected=443 | response=443
+f16/f16 | PASS | code03 | expected=def | response=def
+f16/f16 | PASS | code04 | expected=22 | response=22
+f16/f16 | PASS | code05 | expected=len | response=len
+f16/f16 | PASS | korean01 | expected=파울리 | response=볼프강 파울리
+f16/f16 | PASS | korean02 | expected=보어 | response=닐스 보어
+f16/f16 | PASS | korean03 | expected=슈뢰딩거 | response=에르빈 슈뢰딩거
+f16/f16 | PASS | korean04 | expected=하이젠베르크 | response=베르너 하이젠베르크
+f16/f16 | PASS | korean05 | expected=플랑크 | response=막스 플랑크
+f16/f16 | PASS | korean06 | expected=페르미 | response=엔리코 페르미
+f16/f16 | PASS | delayed_D1 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+f16/f16 | PASS | delayed_D2 | expected=[[2,8],[15,6]] | response=[[2, 8], [15, 6]]
+f16/f16 | PASS | delayed_D3 | expected=[[6,17],[14,18]] | response=[[6, 17], [14, 18]]
+q4_0/q4_0 | PASS | math01 | expected=323 | response=323
+q4_0/q4_0 | PASS | math02 | expected=1024 | response=1024
+q4_0/q4_0 | PASS | math03 | expected=12 | response=12
+q4_0/q4_0 | PASS | math04 | expected=55 | response=55
+q4_0/q4_0 | PASS | math05 | expected=8 | response=8
+q4_0/q4_0 | PASS | math06 | expected=98201 | response=98201
+q4_0/q4_0 | PASS | math07 | expected=yes | response=Yes
+q4_0/q4_0 | PASS | mat01 | expected=-14 | response=-14
+q4_0/q4_0 | PASS | mat02 | expected=15 | response=15
+q4_0/q4_0 | PASS | mat03 | expected=10 | response=10
+q4_0/q4_0 | PASS | mat04 | expected=[[19,22],[43,50]] | response=[[19,22],[43,50]]
+q4_0/q4_0 | PASS | mat05 | expected=[[2,2],[2,2]] | response=[[2,2],[2,2]]
+q4_0/q4_0 | PASS | fact01 | expected=Ljubljana | response=Ljubljana
+q4_0/q4_0 | PASS | fact02 | expected=W | response=W
+q4_0/q4_0 | PASS | fact03 | expected=Au | response=Au
+q4_0/q4_0 | PASS | fact04 | expected=Canberra | response=Canberra
+q4_0/q4_0 | PASS | fact05 | expected=206 | response=206
+q4_0/q4_0 | PASS | fact06 | expected=Pacific | response=Pacific Ocean
+q4_0/q4_0 | PASS | logic01 | expected=no | response=No
+q4_0/q4_0 | PASS | logic02 | expected=21 | response=21
+q4_0/q4_0 | PASS | logic03 | expected=48 | response=48
+q4_0/q4_0 | PASS | logic04 | expected=25 | response=25
+q4_0/q4_0 | PASS | logic05 | expected=150 | response=150
+q4_0/q4_0 | PASS | code01 | expected=FizzBuzz | response=FizzBuzz
+q4_0/q4_0 | PASS | code02 | expected=443 | response=443
+q4_0/q4_0 | PASS | code03 | expected=def | response=def
+q4_0/q4_0 | PASS | code04 | expected=22 | response=22
+q4_0/q4_0 | PASS | code05 | expected=len | response=len
+q4_0/q4_0 | PASS | korean01 | expected=파울리 | response=볼프강 파울리
+q4_0/q4_0 | PASS | korean02 | expected=보어 | response=닐스 보어
+q4_0/q4_0 | PASS | korean03 | expected=슈뢰딩거 | response=에르빈 슈뢰딩거
+q4_0/q4_0 | PASS | korean04 | expected=하이젠베르크 | response=베르너 하이젠베르크
+q4_0/q4_0 | PASS | korean05 | expected=플랑크 | response=맥스 플랑크
+q4_0/q4_0 | PASS | korean06 | expected=페르미 | response=엔리코 페르미
+q4_0/q4_0 | PASS | delayed_D1 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+q4_0/q4_0 | PASS | delayed_D2 | expected=[[2,8],[15,6]] | response=[[2, 8], [15, 6]]
+q4_0/q4_0 | PASS | delayed_D3 | expected=[[6,17],[14,18]] | response=[[6, 17], [14, 18]]
+tq3j/q4_0 | PASS | math01 | expected=323 | response=323
+tq3j/q4_0 | PASS | math02 | expected=1024 | response=1024
+tq3j/q4_0 | PASS | math03 | expected=12 | response=12
+tq3j/q4_0 | PASS | math04 | expected=55 | response=55
+tq3j/q4_0 | PASS | math05 | expected=8 | response=8
+tq3j/q4_0 | PASS | math06 | expected=98201 | response=98201
+tq3j/q4_0 | PASS | math07 | expected=yes | response=Yes
+tq3j/q4_0 | PASS | mat01 | expected=-14 | response=-14
+tq3j/q4_0 | PASS | mat02 | expected=15 | response=15
+tq3j/q4_0 | PASS | mat03 | expected=10 | response=10
+tq3j/q4_0 | PASS | mat04 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq3j/q4_0 | PASS | mat05 | expected=[[2,2],[2,2]] | response=[[2,2],[2,2]]
+tq3j/q4_0 | PASS | fact01 | expected=Ljubljana | response=Ljubljana
+tq3j/q4_0 | PASS | fact02 | expected=W | response=W
+tq3j/q4_0 | PASS | fact03 | expected=Au | response=Au
+tq3j/q4_0 | PASS | fact04 | expected=Canberra | response=Canberra
+tq3j/q4_0 | PASS | fact05 | expected=206 | response=206
+tq3j/q4_0 | PASS | fact06 | expected=Pacific | response=Pacific Ocean
+tq3j/q4_0 | PASS | logic01 | expected=no | response=No
+tq3j/q4_0 | PASS | logic02 | expected=21 | response=21
+tq3j/q4_0 | PASS | logic03 | expected=48 | response=48
+tq3j/q4_0 | PASS | logic04 | expected=25 | response=25
+tq3j/q4_0 | PASS | logic05 | expected=150 | response=150
+tq3j/q4_0 | PASS | code01 | expected=FizzBuzz | response=FizzBuzz
+tq3j/q4_0 | PASS | code02 | expected=443 | response=443
+tq3j/q4_0 | PASS | code03 | expected=def | response=def
+tq3j/q4_0 | PASS | code04 | expected=22 | response=22
+tq3j/q4_0 | PASS | code05 | expected=len | response=len
+tq3j/q4_0 | PASS | korean01 | expected=파울리 | response=볼프강 파울리
+tq3j/q4_0 | PASS | korean02 | expected=보어 | response=닐스 보어
+tq3j/q4_0 | PASS | korean03 | expected=슈뢰딩거 | response=에르빈 슈뢰딩거
+tq3j/q4_0 | PASS | korean04 | expected=하이젠베르크 | response=베르너 하이젠베르크
+tq3j/q4_0 | PASS | korean05 | expected=플랑크 | response=맥스 플랑크
+tq3j/q4_0 | PASS | korean06 | expected=페르미 | response=엔리코 페르미
+tq3j/q4_0 | PASS | delayed_D1 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq3j/q4_0 | PASS | delayed_D2 | expected=[[2,8],[15,6]] | response=[[2, 8], [15, 6]]
+tq3j/q4_0 | PASS | delayed_D3 | expected=[[6,17],[14,18]] | response=[[6, 17], [14, 18]]
+tq2j/q4_0 | PASS | math01 | expected=323 | response=323
+tq2j/q4_0 | PASS | math02 | expected=1024 | response=1024
+tq2j/q4_0 | PASS | math03 | expected=12 | response=12
+tq2j/q4_0 | PASS | math04 | expected=55 | response=55
+tq2j/q4_0 | PASS | math05 | expected=8 | response=8
+tq2j/q4_0 | PASS | math06 | expected=98201 | response=98201
+tq2j/q4_0 | PASS | math07 | expected=yes | response=Yes
+tq2j/q4_0 | PASS | mat01 | expected=-14 | response=-14
+tq2j/q4_0 | PASS | mat02 | expected=15 | response=15
+tq2j/q4_0 | PASS | mat03 | expected=10 | response=10
+tq2j/q4_0 | PASS | mat04 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq2j/q4_0 | PASS | mat05 | expected=[[2,2],[2,2]] | response=[[2,2],[2,2]]
+tq2j/q4_0 | PASS | fact01 | expected=Ljubljana | response=Ljubljana
+tq2j/q4_0 | PASS | fact02 | expected=W | response=W
+tq2j/q4_0 | PASS | fact03 | expected=Au | response=Au
+tq2j/q4_0 | PASS | fact04 | expected=Canberra | response=Canberra
+tq2j/q4_0 | PASS | fact05 | expected=206 | response=206
+tq2j/q4_0 | PASS | fact06 | expected=Pacific | response=Pacific Ocean
+tq2j/q4_0 | PASS | logic01 | expected=no | response=No
+tq2j/q4_0 | PASS | logic02 | expected=21 | response=21
+tq2j/q4_0 | PASS | logic03 | expected=48 | response=48
+tq2j/q4_0 | PASS | logic04 | expected=25 | response=25
+tq2j/q4_0 | PASS | logic05 | expected=150 | response=150
+tq2j/q4_0 | PASS | code01 | expected=FizzBuzz | response=FizzBuzz
+tq2j/q4_0 | PASS | code02 | expected=443 | response=443
+tq2j/q4_0 | PASS | code03 | expected=def | response=def
+tq2j/q4_0 | PASS | code04 | expected=22 | response=22
+tq2j/q4_0 | PASS | code05 | expected=len | response=len
+tq2j/q4_0 | PASS | korean01 | expected=파울리 | response=볼프강 파울리
+tq2j/q4_0 | PASS | korean02 | expected=보어 | response=닐스 보어
+tq2j/q4_0 | FAIL | korean03 | expected=슈뢰딩거 | response=(empty)
+tq2j/q4_0 | PASS | korean04 | expected=하이젠베르크 | response=베르너 하이젠베르크
+tq2j/q4_0 | PASS | korean05 | expected=플랑크 | response=맥스 플랑크
+tq2j/q4_0 | PASS | korean06 | expected=페르미 | response=엔리코 페르미
+tq2j/q4_0 | PASS | delayed_D1 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq2j/q4_0 | PASS | delayed_D2 | expected=[[2,8],[15,6]] | response=[[2, 8], [15, 6]]
+tq2j/q4_0 | PASS | delayed_D3 | expected=[[6,17],[14,18]] | response=[[6, 17], [14, 18]]
+tq3j/tq3 | PASS | math01 | expected=323 | response=323
+tq3j/tq3 | PASS | math02 | expected=1024 | response=1024
+tq3j/tq3 | PASS | math03 | expected=12 | response=12
+tq3j/tq3 | PASS | math04 | expected=55 | response=55
+tq3j/tq3 | PASS | math05 | expected=8 | response=8
+tq3j/tq3 | FAIL | math06 | expected=98201 | response=(empty)
+tq3j/tq3 | PASS | math07 | expected=yes | response=Yes
+tq3j/tq3 | PASS | mat01 | expected=-14 | response=-14
+tq3j/tq3 | PASS | mat02 | expected=15 | response=15
+tq3j/tq3 | PASS | mat03 | expected=10 | response=10
+tq3j/tq3 | PASS | mat04 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq3j/tq3 | PASS | mat05 | expected=[[2,2],[2,2]] | response=[[2,2],[2,2]]
+tq3j/tq3 | PASS | fact01 | expected=Ljubljana | response=Ljubljana
+tq3j/tq3 | PASS | fact02 | expected=W | response=W
+tq3j/tq3 | PASS | fact03 | expected=Au | response=Au
+tq3j/tq3 | PASS | fact04 | expected=Canberra | response=Canberra
+tq3j/tq3 | PASS | fact05 | expected=206 | response=206
+tq3j/tq3 | PASS | fact06 | expected=Pacific | response=Pacific Ocean
+tq3j/tq3 | PASS | logic01 | expected=no | response=no
+tq3j/tq3 | PASS | logic02 | expected=21 | response=21
+tq3j/tq3 | PASS | logic03 | expected=48 | response=48
+tq3j/tq3 | PASS | logic04 | expected=25 | response=25
+tq3j/tq3 | PASS | logic05 | expected=150 | response=150
+tq3j/tq3 | PASS | code01 | expected=FizzBuzz | response=FizzBuzz
+tq3j/tq3 | PASS | code02 | expected=443 | response=443
+tq3j/tq3 | PASS | code03 | expected=def | response=def
+tq3j/tq3 | PASS | code04 | expected=22 | response=22
+tq3j/tq3 | PASS | code05 | expected=len | response=len
+tq3j/tq3 | PASS | korean01 | expected=파울리 | response=볼프강 파울리
+tq3j/tq3 | PASS | korean02 | expected=보어 | response=닐스 보어
+tq3j/tq3 | PASS | korean03 | expected=슈뢰딩거 | response=에르빈 슈뢰딩거
+tq3j/tq3 | PASS | korean04 | expected=하이젠베르크 | response=베르너 하이젠베르크
+tq3j/tq3 | PASS | korean05 | expected=플랑크 | response=맥스 플랑크
+tq3j/tq3 | PASS | korean06 | expected=페르미 | response=엔리코 페르미
+tq3j/tq3 | PASS | delayed_D1 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq3j/tq3 | PASS | delayed_D2 | expected=[[2,8],[15,6]] | response=[[2, 8], [15, 6]]
+tq3j/tq3 | PASS | delayed_D3 | expected=[[6,17],[14,18]] | response=[[6, 17], [14, 18]]
+tq2j/tq3 | PASS | math01 | expected=323 | response=323
+tq2j/tq3 | PASS | math02 | expected=1024 | response=1024
+tq2j/tq3 | PASS | math03 | expected=12 | response=12
+tq2j/tq3 | PASS | math04 | expected=55 | response=55
+tq2j/tq3 | PASS | math05 | expected=8 | response=8
+tq2j/tq3 | FAIL | math06 | expected=98201 | response=(empty)
+tq2j/tq3 | PASS | math07 | expected=yes | response=Yes
+tq2j/tq3 | PASS | mat01 | expected=-14 | response=-14
+tq2j/tq3 | PASS | mat02 | expected=15 | response=15
+tq2j/tq3 | PASS | mat03 | expected=10 | response=10
+tq2j/tq3 | PASS | mat04 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq2j/tq3 | PASS | mat05 | expected=[[2,2],[2,2]] | response=[[2,2],[2,2]]
+tq2j/tq3 | PASS | fact01 | expected=Ljubljana | response=Ljubljana
+tq2j/tq3 | PASS | fact02 | expected=W | response=W
+tq2j/tq3 | PASS | fact03 | expected=Au | response=Au
+tq2j/tq3 | PASS | fact04 | expected=Canberra | response=Canberra
+tq2j/tq3 | PASS | fact05 | expected=206 | response=206
+tq2j/tq3 | PASS | fact06 | expected=Pacific | response=Pacific Ocean
+tq2j/tq3 | PASS | logic01 | expected=no | response=No
+tq2j/tq3 | PASS | logic02 | expected=21 | response=21
+tq2j/tq3 | PASS | logic03 | expected=48 | response=48
+tq2j/tq3 | PASS | logic04 | expected=25 | response=25
+tq2j/tq3 | PASS | logic05 | expected=150 | response=150
+tq2j/tq3 | PASS | code01 | expected=FizzBuzz | response=FizzBuzz
+tq2j/tq3 | PASS | code02 | expected=443 | response=443
+tq2j/tq3 | PASS | code03 | expected=def | response=def
+tq2j/tq3 | PASS | code04 | expected=22 | response=22
+tq2j/tq3 | PASS | code05 | expected=len | response=len
+tq2j/tq3 | PASS | korean01 | expected=파울리 | response=볼프강 파울리
+tq2j/tq3 | PASS | korean02 | expected=보어 | response=닐스 보어
+tq2j/tq3 | PASS | korean03 | expected=슈뢰딩거 | response=에르빈 슈뢰딩거
+tq2j/tq3 | PASS | korean04 | expected=하이젠베르크 | response=베르너 하이젠베르크
+tq2j/tq3 | PASS | korean05 | expected=플랑크 | response=맥스 플랑크
+tq2j/tq3 | PASS | korean06 | expected=페르미 | response=엔리코 페르미
+tq2j/tq3 | PASS | delayed_D1 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq2j/tq3 | PASS | delayed_D2 | expected=[[2,8],[15,6]] | response=[[2, 8], [15, 6]]
+tq2j/tq3 | PASS | delayed_D3 | expected=[[6,17],[14,18]] | response=[[6, 17], [14, 18]]
+TurboQuant Quality Results
+Model: models/gemma-4-26B-A4B-it-Q4_K_M.gguf
+max_tokens: 4096
+Tests: 37
+
+SUMMARY
+Config             Score    Pct  Failures
+------------------------------------------------------------
+tq2j/tq2         27/37    73.0%  math06, logic04, korean01, korean02, korean03, korean04, korean05, korean06, delayed_D2, delayed_D3
+
+DETAILS
+================================================================================
+tq2j/tq2 | PASS | math01 | expected=323 | response=323
+tq2j/tq2 | PASS | math02 | expected=1024 | response=1024
+tq2j/tq2 | PASS | math03 | expected=12 | response=12
+tq2j/tq2 | PASS | math04 | expected=55 | response=55
+tq2j/tq2 | PASS | math05 | expected=8 | response=8
+tq2j/tq2 | FAIL | math06 | expected=98201 | response=(empty)
+tq2j/tq2 | PASS | math07 | expected=yes | response=yes
+tq2j/tq2 | PASS | mat01 | expected=-14 | response=-14
+tq2j/tq2 | PASS | mat02 | expected=15 | response=15
+tq2j/tq2 | PASS | mat03 | expected=10 | response=10
+tq2j/tq2 | PASS | mat04 | expected=[[19,22],[43,50]] | response=[[19, 22], [43, 50]]
+tq2j/tq2 | PASS | mat05 | expected=[[2,2],[2,2]] | response=[[2,2],[2,2]]
+tq2j/tq2 | PASS | fact01 | expected=Ljubljana | response=Ljubljana
+tq2j/tq2 | PASS | fact02 | expected=W | response=W
+tq2j/tq2 | PASS | fact03 | expected=Au | response=Au
+tq2j/tq2 | PASS | fact04 | expected=Canberra | response=Canberra
+tq2j/tq2 | PASS | fact05 | expected=206 | response=<|channel><channel|>206
+tq2j/tq2 | PASS | fact06 | expected=Pacific | response=Pacific Ocean
+tq2j/tq2 | PASS | logic01 | expected=no | response=No
+tq2j/tq2 | PASS | logic02 | expected=21 | response=21
+tq2j/tq2 | PASS | logic03 | expected=48 | response=48
+tq2j/tq2 | FAIL | logic04 | expected=25 | response=(empty)
+tq2j/tq2 | PASS | logic05 | expected=150 | response=150
+tq2j/tq2 | PASS | code01 | expected=FizzBuzz | response=FizzBuzz
+tq2j/tq2 | PASS | code02 | expected=443 | response=443
+tq2j/tq2 | PASS | code03 | expected=def | response=def
+tq2j/tq2 | PASS | code04 | expected=22 | response=22
+tq2j/tq2 | PASS | code05 | expected=len | response=len
+tq2j/tq2 | FAIL | korean01 | expected=파울리 | response=(empty)
+tq2j/tq2 | FAIL | korean02 | expected=보어 | response=(empty)
+tq2j/tq2 | FAIL | korean03 | expected=슈뢰딩거 | response=(empty)
+tq2j/tq2 | FAIL | korean04 | expected=하이젠베르크 | response=(empty)
+tq2j/tq2 | FAIL | korean05 | expected=플랑크 | response=(empty)
+tq2j/tq2 | FAIL | korean06 | expected=페르미 | response=(empty)
+tq2j/tq2 | PASS | delayed_D1 | expected=[[19,22],[43,50]] | response=<|channel>-thought *   A = [[1, 2], [3, 4]]     *   B = [[5, 6], [7, 8]]     *  
+tq2j/tq2 | FAIL | delayed_D2 | expected=[[2,8],[15,6]] | response=(empty)
+tq2j/tq2 | FAIL | delayed_D3 | expected=[[6,17],[14,18]] | response=<|channel>-thought *   A = [[3, 1], [2, 4]]     *   B = [[1, 5], [3, 2]]     *  
