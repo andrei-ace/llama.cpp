@@ -2955,6 +2955,10 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             nwg = 1;
             nsg = 4;
         } else {
+            // The reduce kernel dispatches 32*nwg threads per threadgroup and compiles NWG
+            // into its indexing, so nwg must be set before pipeline compilation.
+            // Metal guarantees maxTotalThreadsPerThreadgroup >= 1024 on Apple Silicon,
+            // so nwg=32 (32*32=1024 threads) is always safe.
             nwg = 32;
             nsg = 1;
             while (2*nwg*nsg*ncpsg < ne11 && nsg < 4) {
@@ -3051,19 +3055,12 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
 
                 auto pipeline0 = ggml_metal_library_get_pipeline_flash_attn_ext_vec_reduce(lib, op, ne20, nwg);
 
-                // Cap nwg so the reduce kernel (32*nwg threads) fits the device/pipeline limit
-                int32_t nwg_reduce = nwg;
-                const int32_t max_tpt = ggml_metal_pipeline_max_theads_per_threadgroup(pipeline0);
-                while (32*nwg_reduce > max_tpt && nwg_reduce > 1) {
-                    nwg_reduce /= 2;
-                }
-
                 ggml_metal_encoder_set_pipeline(enc, pipeline0);
                 ggml_metal_encoder_set_bytes   (enc, &args0, sizeof(args0), 0);
                 ggml_metal_encoder_set_buffer  (enc, bid_tmp, 1);
                 ggml_metal_encoder_set_buffer  (enc, bid_dst, 2);
 
-                ggml_metal_encoder_dispatch_threadgroups(enc, nrows, 1, 1, 32*nwg_reduce, 1, 1);
+                ggml_metal_encoder_dispatch_threadgroups(enc, nrows, 1, 1, 32*nwg, 1, 1);
             }
         }
 #undef FATTN_SMEM
