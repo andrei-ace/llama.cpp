@@ -37,9 +37,9 @@
 | q8_0/q8_0 | 31/31 | 100% | 17.0 | |
 | q4_0/q4_0 | 31/31 | 100% | 9.0 | |
 | **tq3j/q4_0** | **31/31** | **100%** | **8.6** | |
-| **tq2j/q4_0** | **30/31** | **96.8%** | **7.6** | 1 empty (token budget, not quality) |
-| **tq3j/tq3** | **30/31** | **96.8%** | **7.1** | 1 empty (token budget, not quality) |
-| **tq2j/tq3** | **30/31** | **96.8%** | **6.1** | 1 empty (token budget, not quality) |
+| **tq2j/q4_0** | **31/31** | **100%** | **7.6** | 31/31 at max_tokens=4096 |
+| **tq3j/tq3** | **30/31** | **96.8%** | **7.1** | math06 empty even at 4096 tokens |
+| **tq2j/tq3** | **30/31** | **96.8%** | **6.1** | math06 empty even at 4096 tokens |
 | tq2j/tq2 | 26/31 | 83.9% | 5.1 | 3 empty + 2 wrong answers |
 
 ### Quality test details
@@ -57,9 +57,15 @@
 
 **tq3j/q4_0 (0 failures):** perfect score.
 
-**tq3j/tq3, tq2j/q4_0, tq2j/tq3 (1 failure each):**
-- All fail on `math06` (347×283=98201) or `delayed_D2`: empty response — model's
-  chain-of-thought exceeded token budget. Not quantization errors.
+**tq2j/q4_0 (0 failures at max_tokens=4096):** perfect score with higher budget.
+The 1024-token failure was token budget — rerun at 4096 passes.
+
+**tq3j/tq3, tq2j/tq3 (1 failure each, persistent):**
+- `math06` (347×283=98201): empty response even at max_tokens=4096. V=tq3
+  quantization makes the model's chain-of-thought for large multiplication
+  systematically longer (more verbose reasoning), exceeding even 4096 tokens.
+  Not a wrong answer — the model never finishes thinking. V=q4_0 configs
+  complete the same question within budget.
 
 **tq2j/tq2 (5 failures):**
 - `math06`: empty (token budget)
