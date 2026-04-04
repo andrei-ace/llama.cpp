@@ -115,22 +115,18 @@ answers appearing in `content` under budget.
 with no reasoning. The 2-bit V quantization (tq2, MSE only, no QJL) destroys
 attention at 12K context.
 
-Needles: gold coins (14, 31.1g), clock (11:47 PM), toxicology (potassium
-cyanide 0.3 mg/L), cafe (Blue Parrot, $47.83), license plate (XR7),
-phone calls (23 to Gerald Hoffman), handwritten note (lighthouse, Rothschild
-documents), carpet pigment (Prussian blue, Hargrove Mills 1987).
+Needles (exact values the model must retrieve):
 
-## SET_ROWS overhead
-
-Measured at d=0 (pure SET_ROWS + matmul, no FA):
-
-| Config | t/s | SET_ROWS overhead vs f16 |
-|:------:|:---:|:------------------------:|
-| f16/f16 | 62.2 | baseline |
-| tq3j/tq3 (noop SET_ROWS) | 58.2 | 0 ms (Q FWHT only) |
-| tq3j/tq3 (real) | 56.3 | 0.55 ms/token |
-
-SET_ROWS accounts for ~85% of the TQ overhead at short context.
+| # | Detail | Answer |
+|:-:|:-------|:-------|
+| Q1 | Gold coins in safe | 14 coins, 31.1g each |
+| Q2 | Stopped clock time | 11:47 PM |
+| Q3 | Toxicology substance + concentration | potassium cyanide, 0.3 mg/L |
+| Q4 | Cafe name + receipt amount | Blue Parrot Cafe, $47.83 |
+| Q5 | License plate prefix | XR7 |
+| Q6 | Phone calls to Gerald Hoffman | 23 calls |
+| Q7 | Handwritten note instructions | lighthouse at midnight, Rothschild documents |
+| Q8 | Carpet pigment + manufacturer | Prussian blue, Hargrove Mills (1987) |
 
 ## Recommendations
 
