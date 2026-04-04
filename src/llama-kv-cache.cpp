@@ -229,6 +229,8 @@ llama_kv_cache::llama_kv_cache(
             layer_type_k = tq_layer_override(layer_type_k, il, lmap, n_ml);
             if (layer_type_k != orig_k) {
                 layer_type_v = layer_type_k; // match V to overridden K (e.g. both q8_0)
+                LLAMA_LOG_INFO("%s: layer %d: K/V overridden to %s (was %s)\n",
+                    __func__, il, ggml_type_name(layer_type_k), ggml_type_name(orig_k));
             }
         }
 
