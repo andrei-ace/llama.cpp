@@ -9943,7 +9943,7 @@ kernel void kernel_set_rows_tq_simd(
             for (short k = 0; k < VPT; k++) {
                 tg_idx[tiisg * VPT + k] = (uint8_t)idx[k];
             }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
             for (int g = tiisg; g < DIM / 8; g += 32) {
                 uint32_t packed = 0;
                 for (int i = 0; i < 8; i++) {
