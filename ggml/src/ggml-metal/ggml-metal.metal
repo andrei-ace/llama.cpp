@@ -1013,6 +1013,162 @@ constant float tq_c4_d512[4] = {
     -0.0666939081f, -0.0200066602f, 0.0200066602f, 0.0666939081f,
 };
 
+// --- SET_ROWS helpers ---
+
+static void tq_pk3(device uint8_t * q, int j, int v) {
+    int bp = j * 3, bi = bp / 8, sh = bp % 8;
+    q[bi] |= (uint8_t)((v & 7) << sh);
+    if (sh > 5) q[bi + 1] |= (uint8_t)((v & 7) >> (8 - sh));
+}
+
+static void tq_pk2(device uint8_t * q, int j, int v) {
+    q[j / 4] |= (uint8_t)((v & 3) << (2 * (j % 4)));
+}
+
+static int tq_nearest8(float val, constant const float * c) {
+    int best = 0;
+    float best_d = abs(val - c[0]);
+    for (int i = 1; i < 8; i++) {
+        float d = abs(val - c[i]);
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    return best;
+}
+
+static int tq_nearest4(float val, constant const float * c) {
+    int best = 0;
+    float best_d = abs(val - c[0]);
+    for (int i = 1; i < 4; i++) {
+        float d = abs(val - c[i]);
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    return best;
+}
+
+// Quantize TQ3J: FWHT + 3-bit MSE + 1-bit QJL
+template <int DIM>
+void quantize_tq3j(device const float * src, device uint8_t * dst) {
+    constant const float * c = (DIM >= 512) ? tq_c8_d512 : (DIM == 256) ? tq_c8_d256 : tq_c8_d128;
+    const int qs_bytes = (DIM * 3 + 7) / 8;
+
+    float buf[DIM];
+    for (int i = 0; i < DIM; i++) buf[i] = src[i];
+    tq_fwht_metal(buf, DIM);
+
+    float norm_sq = 0;
+    for (int i = 0; i < DIM; i++) norm_sq += buf[i] * buf[i];
+    float norm = sqrt(norm_sq);
+    float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
+
+    device uint8_t * qs    = dst + 4;
+    device uint8_t * signs = dst + 4 + qs_bytes;
+    for (int i = 0; i < qs_bytes; i++) qs[i] = 0;
+    for (int i = 0; i < DIM/8; i++) signs[i] = 0;
+
+    for (int j = 0; j < DIM; j++) {
+        tq_pk3(qs, j, tq_nearest8(buf[j] * inv_norm, c));
+    }
+
+    float rnorm_sq = 0;
+    for (int j = 0; j < DIM; j++) {
+        int bp = j * 3, bi = bp / 8, sh = bp % 8;
+        uint32_t val = (uint32_t)qs[bi] | ((uint32_t)qs[bi + 1] << 8);
+        int idx = (int)((val >> sh) & 7);
+        float residual = buf[j] - norm * c[idx];
+        rnorm_sq += residual * residual;
+        if (residual >= 0.0f) signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+
+    *(device half *)(dst + 0) = (half)norm;
+    *(device half *)(dst + 2) = (half)sqrt(rnorm_sq);
+}
+
+// Quantize TQ2J: FWHT + 2-bit MSE + 1-bit QJL
+template <int DIM>
+void quantize_tq2j(device const float * src, device uint8_t * dst) {
+    constant const float * c = (DIM >= 512) ? tq_c4_d512 : (DIM == 256) ? tq_c4_d256 : tq_c4_d128;
+    const int qs_bytes = DIM / 4;
+
+    float buf[DIM];
+    for (int i = 0; i < DIM; i++) buf[i] = src[i];
+    tq_fwht_metal(buf, DIM);
+
+    float norm_sq = 0;
+    for (int i = 0; i < DIM; i++) norm_sq += buf[i] * buf[i];
+    float norm = sqrt(norm_sq);
+    float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
+
+    device uint8_t * qs    = dst + 4;
+    device uint8_t * signs = dst + 4 + qs_bytes;
+    for (int i = 0; i < qs_bytes; i++) qs[i] = 0;
+    for (int i = 0; i < DIM/8; i++) signs[i] = 0;
+
+    for (int j = 0; j < DIM; j++) {
+        tq_pk2(qs, j, tq_nearest4(buf[j] * inv_norm, c));
+    }
+
+    float rnorm_sq = 0;
+    for (int j = 0; j < DIM; j++) {
+        int idx = (qs[j / 4] >> (2 * (j % 4))) & 3;
+        float residual = buf[j] - norm * c[idx];
+        rnorm_sq += residual * residual;
+        if (residual >= 0.0f) signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+
+    *(device half *)(dst + 0) = (half)norm;
+    *(device half *)(dst + 2) = (half)sqrt(rnorm_sq);
+}
+
+// Quantize TQ3: FWHT + 3-bit MSE only (no QJL)
+template <int DIM>
+void quantize_tq3(device const float * src, device uint8_t * dst) {
+    constant const float * c = (DIM >= 512) ? tq_c8_d512 : (DIM == 256) ? tq_c8_d256 : tq_c8_d128;
+    const int qs_bytes = (DIM * 3 + 7) / 8;
+
+    float buf[DIM];
+    for (int i = 0; i < DIM; i++) buf[i] = src[i];
+    tq_fwht_metal(buf, DIM);
+
+    float norm_sq = 0;
+    for (int i = 0; i < DIM; i++) norm_sq += buf[i] * buf[i];
+    float norm = sqrt(norm_sq);
+    float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
+
+    device uint8_t * qs = dst + 2;
+    for (int i = 0; i < qs_bytes; i++) qs[i] = 0;
+
+    for (int j = 0; j < DIM; j++) {
+        tq_pk3(qs, j, tq_nearest8(buf[j] * inv_norm, c));
+    }
+
+    *(device half *)(dst + 0) = (half)norm;
+}
+
+// Quantize TQ2: FWHT + 2-bit MSE only (no QJL)
+template <int DIM>
+void quantize_tq2(device const float * src, device uint8_t * dst) {
+    constant const float * c = (DIM >= 512) ? tq_c4_d512 : (DIM == 256) ? tq_c4_d256 : tq_c4_d128;
+    const int qs_bytes = DIM / 4;
+
+    float buf[DIM];
+    for (int i = 0; i < DIM; i++) buf[i] = src[i];
+    tq_fwht_metal(buf, DIM);
+
+    float norm_sq = 0;
+    for (int i = 0; i < DIM; i++) norm_sq += buf[i] * buf[i];
+    float norm = sqrt(norm_sq);
+    float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
+
+    device uint8_t * qs = dst + 2;
+    for (int i = 0; i < qs_bytes; i++) qs[i] = 0;
+
+    for (int j = 0; j < DIM; j++) {
+        tq_pk2(qs, j, tq_nearest4(buf[j] * inv_norm, c));
+    }
+
+    *(device half *)(dst + 0) = (half)norm;
+}
+
 // TQ3J dequant: template param BLK_DIM for variable block size (128/256/512)
 // Block layout: [norm:fp16(2)][rnorm:fp16(2)][qs:BLK_DIM*3/8][signs:BLK_DIM/8]
 template <short BLK_DIM = 128, typename type4x4>
@@ -1135,12 +1291,19 @@ void dequantize_tq3j_t4(device const block_tq3j * xb_struct, short il, thread ty
     device const uint8_t * signs = xb + signs_off;
     constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
     const int base = il * 4;
+
+    // Bulk load: 4*3 = 12 bits; fits in 2 bytes at any alignment
+    const int bp0 = base * 3;
+    const int bi0 = bp0 / 8;
+    const int sh0 = bp0 & 7;  // 0 or 4 since base is always a multiple of 4
+    uint32_t bits = (uint32_t)qs[bi0] | ((uint32_t)qs[bi0 + 1] << 8);
+
+    // Batch sign load: base%8 is 0 or 4, so 4 sign bits fit in one byte
+    uint32_t sb = (uint32_t)(signs[base >> 3] >> (base & 7));
+
     for (int i = 0; i < 4; i++) {
-        int j = base + i;
-        int bp = j * 3, bi = bp / 8;
-        uint32_t bits = (uint32_t)qs[bi] | ((uint32_t)qs[bi + 1] << 8);
-        int idx = (bits >> (bp % 8)) & 7;
-        float sign = ((signs[j/8] >> (j%8)) & 1) ? qjl_pos : -qjl_pos;
+        int idx = (int)((bits >> (sh0 + i * 3)) & 7);
+        float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
         reg[i] = norm * c[idx] + sign;
     }
 }
@@ -1155,9 +1318,15 @@ void dequantize_tq2j_t4(device const block_tq2j * xb_struct, short il, thread ty
     device const uint8_t * signs = xb + signs_off;
     constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
     const int base = il * 4;
+    // Bulk load: 4 elements * 2 bits = 8 bits from qs byte
+    const uint32_t idx_byte = (uint32_t)(qs[base / 4] >> (2 * (base % 4)));
+    // Batch sign: base%8 is 0 or 4, so 4 consecutive sign bits fit in one byte
+    uint32_t sb = (uint32_t)(signs[base / 8] >> (base % 8));
+
     for (int i = 0; i < 4; i++) {
-        int j = base + i;
-        reg[i] = norm * c[tq_up2(qs, j)] + ((signs[j/8] >> (j%8)) & 1 ? qjl_pos : -qjl_pos);
+        int idx = (idx_byte >> (i * 2)) & 3;
+        float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
+        reg[i] = norm * c[idx] + sign;
     }
 }
 
@@ -1169,8 +1338,22 @@ void dequantize_tq3(device const block_tq3 * xb_struct, short il, thread type4x4
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
+
+    // Bulk load: 16 elements * 3 bits = 48 bits; load 6 bytes
+    const int base = il * 16;
+    const int bp0 = base * 3;
+    const int bi0 = bp0 / 8;
+    uint64_t bits = (uint64_t)qs[bi0]     | ((uint64_t)qs[bi0+1] << 8) |
+                    ((uint64_t)qs[bi0+2] << 16) | ((uint64_t)qs[bi0+3] << 24) |
+                    ((uint64_t)qs[bi0+4] << 32) | ((uint64_t)qs[bi0+5] << 40);
+    int sh = bp0 % 8;
+
     float4x4 reg_f;
-    for (int i = 0; i < 16; i++) reg_f[i/4][i%4] = norm * c[tq_up3(qs, il * 16 + i)];
+    for (int i = 0; i < 16; i++) {
+        int idx = (int)((bits >> sh) & 7);
+        sh += 3;
+        reg_f[i/4][i%4] = norm * c[idx];
+    }
     reg = (type4x4) reg_f;
 }
 
@@ -1191,7 +1374,18 @@ void dequantize_tq3_t4(device const block_tq3 * xb_struct, short il, thread type
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
-    for (int i = 0; i < 4; i++) reg[i] = norm * c[tq_up3(qs, il * 4 + i)];
+
+    // Bulk load: 4*3 = 12 bits; fits in 2 bytes at any alignment
+    const int base = il * 4;
+    const int bp0 = base * 3;
+    const int bi0 = bp0 / 8;
+    const int sh0 = bp0 & 7;
+    uint32_t bits = (uint32_t)qs[bi0] | ((uint32_t)qs[bi0 + 1] << 8);
+
+    for (int i = 0; i < 4; i++) {
+        int idx = (int)((bits >> (sh0 + i * 3)) & 7);
+        reg[i] = norm * c[idx];
+    }
 }
 
 template <short BLK_DIM = 128, typename type4>
@@ -1200,7 +1394,68 @@ void dequantize_tq2_t4(device const block_tq2 * xb_struct, short il, thread type
     const float norm = float(*(device const half *)(xb));
     device const uint8_t * qs = xb + 2;
     constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
-    for (int i = 0; i < 4; i++) reg[i] = norm * c[tq_up2(qs, il * 4 + i)];
+
+    // Bulk load: il*4 is always aligned to a byte boundary for 2-bit packing
+    const uint32_t idx_byte = (uint32_t)qs[il];
+
+    for (int i = 0; i < 4; i++) {
+        int idx = (idx_byte >> (i * 2)) & 3;
+        reg[i] = norm * c[idx];
+    }
+}
+
+// --- Fused K·Q dot product functions ---
+// Skip dequant entirely: compute dot(q_fwht, k_quantized) directly from indices.
+// Saves per-element multiply by norm (1 multiply at end instead of 4) and eliminates
+// the intermediate k4_t register. Q is already in shared memory after FWHT rotation.
+
+template <short BLK_DIM = 128>
+float kq_dot_tq3j(device const block_tq3j * xb_struct, short il, threadgroup const half4 * sq4, short qi) {
+    device const uint8_t * xb = (device const uint8_t *)xb_struct;
+    const float norm  = float(*(device const half *)(xb));
+    const float rnorm = QJL_SCALE_F / (float)BLK_DIM * float(*(device const half *)(xb + 2));
+    device const uint8_t * qs = xb + 4;
+    constexpr int signs_off = 4 + (BLK_DIM * 3 + 7) / 8;
+    device const uint8_t * signs = xb + signs_off;
+    constant const float * c = (BLK_DIM >= 512) ? tq_c8_d512 : (BLK_DIM == 256) ? tq_c8_d256 : tq_c8_d128;
+    const int base = il * 4;
+
+    const int bp0 = base * 3;
+    const int bi0 = bp0 / 8;
+    const int sh0 = bp0 & 7;
+    uint32_t bits = (uint32_t)qs[bi0] | ((uint32_t)qs[bi0 + 1] << 8);
+    uint32_t sb   = (uint32_t)(signs[base >> 3] >> (base & 7));
+
+    float4 q = float4(sq4[qi]);
+    float cdot = 0.0f, sdot = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        cdot += q[i] * c[(bits >> (sh0 + i * 3)) & 7];
+        sdot += q[i] * ((sb >> i) & 1 ? 1.0f : -1.0f);
+    }
+    return norm * cdot + rnorm * sdot;
+}
+
+template <short BLK_DIM = 128>
+float kq_dot_tq2j(device const block_tq2j * xb_struct, short il, threadgroup const half4 * sq4, short qi) {
+    device const uint8_t * xb = (device const uint8_t *)xb_struct;
+    const float norm  = float(*(device const half *)(xb));
+    const float rnorm = QJL_SCALE_F / (float)BLK_DIM * float(*(device const half *)(xb + 2));
+    device const uint8_t * qs = xb + 4;
+    constexpr int signs_off = 4 + BLK_DIM / 4;
+    device const uint8_t * signs = xb + signs_off;
+    constant const float * c = (BLK_DIM >= 512) ? tq_c4_d512 : (BLK_DIM == 256) ? tq_c4_d256 : tq_c4_d128;
+    const int base = il * 4;
+
+    const uint32_t idx_byte = (uint32_t)(qs[base / 4] >> (2 * (base % 4)));
+    uint32_t sb = (uint32_t)(signs[base / 8] >> (base % 8));
+
+    float4 q = float4(sq4[qi]);
+    float cdot = 0.0f, sdot = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        cdot += q[i] * c[(idx_byte >> (i * 2)) & 3];
+        sdot += q[i] * ((sb >> i) & 1 ? 1.0f : -1.0f);
+    }
+    return norm * cdot + rnorm * sdot;
 }
 
 template <typename type4>
@@ -7053,6 +7308,63 @@ kernel void kernel_flash_attn_ext_vec(
                         FOR_UNROLL (short ii = 0; ii < DK4/NL; ++ii) {
                             mqk[cc] += dot((float4) pk4[cc*NE*NS10/4 +  ii*NL], (float4) pq4[ii*NL]);
                         }
+                    } else if (TQ_FWHT) {
+                        // TQ path: cooperative load K block into shared memory, then extract
+                        // All threads read from same block — preload into fast threadgroup mem
+                        device const uint8_t * pk_raw = (device const uint8_t *) (k + ((ic + NE*cc + ty)*args.nb11));
+                        threadgroup uint8_t * sk = (threadgroup uint8_t *)(shmem_f16 + NSG*PK + NSG*SH + 2*NSG*PV);
+
+                        // Cooperative load: each thread loads 4 bytes (coalesced sequential reads)
+                        const short blk_bytes = (short)args.nb11;
+                        if (4*tiisg < blk_bytes) {
+                            *(threadgroup uint32_t *)(sk + 4*tiisg) = *(device const uint32_t *)(pk_raw + 4*tiisg);
+                        }
+                        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+                        // Dequant from shared memory + dot (coop load already done above)
+                        {
+                            const float norm = float(*(threadgroup const half *)(sk));
+                            threadgroup const uint8_t * qs = sk + 4;
+                            const int base = tx * 4;
+                            k4_t mk;
+
+                            if (is_same<kd4_t, block_tq3j>::value) {
+                                const float qjl_pos = QJL_SCALE_F / (float)DK * float(*(threadgroup const half *)(sk + 2));
+                                constexpr int signs_off = 4 + (DK * 3 + 7) / 8;
+                                threadgroup const uint8_t * signs = sk + signs_off;
+                                constant const float * c = (DK >= 512) ? tq_c8_d512 : (DK == 256) ? tq_c8_d256 : tq_c8_d128;
+
+                                const int bp0 = base * 3;
+                                const int bi0 = bp0 / 8;
+                                const int sh0 = bp0 & 7;
+                                uint32_t bits = (uint32_t)qs[bi0] | ((uint32_t)qs[bi0 + 1] << 8);
+                                uint32_t sb   = (uint32_t)(signs[base >> 3] >> (base & 7));
+
+                                for (int i = 0; i < 4; i++) {
+                                    int idx = (int)((bits >> (sh0 + i * 3)) & 7);
+                                    float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
+                                    mk[i] = (half)(norm * c[idx] + sign);
+                                }
+                            } else if (is_same<kd4_t, block_tq2j>::value) {
+                                const float qjl_pos = QJL_SCALE_F / (float)DK * float(*(threadgroup const half *)(sk + 2));
+                                constexpr int signs_off = 4 + DK / 4;
+                                threadgroup const uint8_t * signs = sk + signs_off;
+                                constant const float * c = (DK >= 512) ? tq_c4_d512 : (DK == 256) ? tq_c4_d256 : tq_c4_d128;
+
+                                const uint32_t idx_byte = (uint32_t)(qs[base / 4] >> (2 * (base % 4)));
+                                uint32_t sb = (uint32_t)(signs[base / 8] >> (base % 8));
+
+                                for (int i = 0; i < 4; i++) {
+                                    int idx = (idx_byte >> (i * 2)) & 3;
+                                    float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
+                                    mk[i] = (half)(norm * c[idx] + sign);
+                                }
+                            }
+
+                            mqk[cc] += dot((float4) mk, (float4) sq4[tx]);
+                        }
+
+                        simdgroup_barrier(mem_flags::mem_threadgroup);
                     } else {
                         device const kd4_t * pk = (device const kd4_t *) (k + ((ic + NE*cc + ty)*args.nb11));
 
@@ -9515,6 +9827,37 @@ kernel void kernel_set_rows_q32(
     }
 }
 
+template<typename TI, int DIM, int BLK_BYTES, void (*quantize_func)(device const float *, device uint8_t *)>
+kernel void kernel_set_rows_tq(
+        constant ggml_metal_kargs_set_rows & args,
+        device const  void * src0,
+        device const  void * src1,
+        device       float * dst,
+        uint3                tgpig[[threadgroup_position_in_grid]],
+        uint                 tiitg[[thread_index_in_threadgroup]],
+        uint3                tptg [[threads_per_threadgroup]]) {
+    const int32_t i03 = tgpig.z;
+    const int32_t i02 = tgpig.y;
+
+    const int32_t i12 = i03%args.ne12;
+    const int32_t i11 = i02%args.ne11;
+
+    const int32_t i01 = tgpig.x*tptg.y + tiitg/tptg.x;
+    if (i01 >= args.ne01) {
+        return;
+    }
+
+    const int32_t i10 = i01;
+    const TI      i1  = ((const device TI *) ((const device char *) src1 + i10*args.nb10 + i11*args.nb11 + i12*args.nb12))[0];
+
+          device uint8_t * dst_row = (      device uint8_t *) ((      device char *) dst  +  i1*args.nb1  + i02*args.nb2  + i03*args.nb3);
+    const device float   * src_row = (const device float   *) ((const device char *) src0 + i01*args.nb01 + i02*args.nb02 + i03*args.nb03);
+
+    for (int ind = tiitg%tptg.x; ind < args.nk0; ind += tptg.x) {
+        quantize_func(src_row + DIM*ind, dst_row + BLK_BYTES*ind);
+    }
+}
+
 template<typename T, typename TI>
 kernel void kernel_set_rows_f(
         constant ggml_metal_kargs_set_rows & args,
@@ -10316,6 +10659,38 @@ template [[host_name("kernel_set_rows_q5_1_i64")]]   kernel set_rows_q32_t kerne
 template [[host_name("kernel_set_rows_q5_1_i32")]]   kernel set_rows_q32_t kernel_set_rows_q32<int32_t, block_q5_1,   quantize_q5_1>;
 template [[host_name("kernel_set_rows_iq4_nl_i64")]] kernel set_rows_q32_t kernel_set_rows_q32<int64_t, block_iq4_nl, quantize_iq4_nl>;
 template [[host_name("kernel_set_rows_iq4_nl_i32")]] kernel set_rows_q32_t kernel_set_rows_q32<int32_t, block_iq4_nl, quantize_iq4_nl>;
+
+typedef decltype(kernel_set_rows_tq<int64_t, 128, 68, quantize_tq3j<128>>) set_rows_tq_t;
+
+// d=128
+template [[host_name("kernel_set_rows_tq3j_i64")]]     kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 68,  quantize_tq3j<128>>;
+template [[host_name("kernel_set_rows_tq3j_i32")]]     kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 68,  quantize_tq3j<128>>;
+template [[host_name("kernel_set_rows_tq2j_i64")]]     kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 52,  quantize_tq2j<128>>;
+template [[host_name("kernel_set_rows_tq2j_i32")]]     kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 52,  quantize_tq2j<128>>;
+template [[host_name("kernel_set_rows_tq3_i64")]]      kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 50,  quantize_tq3<128>>;
+template [[host_name("kernel_set_rows_tq3_i32")]]      kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 50,  quantize_tq3<128>>;
+template [[host_name("kernel_set_rows_tq2_i64")]]      kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 34,  quantize_tq2<128>>;
+template [[host_name("kernel_set_rows_tq2_i32")]]      kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 34,  quantize_tq2<128>>;
+
+// d=256
+template [[host_name("kernel_set_rows_tq3j_256_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 132, quantize_tq3j<256>>;
+template [[host_name("kernel_set_rows_tq3j_256_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 132, quantize_tq3j<256>>;
+template [[host_name("kernel_set_rows_tq2j_256_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 100, quantize_tq2j<256>>;
+template [[host_name("kernel_set_rows_tq2j_256_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 100, quantize_tq2j<256>>;
+template [[host_name("kernel_set_rows_tq3_256_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 98,  quantize_tq3<256>>;
+template [[host_name("kernel_set_rows_tq3_256_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 98,  quantize_tq3<256>>;
+template [[host_name("kernel_set_rows_tq2_256_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 66,  quantize_tq2<256>>;
+template [[host_name("kernel_set_rows_tq2_256_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 66,  quantize_tq2<256>>;
+
+// d=512
+template [[host_name("kernel_set_rows_tq3j_512_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 260, quantize_tq3j<512>>;
+template [[host_name("kernel_set_rows_tq3j_512_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 260, quantize_tq3j<512>>;
+template [[host_name("kernel_set_rows_tq2j_512_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 196, quantize_tq2j<512>>;
+template [[host_name("kernel_set_rows_tq2j_512_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 196, quantize_tq2j<512>>;
+template [[host_name("kernel_set_rows_tq3_512_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 194, quantize_tq3<512>>;
+template [[host_name("kernel_set_rows_tq3_512_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 194, quantize_tq3<512>>;
+template [[host_name("kernel_set_rows_tq2_512_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 130, quantize_tq2<512>>;
+template [[host_name("kernel_set_rows_tq2_512_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 130, quantize_tq2<512>>;
 
 //
 // matrix-matrix multiplication

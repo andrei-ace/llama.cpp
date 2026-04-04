@@ -1260,6 +1260,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_IQ4_NL:
+                    case GGML_TYPE_TQ3J:
+                    case GGML_TYPE_TQ2J:
+                    case GGML_TYPE_TQ3:
+                    case GGML_TYPE_TQ2:
+                    case GGML_TYPE_TQ3J_256:
+                    case GGML_TYPE_TQ2J_256:
+                    case GGML_TYPE_TQ3_256:
+                    case GGML_TYPE_TQ2_256:
+                    case GGML_TYPE_TQ3J_512:
+                    case GGML_TYPE_TQ2J_512:
+                    case GGML_TYPE_TQ3_512:
+                    case GGML_TYPE_TQ2_512:
                         return true;
                     default:
                         return false;

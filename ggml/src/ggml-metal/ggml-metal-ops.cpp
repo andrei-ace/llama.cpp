@@ -2921,7 +2921,13 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         // ne20*(nsg)
         // each simdgroup has a full f32 head vector in shared mem to accumulate results
         //
-#define FATTN_SMEM(nsg) (GGML_PAD(((GGML_PAD(ne00, 128) + 4*ncpsg + 2*GGML_PAD(ne20, 128))*(nsg))*(sizeof(float)/2), 16))
+        // Extra shared memory for TQ cooperative K block load (max block = 260 bytes for d=512 TQ3J)
+        const enum ggml_type kt = op->src[1]->type;
+        const bool is_tq_k = (kt == GGML_TYPE_TQ3J || kt == GGML_TYPE_TQ2J ||
+                               kt == GGML_TYPE_TQ3J_256 || kt == GGML_TYPE_TQ2J_256 ||
+                               kt == GGML_TYPE_TQ3J_512 || kt == GGML_TYPE_TQ2J_512);
+        const int64_t tq_smem_extra = (is_tq_k ? 280 : 0); // aligned up
+#define FATTN_SMEM(nsg) (GGML_PAD(((GGML_PAD(ne00, 128) + 4*ncpsg + 2*GGML_PAD(ne20, 128))*(nsg))*(sizeof(float)/2) + tq_smem_extra, 16))
 
         int64_t nsg = 1;
 
