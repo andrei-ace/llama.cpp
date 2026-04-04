@@ -9858,6 +9858,157 @@ kernel void kernel_set_rows_tq(
     }
 }
 
+// SIMD-parallel SET_ROWS for TQ types: 32 threads cooperate per DIM-element block
+// TQ_BITS: 3 or 2 (centroid bits), HAS_QJL: true for J types
+template<typename TI, int DIM, int BLK_BYTES, int TQ_BITS, bool HAS_QJL>
+kernel void kernel_set_rows_tq_simd(
+        constant ggml_metal_kargs_set_rows & args,
+        device const  void * src0,
+        device const  void * src1,
+        device       float * dst,
+        threadgroup uint8_t * shmem [[threadgroup(0)]],
+        uint3                tgpig[[threadgroup_position_in_grid]],
+        ushort               tiisg[[thread_index_in_simdgroup]]) {
+    const int32_t i03 = tgpig.z;
+    const int32_t i02 = tgpig.y;
+    const int32_t i01 = tgpig.x;
+    if (i01 >= args.ne01) { return; }
+
+    const int32_t i12 = i03%args.ne12;
+    const int32_t i11 = i02%args.ne11;
+    const TI      i1  = ((const device TI *) ((const device char *) src1 + i01*args.nb10 + i11*args.nb11 + i12*args.nb12))[0];
+
+          device uint8_t * dst_blk = (      device uint8_t *) ((      device char *) dst  +  i1*args.nb1  + i02*args.nb2  + i03*args.nb3);
+    const device float   * src_row = (const device float   *) ((const device char *) src0 + i01*args.nb01 + i02*args.nb02 + i03*args.nb03);
+
+    constant const float * c = (TQ_BITS == 3)
+        ? ((DIM >= 512) ? tq_c8_d512 : (DIM == 256) ? tq_c8_d256 : tq_c8_d128)
+        : ((DIM >= 512) ? tq_c4_d512 : (DIM == 256) ? tq_c4_d256 : tq_c4_d128);
+    constexpr int N_C = (TQ_BITS == 3) ? 8 : 4;
+    constexpr int VPT = DIM / 32;
+    constexpr int qs_bytes = (TQ_BITS == 3) ? (DIM * 3 + 7) / 8 : DIM / 4;
+    constexpr int hdr = HAS_QJL ? 4 : 2;
+
+    for (int ind = 0; ind < args.nk0; ind++) {
+        const device float * src_blk = src_row + DIM * ind;
+        device uint8_t * out = dst_blk + BLK_BYTES * ind;
+
+        // Load VPT values per thread
+        float v[VPT];
+        for (short k = 0; k < VPT; k++) {
+            v[k] = src_blk[tiisg * VPT + k];
+        }
+
+        // SIMD-parallel FWHT: intra-thread butterflies then cross-thread via shuffle
+        for (short step = 1; step < VPT; step *= 2) {
+            for (short i = 0; i < VPT; i += 2 * step) {
+                for (short j = 0; j < step; j++) {
+                    float a = v[i+j], b = v[i+j+step];
+                    v[i+j] = a + b; v[i+j+step] = a - b;
+                }
+            }
+        }
+        for (ushort mask = 1; mask <= 16; mask *= 2) {
+            for (short k = 0; k < VPT; k++) {
+                float b = simd_shuffle_xor(v[k], mask);
+                v[k] = (tiisg & mask) == 0 ? (v[k] + b) : (b - v[k]);
+            }
+        }
+        const float fwht_s = 1.0f / sqrt((float)DIM);
+        for (short k = 0; k < VPT; k++) v[k] *= fwht_s;
+
+        // L2 norm via SIMD reduction
+        float local_sq = 0.0f;
+        for (short k = 0; k < VPT; k++) local_sq += v[k] * v[k];
+        float norm = sqrt(simd_sum(local_sq));
+        float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
+
+        // Nearest centroid per value
+        int idx[VPT];
+        for (short k = 0; k < VPT; k++) {
+            float nv = v[k] * inv_norm;
+            int best = 0;
+            float best_d = abs(nv - c[0]);
+            for (int i = 1; i < N_C; i++) {
+                float d = abs(nv - c[i]);
+                if (d < best_d) { best_d = d; best = i; }
+            }
+            idx[k] = best;
+        }
+
+        // Pack indices
+        device uint8_t * qs = out + hdr;
+        if (TQ_BITS == 3) {
+            threadgroup uint8_t * tg_idx = shmem;
+            for (short k = 0; k < VPT; k++) {
+                tg_idx[tiisg * VPT + k] = (uint8_t)idx[k];
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (int g = tiisg; g < DIM / 8; g += 32) {
+                uint32_t packed = 0;
+                for (int i = 0; i < 8; i++) {
+                    packed |= ((uint32_t)tg_idx[g * 8 + i]) << (i * 3);
+                }
+                qs[g * 3 + 0] = (uint8_t)(packed);
+                qs[g * 3 + 1] = (uint8_t)(packed >> 8);
+                qs[g * 3 + 2] = (uint8_t)(packed >> 16);
+            }
+        } else {
+            for (short g = 0; g < VPT; g += 4) {
+                uint8_t packed = (uint8_t)(idx[g] | (idx[g+1] << 2) | (idx[g+2] << 4) | (idx[g+3] << 6));
+                qs[tiisg * (VPT / 4) + g / 4] = packed;
+            }
+        }
+
+        // QJL signs + residual norm
+        if (HAS_QJL) {
+            device uint8_t * signs = out + hdr + qs_bytes;
+            float local_rnorm_sq = 0.0f;
+
+            if (VPT == 4) {
+                uint8_t my_bits = 0;
+                for (short k = 0; k < 4; k++) {
+                    float res = v[k] - norm * c[idx[k]];
+                    local_rnorm_sq += res * res;
+                    if (res >= 0.0f) my_bits |= (uint8_t)(1 << k);
+                }
+                uint8_t partner_bits = (uint8_t)simd_shuffle_xor((ushort)my_bits, 1);
+                if ((tiisg & 1) == 0) {
+                    signs[tiisg / 2] = my_bits | (partner_bits << 4);
+                }
+            } else if (VPT == 8) {
+                uint8_t my_byte = 0;
+                for (short k = 0; k < 8; k++) {
+                    float res = v[k] - norm * c[idx[k]];
+                    local_rnorm_sq += res * res;
+                    if (res >= 0.0f) my_byte |= (uint8_t)(1 << k);
+                }
+                signs[tiisg] = my_byte;
+            } else {
+                for (short b = 0; b < 2; b++) {
+                    uint8_t my_byte = 0;
+                    for (short k = 0; k < 8; k++) {
+                        float res = v[b*8+k] - norm * c[idx[b*8+k]];
+                        local_rnorm_sq += res * res;
+                        if (res >= 0.0f) my_byte |= (uint8_t)(1 << k);
+                    }
+                    signs[tiisg * 2 + b] = my_byte;
+                }
+            }
+
+            float rnorm = sqrt(simd_sum(local_rnorm_sq));
+            if (tiisg == 0) {
+                *(device half *)(out + 0) = (half)norm;
+                *(device half *)(out + 2) = (half)rnorm;
+            }
+        } else {
+            if (tiisg == 0) {
+                *(device half *)(out + 0) = (half)norm;
+            }
+        }
+    }
+}
+
 template<typename T, typename TI>
 kernel void kernel_set_rows_f(
         constant ggml_metal_kargs_set_rows & args,
@@ -10660,37 +10811,37 @@ template [[host_name("kernel_set_rows_q5_1_i32")]]   kernel set_rows_q32_t kerne
 template [[host_name("kernel_set_rows_iq4_nl_i64")]] kernel set_rows_q32_t kernel_set_rows_q32<int64_t, block_iq4_nl, quantize_iq4_nl>;
 template [[host_name("kernel_set_rows_iq4_nl_i32")]] kernel set_rows_q32_t kernel_set_rows_q32<int32_t, block_iq4_nl, quantize_iq4_nl>;
 
-typedef decltype(kernel_set_rows_tq<int64_t, 128, 68, quantize_tq3j<128>>) set_rows_tq_t;
+typedef decltype(kernel_set_rows_tq_simd<int64_t, 128, 68, 3, true>) set_rows_tq_simd_t;
 
-// d=128
-template [[host_name("kernel_set_rows_tq3j_i64")]]     kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 68,  quantize_tq3j<128>>;
-template [[host_name("kernel_set_rows_tq3j_i32")]]     kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 68,  quantize_tq3j<128>>;
-template [[host_name("kernel_set_rows_tq2j_i64")]]     kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 52,  quantize_tq2j<128>>;
-template [[host_name("kernel_set_rows_tq2j_i32")]]     kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 52,  quantize_tq2j<128>>;
-template [[host_name("kernel_set_rows_tq3_i64")]]      kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 50,  quantize_tq3<128>>;
-template [[host_name("kernel_set_rows_tq3_i32")]]      kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 50,  quantize_tq3<128>>;
-template [[host_name("kernel_set_rows_tq2_i64")]]      kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 128, 34,  quantize_tq2<128>>;
-template [[host_name("kernel_set_rows_tq2_i32")]]      kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 128, 34,  quantize_tq2<128>>;
+// d=128 (SIMD-parallel)
+template [[host_name("kernel_set_rows_tq3j_i64")]]     kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 128, 68,  3, true>;
+template [[host_name("kernel_set_rows_tq3j_i32")]]     kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 128, 68,  3, true>;
+template [[host_name("kernel_set_rows_tq2j_i64")]]     kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 128, 52,  2, true>;
+template [[host_name("kernel_set_rows_tq2j_i32")]]     kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 128, 52,  2, true>;
+template [[host_name("kernel_set_rows_tq3_i64")]]      kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 128, 50,  3, false>;
+template [[host_name("kernel_set_rows_tq3_i32")]]      kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 128, 50,  3, false>;
+template [[host_name("kernel_set_rows_tq2_i64")]]      kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 128, 34,  2, false>;
+template [[host_name("kernel_set_rows_tq2_i32")]]      kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 128, 34,  2, false>;
 
 // d=256
-template [[host_name("kernel_set_rows_tq3j_256_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 132, quantize_tq3j<256>>;
-template [[host_name("kernel_set_rows_tq3j_256_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 132, quantize_tq3j<256>>;
-template [[host_name("kernel_set_rows_tq2j_256_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 100, quantize_tq2j<256>>;
-template [[host_name("kernel_set_rows_tq2j_256_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 100, quantize_tq2j<256>>;
-template [[host_name("kernel_set_rows_tq3_256_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 98,  quantize_tq3<256>>;
-template [[host_name("kernel_set_rows_tq3_256_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 98,  quantize_tq3<256>>;
-template [[host_name("kernel_set_rows_tq2_256_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 256, 66,  quantize_tq2<256>>;
-template [[host_name("kernel_set_rows_tq2_256_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 256, 66,  quantize_tq2<256>>;
+template [[host_name("kernel_set_rows_tq3j_256_i64")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 256, 132, 3, true>;
+template [[host_name("kernel_set_rows_tq3j_256_i32")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 256, 132, 3, true>;
+template [[host_name("kernel_set_rows_tq2j_256_i64")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 256, 100, 2, true>;
+template [[host_name("kernel_set_rows_tq2j_256_i32")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 256, 100, 2, true>;
+template [[host_name("kernel_set_rows_tq3_256_i64")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 256, 98,  3, false>;
+template [[host_name("kernel_set_rows_tq3_256_i32")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 256, 98,  3, false>;
+template [[host_name("kernel_set_rows_tq2_256_i64")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 256, 66,  2, false>;
+template [[host_name("kernel_set_rows_tq2_256_i32")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 256, 66,  2, false>;
 
 // d=512
-template [[host_name("kernel_set_rows_tq3j_512_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 260, quantize_tq3j<512>>;
-template [[host_name("kernel_set_rows_tq3j_512_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 260, quantize_tq3j<512>>;
-template [[host_name("kernel_set_rows_tq2j_512_i64")]] kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 196, quantize_tq2j<512>>;
-template [[host_name("kernel_set_rows_tq2j_512_i32")]] kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 196, quantize_tq2j<512>>;
-template [[host_name("kernel_set_rows_tq3_512_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 194, quantize_tq3<512>>;
-template [[host_name("kernel_set_rows_tq3_512_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 194, quantize_tq3<512>>;
-template [[host_name("kernel_set_rows_tq2_512_i64")]]  kernel set_rows_tq_t kernel_set_rows_tq<int64_t, 512, 130, quantize_tq2<512>>;
-template [[host_name("kernel_set_rows_tq2_512_i32")]]  kernel set_rows_tq_t kernel_set_rows_tq<int32_t, 512, 130, quantize_tq2<512>>;
+template [[host_name("kernel_set_rows_tq3j_512_i64")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 512, 260, 3, true>;
+template [[host_name("kernel_set_rows_tq3j_512_i32")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 512, 260, 3, true>;
+template [[host_name("kernel_set_rows_tq2j_512_i64")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 512, 196, 2, true>;
+template [[host_name("kernel_set_rows_tq2j_512_i32")]] kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 512, 196, 2, true>;
+template [[host_name("kernel_set_rows_tq3_512_i64")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 512, 194, 3, false>;
+template [[host_name("kernel_set_rows_tq3_512_i32")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 512, 194, 3, false>;
+template [[host_name("kernel_set_rows_tq2_512_i64")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int64_t, 512, 130, 2, false>;
+template [[host_name("kernel_set_rows_tq2_512_i32")]]  kernel set_rows_tq_simd_t kernel_set_rows_tq_simd<int32_t, 512, 130, 2, false>;
 
 //
 // matrix-matrix multiplication

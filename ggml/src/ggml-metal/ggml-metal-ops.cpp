@@ -1215,13 +1215,28 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
         /*.nb3  =*/ nb3,
     };
 
+    const bool is_tq = (op->type == GGML_TYPE_TQ3J || op->type == GGML_TYPE_TQ2J ||
+                         op->type == GGML_TYPE_TQ3  || op->type == GGML_TYPE_TQ2  ||
+                         op->type == GGML_TYPE_TQ3J_256 || op->type == GGML_TYPE_TQ2J_256 ||
+                         op->type == GGML_TYPE_TQ3_256  || op->type == GGML_TYPE_TQ2_256  ||
+                         op->type == GGML_TYPE_TQ3J_512 || op->type == GGML_TYPE_TQ2J_512 ||
+                         op->type == GGML_TYPE_TQ3_512  || op->type == GGML_TYPE_TQ2_512);
+
     ggml_metal_encoder_set_pipeline(enc, pipeline);
     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
 
-    ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nrptg - 1)/nrptg, ne02, ne03, nth, nrptg, 1);
+    if (is_tq) {
+        const bool is_3bit = (op->type == GGML_TYPE_TQ3J || op->type == GGML_TYPE_TQ3 ||
+                              op->type == GGML_TYPE_TQ3J_256 || op->type == GGML_TYPE_TQ3_256 ||
+                              op->type == GGML_TYPE_TQ3J_512 || op->type == GGML_TYPE_TQ3_512);
+        ggml_metal_encoder_set_threadgroup_memory_size(enc, is_3bit ? ggml_blck_size(op->type) : 0, 0);
+        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, 32, 1, 1);
+    } else {
+        ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nrptg - 1)/nrptg, ne02, ne03, nth, nrptg, 1);
+    }
 
     return 1;
 }
