@@ -1,0 +1,203 @@
+
+==================================================
+=== f16/f16 (K=f16 V=f16) ===
+==================================================
+Server ready.
+  PASS  math01
+  PASS  math02
+  PASS  math03
+  PASS  math04
+  PASS  math05
+  PASS  math06
+  PASS  math07
+  PASS  mat01
+  PASS  mat02
+  PASS  mat03
+  PASS  mat04
+  PASS  mat05
+  PASS  fact01
+  PASS  fact02
+  PASS  fact03
+  PASS  fact04
+  PASS  fact05
+  PASS  fact06
+  PASS  logic01
+  PASS  logic02
+  PASS  logic03
+  PASS  logic04
+  PASS  logic05
+  PASS  code01
+  PASS  code02
+  PASS  code03
+  PASS  code04
+  PASS  code05
+  PASS  delayed_D1
+  PASS  delayed_D2
+  PASS  delayed_D3
+
+  f16/f16: 31/31 (100%)
+
+==================================================
+=== q8_0/q8_0 (K=q8_0 V=q8_0) ===
+==================================================
+Server ready.
+  PASS  math01
+  PASS  math02
+  PASS  math03
+  PASS  math04
+  PASS  math05
+  PASS  math06
+  PASS  math07
+  PASS  mat01
+  PASS  mat02
+  PASS  mat03
+  PASS  mat04
+  PASS  mat05
+  PASS  fact01
+  PASS  fact02
+  PASS  fact03
+  PASS  fact04
+  PASS  fact05
+  PASS  fact06
+  PASS  logic01
+  PASS  logic02
+  PASS  logic03
+  PASS  logic04
+  PASS  logic05
+  PASS  code01
+  PASS  code02
+  PASS  code03
+  PASS  code04
+  PASS  code05
+  PASS  delayed_D1
+  PASS  delayed_D2
+  PASS  delayed_D3
+
+  q8_0/q8_0: 31/31 (100%)
+
+==================================================
+=== q4_0/q4_0 (K=q4_0 V=q4_0) ===
+==================================================
+Server ready.
+  PASS  math01
+  PASS  math02
+  PASS  math03
+  PASS  math04
+  PASS  math05
+  PASS  math06
+  PASS  math07
+  PASS  mat01
+  PASS  mat02
+  PASS  mat03
+  PASS  mat04
+  PASS  mat05
+  PASS  fact01
+  PASS  fact02
+  PASS  fact03
+  PASS  fact04
+  PASS  fact05
+  PASS  fact06
+  PASS  logic01
+  PASS  logic02
+  PASS  logic03
+  PASS  logic04
+  PASS  logic05
+  PASS  code01
+  PASS  code02
+  PASS  code03
+  PASS  code04
+  PASS  code05
+  PASS  delayed_D1
+  PASS  delayed_D2
+  PASS  delayed_D3
+
+  q4_0/q4_0: 31/31 (100%)
+
+==================================================
+=== tq3j/tq3 (K=tq3j V=tq3) ===
+==================================================
+Server ready.
+  PASS  math01
+  PASS  math02
+  PASS  math03
+  PASS  math04
+  PASS  math05
+  FAIL  math06  expected=98201 got=(empty)
+  PASS  math07
+  PASS  mat01
+  PASS  mat02
+  PASS  mat03
+  PASS  mat04
+  PASS  mat05
+  PASS  fact01
+  PASS  fact02
+  PASS  fact03
+  PASS  fact04
+  PASS  fact05
+  PASS  fact06
+  PASS  logic01
+  PASS  logic02
+  PASS  logic03
+  PASS  logic04
+  PASS  logic05
+  PASS  code01
+  PASS  code02
+  PASS  code03
+  PASS  code04
+  PASS  code05
+  PASS  delayed_D1
+  PASS  delayed_D2
+  PASS  delayed_D3
+
+  tq3j/tq3: 30/31 (97%)
+  Failures: math06
+
+==================================================
+=== tq2j/tq2 (K=tq2j V=tq2) ===
+==================================================
+Server ready.
+  PASS  math01
+  PASS  math02
+  PASS  math03
+  PASS  math04
+  PASS  math05
+  FAIL  math06  expected=98201 got=(empty)
+  PASS  math07
+  PASS  mat01
+  PASS  mat02
+  PASS  mat03
+  FAIL  mat04  expected=[[19,22],[43,50]] got=(empty)
+  PASS  mat05
+  PASS  fact01
+  PASS  fact02
+  PASS  fact03
+  PASS  fact04
+  PASS  fact05
+  PASS  fact06
+  PASS  logic01
+  PASS  logic02
+  PASS  logic03
+  FAIL  logic04  expected=25 got=(empty)
+  PASS  logic05
+  PASS  code01
+  PASS  code02
+  PASS  code03
+  PASS  code04
+  PASS  code05
+  PASS  delayed_D1
+  FAIL  delayed_D2  expected=[[2,8],[15,6]] got=(empty)
+  FAIL  delayed_D3  expected=[[6,17],[14,18]] got=<|channel>-thought *   A = [[3, 1], [2, 4]]     *   B = [[1,
+
+  tq2j/tq2: 26/31 (84%)
+  Failures: math06, mat04, logic04, delayed_D2, delayed_D3
+
+==================================================
+SUMMARY
+==================================================
+  Config             Score    Pct  Failures
+  ------------------------------------------------------------
+  f16/f16          31/31   100.0%  none
+  q8_0/q8_0        31/31   100.0%  none
+  q4_0/q4_0        31/31   100.0%  none
+  tq3j/tq3         30/31    96.8%  math06
+  tq2j/tq2         26/31    83.9%  math06, mat04, logic04, delayed_D2, delayed_D3
