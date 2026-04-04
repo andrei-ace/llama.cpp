@@ -9912,8 +9912,9 @@ kernel void kernel_set_rows_tq_simd(
         float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
 
         // Nearest centroid per value — branchless boundary comparison
-        // Symmetric centroids: 3 compares for 8-centroid, 1 for 4-centroid
+        // Cache centroid values to avoid re-lookup in QJL residual
         int idx[VPT];
+        float cv[VPT]; // cached c[idx[k]]
         if (TQ_BITS == 3) {
             constant const float * b = (DIM >= 512) ? tq_b8_d512 : (DIM == 256) ? tq_b8_d256 : tq_b8_d128;
             for (short k = 0; k < VPT; k++) {
@@ -9921,6 +9922,7 @@ kernel void kernel_set_rows_tq_simd(
                 float av = abs(nv);
                 int pos = (av >= b[0]) + (av >= b[1]) + (av >= b[2]);
                 idx[k] = (nv >= 0) ? (4 + pos) : (3 - pos);
+                cv[k] = c[idx[k]];
             }
         } else {
             constant const float * b = (DIM >= 512) ? tq_b4_d512 : (DIM == 256) ? tq_b4_d256 : tq_b4_d128;
@@ -9929,25 +9931,37 @@ kernel void kernel_set_rows_tq_simd(
                 float av = abs(nv);
                 int pos = (av >= b[0]);
                 idx[k] = (nv >= 0) ? (2 + pos) : (1 - pos);
+                cv[k] = c[idx[k]];
             }
         }
 
-        // Pack indices
+        // Pack indices — barrier-free for 3-bit
         device uint8_t * qs = out + hdr;
         if (TQ_BITS == 3) {
-            threadgroup uint8_t * tg_idx = shmem;
-            for (short k = 0; k < VPT; k++) {
-                tg_idx[tiisg * VPT + k] = (uint8_t)idx[k];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (int g = tiisg; g < DIM / 8; g += 32) {
-                uint32_t packed = 0;
-                for (int i = 0; i < 8; i++) {
-                    packed |= ((uint32_t)tg_idx[g * 8 + i]) << (i * 3);
+            // Each thread packs its VPT indices directly.
+            // VPT=8: 24 bits = 3 bytes per thread, naturally aligned at tiisg*3.
+            // VPT=4: 12 bits per thread; pair adjacent threads via shuffle to fill 3 bytes.
+            // VPT=16: 48 bits = 6 bytes per thread at tiisg*6.
+            if (VPT == 4) {
+                uint32_t my_bits = 0;
+                for (int i = 0; i < 4; i++) my_bits |= ((uint32_t)idx[i]) << (i * 3);
+                uint32_t partner = simd_shuffle_xor(my_bits, 1);
+                if ((tiisg & 1) == 0) {
+                    uint32_t combined = my_bits | (partner << 12);
+                    qs[tiisg/2 * 3 + 0] = (uint8_t)(combined);
+                    qs[tiisg/2 * 3 + 1] = (uint8_t)(combined >> 8);
+                    qs[tiisg/2 * 3 + 2] = (uint8_t)(combined >> 16);
                 }
-                qs[g * 3 + 0] = (uint8_t)(packed);
-                qs[g * 3 + 1] = (uint8_t)(packed >> 8);
-                qs[g * 3 + 2] = (uint8_t)(packed >> 16);
+            } else {
+                // VPT=8 or 16: pack groups of 8 indices into 3 bytes each
+                for (short g = 0; g < VPT; g += 8) {
+                    uint32_t packed = 0;
+                    for (int i = 0; i < 8; i++) packed |= ((uint32_t)idx[g+i]) << (i * 3);
+                    int byte_off = (tiisg * VPT + g) * 3 / 8;
+                    qs[byte_off + 0] = (uint8_t)(packed);
+                    qs[byte_off + 1] = (uint8_t)(packed >> 8);
+                    qs[byte_off + 2] = (uint8_t)(packed >> 16);
+                }
             }
         } else {
             for (short g = 0; g < VPT; g += 4) {
@@ -9956,7 +9970,7 @@ kernel void kernel_set_rows_tq_simd(
             }
         }
 
-        // QJL signs + residual norm
+        // QJL signs + residual norm (uses cached cv[] — no constant memory re-read)
         if (HAS_QJL) {
             device uint8_t * signs = out + hdr + qs_bytes;
             float local_rnorm_sq = 0.0f;
@@ -9964,7 +9978,7 @@ kernel void kernel_set_rows_tq_simd(
             if (VPT == 4) {
                 uint8_t my_bits = 0;
                 for (short k = 0; k < 4; k++) {
-                    float res = v[k] - norm * c[idx[k]];
+                    float res = v[k] - norm * cv[k];
                     local_rnorm_sq += res * res;
                     if (res >= 0.0f) my_bits |= (uint8_t)(1 << k);
                 }
@@ -9975,7 +9989,7 @@ kernel void kernel_set_rows_tq_simd(
             } else if (VPT == 8) {
                 uint8_t my_byte = 0;
                 for (short k = 0; k < 8; k++) {
-                    float res = v[k] - norm * c[idx[k]];
+                    float res = v[k] - norm * cv[k];
                     local_rnorm_sq += res * res;
                     if (res >= 0.0f) my_byte |= (uint8_t)(1 << k);
                 }
@@ -9984,7 +9998,7 @@ kernel void kernel_set_rows_tq_simd(
                 for (short b = 0; b < 2; b++) {
                     uint8_t my_byte = 0;
                     for (short k = 0; k < 8; k++) {
-                        float res = v[b*8+k] - norm * c[idx[b*8+k]];
+                        float res = v[b*8+k] - norm * cv[b*8+k];
                         local_rnorm_sq += res * res;
                         if (res >= 0.0f) my_byte |= (uint8_t)(1 << k);
                     }
