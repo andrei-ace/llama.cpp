@@ -1157,18 +1157,21 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 return false;
             }
             if (op->src[1]->type != op->src[2]->type) {
-                // Allow mismatched K/V for TQ types (DK must be >= 128)
+                // Only allow mismatched K/V for TQ combinations that have instantiated kernels.
+                // Valid mixed combos: K=tq{3j,2j}[_256,_512] with V=f16, q4_0, tq3[_256,_512], or tq2[_256,_512]
+                // Also: K=tql with V=f16
                 const enum ggml_type kt = op->src[1]->type;
                 const enum ggml_type vt = op->src[2]->type;
-                const bool tq_k = (kt == GGML_TYPE_TQL || kt == GGML_TYPE_TQ3J || kt == GGML_TYPE_TQ2J ||
-                                   kt == GGML_TYPE_TQ3 || kt == GGML_TYPE_TQ2 ||
-                                   kt == GGML_TYPE_TQ3J_256 || kt == GGML_TYPE_TQ2J_256 ||
-                                   kt == GGML_TYPE_TQ3J_512 || kt == GGML_TYPE_TQ2J_512);
-                const bool tq_v = (vt == GGML_TYPE_TQ3 || vt == GGML_TYPE_TQ2 ||
-                                   vt == GGML_TYPE_TQ3_256 || vt == GGML_TYPE_TQ2_256 ||
-                                   vt == GGML_TYPE_TQ3_512 || vt == GGML_TYPE_TQ2_512);
-                if ((tq_k || tq_v) && op->src[0]->ne[0] >= 128) {
-                    // OK - TQ K and/or V
+                const bool tqj_k = (kt == GGML_TYPE_TQ3J || kt == GGML_TYPE_TQ2J ||
+                                    kt == GGML_TYPE_TQ3J_256 || kt == GGML_TYPE_TQ2J_256 ||
+                                    kt == GGML_TYPE_TQ3J_512 || kt == GGML_TYPE_TQ2J_512);
+                const bool tql_k = (kt == GGML_TYPE_TQL);
+                const bool valid_v = (vt == GGML_TYPE_F16 || vt == GGML_TYPE_Q4_0 ||
+                                      vt == GGML_TYPE_TQ3 || vt == GGML_TYPE_TQ2 ||
+                                      vt == GGML_TYPE_TQ3_256 || vt == GGML_TYPE_TQ2_256 ||
+                                      vt == GGML_TYPE_TQ3_512 || vt == GGML_TYPE_TQ2_512);
+                if ((tqj_k && valid_v) || (tql_k && vt == GGML_TYPE_F16)) {
+                    // OK - supported TQ mixed K/V combination
                 } else {
                     return false;
                 }

@@ -17,15 +17,48 @@
 extern "C" int tq_get_layer_type(int calibration_layer_idx);
 extern "C" const int32_t * tq_get_layer_map(int * out_n_model_layers);
 
-static ggml_type tq_resolve_type(ggml_type type, int head_dim) {
-    if (head_dim <= 128) return type;
+static bool tq_is_type(ggml_type type) {
     switch (type) {
-        case GGML_TYPE_TQ3J: return head_dim >= 512 ? GGML_TYPE_TQ3J_512 : GGML_TYPE_TQ3J_256;
-        case GGML_TYPE_TQ2J: return head_dim >= 512 ? GGML_TYPE_TQ2J_512 : GGML_TYPE_TQ2J_256;
-        case GGML_TYPE_TQ3:  return head_dim >= 512 ? GGML_TYPE_TQ3_512  : GGML_TYPE_TQ3_256;
-        case GGML_TYPE_TQ2:  return head_dim >= 512 ? GGML_TYPE_TQ2_512  : GGML_TYPE_TQ2_256;
-        default: return type;
+        case GGML_TYPE_TQ3J: case GGML_TYPE_TQ2J:
+        case GGML_TYPE_TQ3:  case GGML_TYPE_TQ2:
+        case GGML_TYPE_TQ3J_256: case GGML_TYPE_TQ2J_256:
+        case GGML_TYPE_TQ3_256:  case GGML_TYPE_TQ2_256:
+        case GGML_TYPE_TQ3J_512: case GGML_TYPE_TQ2J_512:
+        case GGML_TYPE_TQ3_512:  case GGML_TYPE_TQ2_512:
+        case GGML_TYPE_TQL:
+            return true;
+        default:
+            return false;
     }
+}
+
+static ggml_type tq_resolve_type(ggml_type type, int head_dim) {
+    if (head_dim == 128 || head_dim <= 0) return type;
+    if (head_dim == 256) {
+        switch (type) {
+            case GGML_TYPE_TQ3J: return GGML_TYPE_TQ3J_256;
+            case GGML_TYPE_TQ2J: return GGML_TYPE_TQ2J_256;
+            case GGML_TYPE_TQ3:  return GGML_TYPE_TQ3_256;
+            case GGML_TYPE_TQ2:  return GGML_TYPE_TQ2_256;
+            default: return type;
+        }
+    }
+    if (head_dim == 512) {
+        switch (type) {
+            case GGML_TYPE_TQ3J: return GGML_TYPE_TQ3J_512;
+            case GGML_TYPE_TQ2J: return GGML_TYPE_TQ2J_512;
+            case GGML_TYPE_TQ3:  return GGML_TYPE_TQ3_512;
+            case GGML_TYPE_TQ2:  return GGML_TYPE_TQ2_512;
+            default: return type;
+        }
+    }
+    // Unsupported head dimension for TQ — fall back to f16
+    if (tq_is_type(type)) {
+        LLAMA_LOG_WARN("%s: head_dim=%d not supported for %s, falling back to f16\n",
+            __func__, head_dim, ggml_type_name(type));
+        return GGML_TYPE_F16;
+    }
+    return type;
 }
 
 // Check calibration data for per-layer type override
@@ -221,7 +254,7 @@ llama_kv_cache::llama_kv_cache(
 
         // TurboQuant: resolve to per-layer variant based on head_dim + calibration override
         ggml_type layer_type_k = tq_resolve_type(type_k, (int)hparams.n_embd_head_k(il));
-        ggml_type layer_type_v = tq_resolve_type(type_v, (int)hparams.n_embd_head_k(il));
+        ggml_type layer_type_v = tq_resolve_type(type_v, (int)hparams.n_embd_head_v(il));
         {
             int n_ml = 0;
             const int32_t * lmap = tq_get_layer_map(&n_ml);

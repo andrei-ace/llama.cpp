@@ -6271,6 +6271,7 @@ void kernel_flash_attn_ext_impl(
     }
 
     // TurboQuant: FWHT-transform Q in shared memory (works for any DK)
+    // Use float precision for butterflies to avoid half-precision accumulation error
     if (TQ_FWHT) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
@@ -6280,13 +6281,13 @@ void kernel_flash_attn_ext_impl(
                 for (short step = 1; step < DK; step *= 2) {
                     for (short idx = tiisg; idx < DK/2; idx += NW) {
                         short i = (idx / step) * (2 * step) + (idx % step);
-                        half a = sq_j[i], b = sq_j[i + step];
-                        sq_j[i] = a + b; sq_j[i + step] = a - b;
+                        float a = float(sq_j[i]), b = float(sq_j[i + step]);
+                        sq_j[i] = half(a + b); sq_j[i + step] = half(a - b);
                     }
                     simdgroup_barrier(mem_flags::mem_threadgroup);
                 }
-                const half s = half(1.0h / sqrt((half)DK));
-                for (short i = tiisg; i < DK; i += NW) sq_j[i] *= s;
+                const float s = 1.0f / sqrt((float)DK);
+                for (short i = tiisg; i < DK; i += NW) sq_j[i] = half(float(sq_j[i]) * s);
                 simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
@@ -7201,6 +7202,7 @@ kernel void kernel_flash_attn_ext_vec(
     }
 
     // TurboQuant: FWHT-transform Q in shared memory (works for any DK)
+    // Use float precision for butterflies to avoid half-precision accumulation error
     if (TQ_FWHT) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         threadgroup half * sq_h = (threadgroup half *) sq4;
@@ -7208,13 +7210,13 @@ kernel void kernel_flash_attn_ext_vec(
             for (short step = 1; step < DK; step *= 2) {
                 for (short idx = tiisg; idx < DK/2; idx += NW) {
                     short i = (idx / step) * (2 * step) + (idx % step);
-                    half a = sq_h[i], b = sq_h[i + step];
-                    sq_h[i] = a + b; sq_h[i + step] = a - b;
+                    float a = float(sq_h[i]), b = float(sq_h[i + step]);
+                    sq_h[i] = half(a + b); sq_h[i + step] = half(a - b);
                 }
                 simdgroup_barrier(mem_flags::mem_threadgroup);
             }
-            const half s = half(1.0h / sqrt((half)DK));
-            for (short i = tiisg; i < DK; i += NW) sq_h[i] *= s;
+            const float s = 1.0f / sqrt((float)DK);
+            for (short i = tiisg; i < DK; i += NW) sq_h[i] = half(float(sq_h[i]) * s);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -7313,24 +7315,21 @@ kernel void kernel_flash_attn_ext_vec(
                             mqk[cc] += dot((float4) pk4[cc*NE*NS10/4 +  ii*NL], (float4) pq4[ii*NL]);
                         }
                     } else if (TQ_FWHT) {
-                        // TQ path: cooperative load K block into shared memory, then extract
-                        // All threads read from same block — preload into fast threadgroup mem
+                        // TQ path: cooperative load K block into shared memory, then dequant + dot
                         device const uint8_t * pk_raw = (device const uint8_t *) (k + ((ic + NE*cc + ty)*args.nb11));
                         threadgroup uint8_t * sk = (threadgroup uint8_t *)(shmem_f16 + NSG*PK + NSG*SH + 2*NSG*PV);
 
-                        // Cooperative load: each thread loads 4 bytes (coalesced sequential reads)
-                        const short blk_bytes = (short)args.nb11;
-                        if (4*tiisg < blk_bytes) {
-                            *(threadgroup uint32_t *)(sk + 4*tiisg) = *(device const uint32_t *)(pk_raw + 4*tiisg);
+                        // Cooperative load: nb11 is the row stride (all heads), divide by NS10 for one block
+                        const short blk_bytes = (short)(args.nb11 / NS10);
+                        for (short off = 4*tiisg; off < blk_bytes; off += 32*4) {
+                            *(threadgroup uint32_t *)(sk + off) = *(device const uint32_t *)(pk_raw + off);
                         }
                         simdgroup_barrier(mem_flags::mem_threadgroup);
 
-                        // Dequant from shared memory + dot (coop load already done above)
+                        // Dequant all DK elements and accumulate Q·K dot product
                         {
                             const float norm = float(*(threadgroup const half *)(sk));
                             threadgroup const uint8_t * qs = sk + 4;
-                            const int base = tx * 4;
-                            k4_t mk;
 
                             if (is_same<kd4_t, block_tq3j>::value) {
                                 const float qjl_pos = QJL_SCALE_F / (float)DK * float(*(threadgroup const half *)(sk + 2));
@@ -7338,16 +7337,21 @@ kernel void kernel_flash_attn_ext_vec(
                                 threadgroup const uint8_t * signs = sk + signs_off;
                                 constant const float * c = (DK >= 512) ? tq_c8_d512 : (DK == 256) ? tq_c8_d256 : tq_c8_d128;
 
-                                const int bp0 = base * 3;
-                                const int bi0 = bp0 / 8;
-                                const int sh0 = bp0 & 7;
-                                uint32_t bits = (uint32_t)qs[bi0] | ((uint32_t)qs[bi0 + 1] << 8);
-                                uint32_t sb   = (uint32_t)(signs[base >> 3] >> (base & 7));
+                                for (short ii = 0; ii < DK4/NL; ++ii) {
+                                    const int base = (tx + ii*NL) * 4;
+                                    const int bp0 = base * 3;
+                                    const int bi0 = bp0 / 8;
+                                    const int sh0 = bp0 & 7;
+                                    uint32_t bits = (uint32_t)qs[bi0] | ((uint32_t)qs[bi0 + 1] << 8);
+                                    uint32_t sb   = (uint32_t)(signs[base >> 3] >> (base & 7));
 
-                                for (int i = 0; i < 4; i++) {
-                                    int idx = (int)((bits >> (sh0 + i * 3)) & 7);
-                                    float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
-                                    mk[i] = (half)(norm * c[idx] + sign);
+                                    k4_t mk;
+                                    for (int i = 0; i < 4; i++) {
+                                        int idx = (int)((bits >> (sh0 + i * 3)) & 7);
+                                        float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
+                                        mk[i] = (half)(norm * c[idx] + sign);
+                                    }
+                                    mqk[cc] += dot((float4) mk, (float4) sq4[tx + ii*NL]);
                                 }
                             } else if (is_same<kd4_t, block_tq2j>::value) {
                                 const float qjl_pos = QJL_SCALE_F / (float)DK * float(*(threadgroup const half *)(sk + 2));
@@ -7355,17 +7359,20 @@ kernel void kernel_flash_attn_ext_vec(
                                 threadgroup const uint8_t * signs = sk + signs_off;
                                 constant const float * c = (DK >= 512) ? tq_c4_d512 : (DK == 256) ? tq_c4_d256 : tq_c4_d128;
 
-                                const uint32_t idx_byte = (uint32_t)(qs[base / 4] >> (2 * (base % 4)));
-                                uint32_t sb = (uint32_t)(signs[base / 8] >> (base % 8));
+                                for (short ii = 0; ii < DK4/NL; ++ii) {
+                                    const int base = (tx + ii*NL) * 4;
+                                    const uint32_t idx_byte = (uint32_t)(qs[base / 4] >> (2 * (base % 4)));
+                                    uint32_t sb = (uint32_t)(signs[base / 8] >> (base % 8));
 
-                                for (int i = 0; i < 4; i++) {
-                                    int idx = (idx_byte >> (i * 2)) & 3;
-                                    float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
-                                    mk[i] = (half)(norm * c[idx] + sign);
+                                    k4_t mk;
+                                    for (int i = 0; i < 4; i++) {
+                                        int idx = (idx_byte >> (i * 2)) & 3;
+                                        float sign = (sb >> i) & 1 ? qjl_pos : -qjl_pos;
+                                        mk[i] = (half)(norm * c[idx] + sign);
+                                    }
+                                    mqk[cc] += dot((float4) mk, (float4) sq4[tx + ii*NL]);
                                 }
                             }
-
-                            mqk[cc] += dot((float4) mk, (float4) sq4[tx]);
                         }
 
                         simdgroup_barrier(mem_flags::mem_threadgroup);
