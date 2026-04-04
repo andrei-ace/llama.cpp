@@ -1017,6 +1017,17 @@ constant float tq_c4_d512[4] = {
     -0.0667516583f, -0.0200102396f,  0.0200102396f,  0.0667516583f,
 };
 
+// --- Boundary midpoints for fast nearest-centroid in SET_ROWS ---
+// For 8 symmetric centroids: 3 boundaries between the 4 positive centroids
+// idx = number of boundaries exceeded, then mirror by sign
+constant float tq_b8_d128[3] = { 0.0442427636f, 0.0928039891f, 0.1544964228f };
+constant float tq_b8_d256[3] = { 0.0312843582f, 0.0656223300f, 0.1092454682f };
+constant float tq_b8_d512[3] = { 0.0221213818f, 0.0464019946f, 0.0772482114f };
+// For 4 symmetric centroids: 1 boundary
+constant float tq_b4_d128[1] = { 0.0867618979f };
+constant float tq_b4_d256[1] = { 0.0613499264f };
+constant float tq_b4_d512[1] = { 0.0433809490f };
+
 // --- TQ2J branchless centroid decode ---
 // For 2-bit indices with 4 symmetric centroids [-A, -B, B, A]:
 // Use vector select instead of 4 table lookups — pure ALU, no memory reads.
@@ -9900,17 +9911,25 @@ kernel void kernel_set_rows_tq_simd(
         float norm = sqrt(simd_sum(local_sq));
         float inv_norm = (norm > 1e-12f) ? 1.0f / norm : 0.0f;
 
-        // Nearest centroid per value
+        // Nearest centroid per value — branchless boundary comparison
+        // Symmetric centroids: 3 compares for 8-centroid, 1 for 4-centroid
         int idx[VPT];
-        for (short k = 0; k < VPT; k++) {
-            float nv = v[k] * inv_norm;
-            int best = 0;
-            float best_d = abs(nv - c[0]);
-            for (int i = 1; i < N_C; i++) {
-                float d = abs(nv - c[i]);
-                if (d < best_d) { best_d = d; best = i; }
+        if (TQ_BITS == 3) {
+            constant const float * b = (DIM >= 512) ? tq_b8_d512 : (DIM == 256) ? tq_b8_d256 : tq_b8_d128;
+            for (short k = 0; k < VPT; k++) {
+                float nv = v[k] * inv_norm;
+                float av = abs(nv);
+                int pos = (av >= b[0]) + (av >= b[1]) + (av >= b[2]);
+                idx[k] = (nv >= 0) ? (4 + pos) : (3 - pos);
             }
-            idx[k] = best;
+        } else {
+            constant const float * b = (DIM >= 512) ? tq_b4_d512 : (DIM == 256) ? tq_b4_d256 : tq_b4_d128;
+            for (short k = 0; k < VPT; k++) {
+                float nv = v[k] * inv_norm;
+                float av = abs(nv);
+                int pos = (av >= b[0]);
+                idx[k] = (nv >= 0) ? (2 + pos) : (1 - pos);
+            }
         }
 
         // Pack indices
