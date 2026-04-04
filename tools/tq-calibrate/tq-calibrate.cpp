@@ -28,12 +28,16 @@ enum calib_metric_t { METRIC_MAG = 0, METRIC_VAR = 1, METRIC_BOTH = 2 };
 
 struct tq_calibration_data {
     int n_layers   = 0;
-    int n_kv_heads = 0;
-    int head_dim   = 0;
+    int max_head_dim = 0;
     bool pre_rope  = false;
     calib_metric_t metric = METRIC_VAR;
 
-    // [n_layers][n_kv_heads][head_dim]
+    // per-layer dimensions (for models with mixed head dims like Gemma4)
+    std::vector<int> layer_head_dim;   // head_dim per calibration layer
+    std::vector<int> layer_n_kv_heads; // n_kv_heads per calibration layer
+
+    // [n_layers][max_n_kv_heads][max_head_dim] — padded to max dims
+    int max_n_kv_heads = 0;
     std::vector<double> sum_abs;
     std::vector<double> sum_val;
     std::vector<double> sum_sq;
@@ -41,10 +45,9 @@ struct tq_calibration_data {
     std::vector<int> layer_map;
     std::mutex mtx;
 
-    void init(int n_layer_model, int n_kv_heads_, int head_dim_, bool pre_rope_,
+    void init(int n_layer_model, const std::vector<int> & kv_heads_per_layer,
+              const std::vector<int> & head_dim_per_layer, bool pre_rope_,
               calib_metric_t metric_) {
-        n_kv_heads = n_kv_heads_;
-        head_dim   = head_dim_;
         pre_rope   = pre_rope_;
         metric     = metric_;
 
@@ -54,7 +57,22 @@ struct tq_calibration_data {
             layer_map[il] = idx++;
         }
         n_layers = idx;
-        size_t sz = (size_t)n_layers * n_kv_heads * head_dim;
+
+        layer_head_dim.resize(n_layers);
+        layer_n_kv_heads.resize(n_layers);
+        max_head_dim = 0;
+        max_n_kv_heads = 0;
+        for (int il = 0; il < n_layer_model; il++) {
+            int cidx = layer_map[il];
+            if (cidx >= 0) {
+                layer_head_dim[cidx]   = head_dim_per_layer[il];
+                layer_n_kv_heads[cidx] = kv_heads_per_layer[il];
+                if (head_dim_per_layer[il] > max_head_dim) max_head_dim = head_dim_per_layer[il];
+                if (kv_heads_per_layer[il] > max_n_kv_heads) max_n_kv_heads = kv_heads_per_layer[il];
+            }
+        }
+
+        size_t sz = (size_t)n_layers * max_n_kv_heads * max_head_dim;
         sum_abs.resize(sz, 0.0);
         sum_val.resize(sz, 0.0);
         sum_sq.resize(sz, 0.0);
@@ -62,11 +80,12 @@ struct tq_calibration_data {
     }
 
     void accum_head(int cidx, int h, const float * hd) {
-        size_t off = ((size_t)cidx * n_kv_heads + h) * head_dim;
+        int hd_dim = layer_head_dim[cidx];
+        size_t off = ((size_t)cidx * max_n_kv_heads + h) * max_head_dim;
         double * sa = sum_abs.data() + off;
         double * sv = sum_val.data() + off;
         double * ss = sum_sq.data()  + off;
-        for (int d = 0; d < head_dim; d++) {
+        for (int d = 0; d < hd_dim; d++) {
             double v = (double)hd[d];
             sa[d] += fabs(v);
             sv[d] += v;
@@ -77,32 +96,37 @@ struct tq_calibration_data {
     void accumulate(int model_il, const float * data, int64_t n_tokens) {
         int cidx = layer_map[model_il];
         if (cidx < 0) return;
+        int n_heads = layer_n_kv_heads[cidx];
+        int hdim    = layer_head_dim[cidx];
         std::lock_guard<std::mutex> lock(mtx);
         for (int64_t t = 0; t < n_tokens; t++)
-            for (int h = 0; h < n_kv_heads; h++)
-                accum_head(cidx, h, data + (t * n_kv_heads + h) * head_dim);
+            for (int h = 0; h < n_heads; h++)
+                accum_head(cidx, h, data + (t * n_heads + h) * hdim);
         counts[cidx] += n_tokens;
     }
 
     void accumulate_2d(int model_il, const float * data, int64_t n_embd_k_gqa, int64_t n_tokens) {
         int cidx = layer_map[model_il];
         if (cidx < 0) return;
+        int n_heads = layer_n_kv_heads[cidx];
+        int hdim    = layer_head_dim[cidx];
         std::lock_guard<std::mutex> lock(mtx);
         for (int64_t t = 0; t < n_tokens; t++)
-            for (int h = 0; h < n_kv_heads; h++)
-                accum_head(cidx, h, data + t * n_embd_k_gqa + h * head_dim);
+            for (int h = 0; h < n_heads; h++)
+                accum_head(cidx, h, data + t * n_embd_k_gqa + h * hdim);
         counts[cidx] += n_tokens;
     }
 
     void compute_perm(int cidx, int head, uint8_t * perm) const {
-        size_t off = ((size_t)cidx * n_kv_heads + head) * head_dim;
+        int hd_dim = layer_head_dim[cidx];
+        size_t off = ((size_t)cidx * max_n_kv_heads + head) * max_head_dim;
         const double * sa = sum_abs.data() + off;
         const double * sv = sum_val.data() + off;
         const double * ss = sum_sq.data()  + off;
         int64_t n = std::max(counts[cidx], (int64_t)1);
 
-        std::vector<std::pair<double, int>> importance(head_dim);
-        for (int d = 0; d < head_dim; d++) {
+        std::vector<std::pair<double, int>> importance(hd_dim);
+        for (int d = 0; d < hd_dim; d++) {
             double mag = sa[d] / n;
             double var = ss[d] / n - (sv[d] / n) * (sv[d] / n);
             if (var < 0) var = 0;
@@ -114,10 +138,9 @@ struct tq_calibration_data {
             importance[d] = { score, d };
         }
 
-        // Sort by importance descending — first entries are most important channels
         std::sort(importance.begin(), importance.end(),
                   [](const auto & a, const auto & b) { return a.first > b.first; });
-        for (int d = 0; d < head_dim; d++) perm[d] = (uint8_t)importance[d].second;
+        for (int d = 0; d < hd_dim; d++) perm[d] = (uint8_t)importance[d].second;
     }
 };
 
@@ -149,7 +172,23 @@ static bool tq_collect_callback(struct ggml_tensor * t, bool ask, void *) {
         data = (const float *)g_tensor_buf.data();
     }
 
-    // Handle both 2D [n_embd_k_gqa, n_tokens] and 3D [head_dim, n_heads, n_tokens]
+    // Auto-detect per-layer dimensions from the actual tensor shape
+    int cidx = g_calib.layer_map[il];
+    if (ggml_n_dims(t) >= 3) {
+        // 3D: [head_dim, n_heads, n_tokens]
+        int actual_hdim = (int)t->ne[0];
+        int actual_nkv  = (int)t->ne[1];
+        if (g_calib.layer_head_dim[cidx] != actual_hdim || g_calib.layer_n_kv_heads[cidx] != actual_nkv) {
+            g_calib.layer_head_dim[cidx]   = actual_hdim;
+            g_calib.layer_n_kv_heads[cidx] = actual_nkv;
+            if (actual_hdim > g_calib.max_head_dim) { g_calib.max_head_dim = actual_hdim; }
+            if (actual_nkv > g_calib.max_n_kv_heads) { g_calib.max_n_kv_heads = actual_nkv; }
+        }
+    } else {
+        // 2D: [n_embd_k_gqa, n_tokens] — infer from n_embd_k_gqa / n_kv_heads
+        // (can't auto-detect head_dim from 2D without knowing n_kv_heads)
+    }
+
     if (ggml_n_dims(t) == 2) {
         g_calib.accumulate_2d(il, data, t->ne[0], t->ne[1]);
     } else {
@@ -233,31 +272,69 @@ int main(int argc, char ** argv) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const int n_layer    = llama_model_n_layer(model);
-    const int n_kv_heads = llama_model_n_head_kv(model);
     const int n_q_heads  = llama_model_n_head(model);
 
-    // Detect head_dim from GGUF metadata
-    int head_dim = 0;
+    // Detect per-layer head_dim and n_kv_heads from GGUF metadata
+    int head_dim_global = 0, head_dim_swa = 0;
+    int n_kv_heads_global = 0;
     {
         char arch[64] = {0};
         llama_model_meta_val_str(model, "general.architecture", arch, sizeof(arch));
         if (arch[0]) {
             char key[256], val[64];
             snprintf(key, sizeof(key), "%s.attention.key_length", arch);
-            if (llama_model_meta_val_str(model, key, val, sizeof(val)) > 0) {
-                head_dim = atoi(val);
-            }
+            if (llama_model_meta_val_str(model, key, val, sizeof(val)) > 0)
+                head_dim_global = atoi(val);
+            snprintf(key, sizeof(key), "%s.attention.key_length_swa", arch);
+            if (llama_model_meta_val_str(model, key, val, sizeof(val)) > 0)
+                head_dim_swa = atoi(val);
         }
-        if (head_dim <= 0) {
-            head_dim = llama_model_n_embd(model) / n_q_heads;
+        if (head_dim_global <= 0)
+            head_dim_global = llama_model_n_embd(model) / n_q_heads;
+        if (head_dim_swa <= 0)
+            head_dim_swa = head_dim_global;
+        n_kv_heads_global = llama_model_n_head_kv(model);
+    }
+
+    // Build per-layer head_dim and n_kv_heads from metadata
+    std::vector<int> kv_heads_per_layer(n_layer, n_kv_heads_global);
+    std::vector<int> head_dim_per_layer(n_layer, head_dim_global);
+    {
+        char arch[64] = {0};
+        llama_model_meta_val_str(model, "general.architecture", arch, sizeof(arch));
+        if (arch[0]) {
+            // Parse head_count_kv array: [8, 8, 8, 8, 8, 2, ...]
+            char key[256], val[2048];
+            snprintf(key, sizeof(key), "%s.attention.head_count_kv", arch);
+            if (llama_model_meta_val_str(model, key, val, sizeof(val)) > 0) {
+                std::vector<int> hkv;
+                const char * p = val;
+                while (*p) {
+                    while (*p && !isdigit(*p)) p++;
+                    if (*p) { hkv.push_back(atoi(p)); while (*p && isdigit(*p)) p++; }
+                }
+                // SWA layers have the majority (higher) kv head count
+                int max_hkv = *std::max_element(hkv.begin(), hkv.end());
+                for (int il = 0; il < n_layer && il < (int)hkv.size(); il++) {
+                    kv_heads_per_layer[il] = hkv[il];
+                    head_dim_per_layer[il] = (hkv[il] == max_hkv) ? head_dim_swa : head_dim_global;
+                }
+            }
         }
     }
 
-    fprintf(stderr, "model: %d layers, %d KV heads, %d Q heads (GQA %d:1), head_dim=%d\n",
-            n_layer, n_kv_heads, n_q_heads, n_q_heads/n_kv_heads, head_dim);
+    fprintf(stderr, "model: %d layers, head_dim=%d (global), head_dim_swa=%d\n",
+            n_layer, head_dim_global, head_dim_swa);
+    for (int il = 0; il < n_layer; il++) {
+        if (head_dim_per_layer[il] != head_dim_global || kv_heads_per_layer[il] != n_kv_heads_global) {
+            fprintf(stderr, "  layer %2d: head_dim=%d, n_kv_heads=%d%s\n",
+                    il, head_dim_per_layer[il], kv_heads_per_layer[il],
+                    head_dim_per_layer[il] == head_dim_swa ? " (SWA)" : " (global)");
+        }
+    }
 
     const char * metric_str = metric == METRIC_MAG ? "mag" : metric == METRIC_VAR ? "var" : "both";
-    g_calib.init(n_layer, n_kv_heads, head_dim, pre_rope, metric);
+    g_calib.init(n_layer, kv_heads_per_layer, head_dim_per_layer, pre_rope, metric);
 
     fprintf(stderr, "calibration: %d layers, %s, metric=%s, max %d tokens\n",
             g_calib.n_layers, pre_rope ? "pre-RoPE" : "post-RoPE", metric_str, n_tokens_max);
@@ -306,30 +383,43 @@ int main(int argc, char ** argv) {
     }
 
     fprintf(stderr, "computing permutations...\n");
-    std::vector<uint8_t> all_perms((size_t)n_kv_layers * n_kv_heads * head_dim);
+
+    // Per-layer permutations stored as variable-length blocks
+    // perm_offsets[l] = offset into all_perms for layer l
+    std::vector<size_t> perm_offsets(n_kv_layers);
+    std::vector<uint8_t> all_perms;
 
     for (int l = 0; l < n_kv_layers; l++) {
         int old_cidx = kv_cidx_map[l];
-        for (int h = 0; h < n_kv_heads; h++) {
-            g_calib.compute_perm(old_cidx, h, all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim);
+        int n_heads  = g_calib.layer_n_kv_heads[old_cidx];
+        int hdim     = g_calib.layer_head_dim[old_cidx];
+
+        perm_offsets[l] = all_perms.size();
+        all_perms.resize(all_perms.size() + (size_t)n_heads * hdim);
+
+        for (int h = 0; h < n_heads; h++) {
+            g_calib.compute_perm(old_cidx, h, all_perms.data() + perm_offsets[l] + (size_t)h * hdim);
         }
-        fprintf(stderr, "  layer %2d: %lld vectors\n", l, (long long)g_calib.counts[old_cidx]);
+        fprintf(stderr, "  layer %2d: %lld vectors, head_dim=%d, n_kv_heads=%d\n",
+                l, (long long)g_calib.counts[old_cidx], hdim, n_heads);
     }
 
     // Compute outlier concentration per layer (top 25% channels' share of total variance)
-    const int n_hi = head_dim / 4;
     std::vector<float> outlier_pcts(n_kv_layers);
     std::vector<int32_t> layer_types(n_kv_layers);
     for (int l = 0; l < n_kv_layers; l++) {
         int old_cidx = kv_cidx_map[l];
+        int n_heads  = g_calib.layer_n_kv_heads[old_cidx];
+        int hdim     = g_calib.layer_head_dim[old_cidx];
+        int n_hi     = hdim / 4;
         int64_t n = std::max(g_calib.counts[old_cidx], (int64_t)1);
         double total_var = 0, hi_var = 0;
-        for (int h = 0; h < n_kv_heads; h++) {
-            size_t off = ((size_t)old_cidx * n_kv_heads + h) * head_dim;
+        for (int h = 0; h < n_heads; h++) {
+            size_t off = ((size_t)old_cidx * g_calib.max_n_kv_heads + h) * g_calib.max_head_dim;
             const double * sv = g_calib.sum_val.data() + off;
             const double * ss = g_calib.sum_sq.data()  + off;
-            const uint8_t * perm = all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim;
-            for (int d = 0; d < head_dim; d++) {
+            const uint8_t * perm = all_perms.data() + perm_offsets[l] + (size_t)h * hdim;
+            for (int d = 0; d < hdim; d++) {
                 double var = ss[d] / n - (sv[d] / n) * (sv[d] / n);
                 if (var < 0) var = 0;
                 total_var += var;
@@ -343,43 +433,42 @@ int main(int argc, char ** argv) {
         }
         float pct = (float)(100.0 * hi_var / (total_var + 1e-30));
         outlier_pcts[l] = pct;
-        // Override layers above threshold
         if (pct > tq_threshold) {
             layer_types[l] = tq_override_type;
         } else {
-            layer_types[l] = 0; // use default TQ type
+            layer_types[l] = 0;
         }
         const char * rec = layer_types[l] ? ggml_type_name((ggml_type)layer_types[l]) : "tq";
-        fprintf(stderr, "  layer %2d: top %d channels hold %.1f%% of total variance -> %s\n", l, n_hi, pct, rec);
+        fprintf(stderr, "  layer %2d: top %d/%d channels hold %.1f%% of total variance -> %s\n",
+                l, n_hi, hdim, pct, rec);
     }
 
     // Optional stats CSV
     if (!stats_path.empty()) {
         FILE * sf = fopen(stats_path.c_str(), "w");
         if (sf) {
-            fprintf(sf, "layer,head,channel,mean_abs,variance,std,rank,tier\n");
+            fprintf(sf, "layer,head,head_dim,channel,mean_abs,variance,std,rank\n");
             for (int l = 0; l < n_kv_layers; l++) {
                 int old_cidx = kv_cidx_map[l];
+                int n_heads  = g_calib.layer_n_kv_heads[old_cidx];
+                int hdim     = g_calib.layer_head_dim[old_cidx];
                 int64_t n = std::max(g_calib.counts[old_cidx], (int64_t)1);
-                for (int h = 0; h < n_kv_heads; h++) {
-                    const uint8_t * perm = all_perms.data() + ((size_t)l * n_kv_heads + h) * head_dim;
-                    size_t off = ((size_t)old_cidx * n_kv_heads + h) * head_dim;
+                for (int h = 0; h < n_heads; h++) {
+                    const uint8_t * perm = all_perms.data() + perm_offsets[l] + (size_t)h * hdim;
+                    size_t off = ((size_t)old_cidx * g_calib.max_n_kv_heads + h) * g_calib.max_head_dim;
                     const double * sa = g_calib.sum_abs.data() + off;
                     const double * sv = g_calib.sum_val.data() + off;
                     const double * ss = g_calib.sum_sq.data()  + off;
 
-                    // Build rank map
-                    std::vector<int> rank_of(head_dim);
-                    for (int r = 0; r < head_dim; r++) rank_of[perm[r]] = r;
+                    std::vector<int> rank_of(hdim);
+                    for (int r = 0; r < hdim; r++) rank_of[perm[r]] = r;
 
-                    for (int d = 0; d < head_dim; d++) {
+                    for (int d = 0; d < hdim; d++) {
                         double mag = sa[d] / n;
                         double var = ss[d] / n - (sv[d] / n) * (sv[d] / n);
                         if (var < 0) var = 0;
-                        int rank = rank_of[d];
-                        const char * tier = rank < 32 ? "hi" : rank < 64 ? "mid" : "low";
-                        fprintf(sf, "%d,%d,%d,%.8f,%.8f,%.8f,%d,%s\n",
-                                l, h, d, mag, var, sqrt(var), rank, tier);
+                        fprintf(sf, "%d,%d,%d,%d,%.8f,%.8f,%.8f,%d\n",
+                                l, h, hdim, d, mag, var, sqrt(var), rank_of[d]);
                     }
                 }
             }
@@ -388,24 +477,39 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // Write permutation file
+    // Write permutation file (v3: per-layer variable dimensions)
     FILE * fp = fopen(output_path.c_str(), "wb");
     if (!fp) { fprintf(stderr, "error: failed to open '%s'\n", output_path.c_str()); return 1; }
-    uint32_t magic = 0x54515045, version = 2;  // v2: layered TQ format
-    uint32_t nl = n_kv_layers, nh = n_kv_heads, hd = head_dim;
-    uint32_t pr = pre_rope ? 1 : 0, nlm = n_layer;
-    fwrite(&magic, 4, 1, fp); fwrite(&version, 4, 1, fp);
-    fwrite(&nl, 4, 1, fp); fwrite(&nh, 4, 1, fp); fwrite(&hd, 4, 1, fp);
-    fwrite(&pr, 4, 1, fp); fwrite(&nlm, 4, 1, fp);
+    uint32_t magic = 0x54515045, version = 3;
+    uint32_t nl = n_kv_layers, nlm = n_layer;
+    uint32_t pr = pre_rope ? 1 : 0;
+    fwrite(&magic, 4, 1, fp);
+    fwrite(&version, 4, 1, fp);
+    fwrite(&nl, 4, 1, fp);
+    fwrite(&pr, 4, 1, fp);
+    fwrite(&nlm, 4, 1, fp);
+
+    // Model layer → KV layer map
     for (int il = 0; il < n_layer; il++) {
         int32_t idx = final_layer_map[il];
         fwrite(&idx, 4, 1, fp);
     }
+
+    // Per-layer header: [n_kv_heads, head_dim] for each KV layer
+    for (int l = 0; l < n_kv_layers; l++) {
+        int old_cidx = kv_cidx_map[l];
+        uint32_t nh = g_calib.layer_n_kv_heads[old_cidx];
+        uint32_t hd = g_calib.layer_head_dim[old_cidx];
+        fwrite(&nh, 4, 1, fp);
+        fwrite(&hd, 4, 1, fp);
+    }
+
+    // Permutation data (variable length per layer)
     fwrite(all_perms.data(), 1, all_perms.size(), fp);
 
-    // TQLT section: per-layer type recommendations + outlier percentages
+    // TQLT section: per-layer type recommendations
     {
-        uint32_t tqlt_magic = 0x54514C54; // "TQLT"
+        uint32_t tqlt_magic = 0x54514C54;
         uint32_t n_entries = n_kv_layers;
         fwrite(&tqlt_magic, 4, 1, fp);
         fwrite(&n_entries, 4, 1, fp);
@@ -414,12 +518,15 @@ int main(int argc, char ** argv) {
     }
     fclose(fp);
 
-    fprintf(stderr, "saved to '%s' (%d layers x %d heads x %d ch, %s)\n",
-            output_path.c_str(), n_kv_layers, n_kv_heads, head_dim, pre_rope ? "pre-RoPE" : "post-RoPE");
-    fprintf(stderr, "TQL split: hi=32 (q8), mid=32 (3mse+qjl), low=64 (2mse+qjl)\n");
-    fprintf(stderr, "sample layer 0, head 0 (top 16): ");
-    for (int i = 0; i < std::min(16, head_dim); i++) fprintf(stderr, "%d ", all_perms[i]);
-    fprintf(stderr, "...\n");
+    fprintf(stderr, "saved to '%s' (%d KV layers, %s)\n",
+            output_path.c_str(), n_kv_layers, pre_rope ? "pre-RoPE" : "post-RoPE");
+    if (n_kv_layers > 0) {
+        int cidx0 = kv_cidx_map[0];
+        int hdim0 = g_calib.layer_head_dim[cidx0];
+        fprintf(stderr, "sample layer 0, head 0 (top 16): ");
+        for (int i = 0; i < std::min(16, hdim0); i++) fprintf(stderr, "%d ", all_perms[i]);
+        fprintf(stderr, "...\n");
+    }
 
     llama_free(ctx);
     llama_model_free(model);
