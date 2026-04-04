@@ -149,17 +149,46 @@ static std::vector<char> g_tensor_buf;
 
 static bool tq_collect_callback(struct ggml_tensor * t, bool ask, void *) {
     if (ask) {
+        // Capture Kcur and Kcur_normed (iSWA global layers only emit Kcur_normed)
         int il_tmp;
-        if (sscanf(t->name, "Kcur-%d", &il_tmp) == 1) {
-            // Accept both 2D and 3D Kcur (GPU may produce 3D even for pre-rope)
-            return true;
-        }
+        if (sscanf(t->name, "Kcur-%d", &il_tmp) == 1) return true;
+        if (sscanf(t->name, "Kcur_normed-%d", &il_tmp) == 1) return true;
         return false;
+    }
+
+    // Debug: log all tensors that contain layer 5 (a global layer)
+    {
+        int tmp_il = -1;
+        if (sscanf(t->name, "%*[^-]-%d", &tmp_il) == 1 && (tmp_il == 5 || tmp_il == 11)) {
+            static int dbg_count = 0;
+            if (dbg_count < 50) {
+                fprintf(stderr, "  cb_data: il=%d name='%s' shape=[%lld,%lld,%lld] type=%s\n",
+                        tmp_il, t->name, (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2],
+                        ggml_type_name(t->type));
+                dbg_count++;
+            }
+        }
     }
 
     if (t->type != GGML_TYPE_F32) return true;
     int il = -1;
-    if (sscanf(t->name, "Kcur-%d", &il) != 1) return true;
+    if (sscanf(t->name, "Kcur-%d", &il) != 1 &&
+        sscanf(t->name, "Kcur_normed-%d", &il) != 1) return true;
+    // Prefer Kcur over Kcur_normed (skip normed if we already have raw for this layer)
+    if (strstr(t->name, "_normed") && il >= 0 && il < (int)g_calib.layer_map.size()) {
+        int cidx = g_calib.layer_map[il];
+        if (cidx >= 0 && g_calib.counts[cidx] > 0) return true; // already have raw Kcur
+    }
+
+    // Debug: print all captured Kcur tensors
+    static bool debug_printed[256] = {};
+    if (il >= 0 && il < 256 && !debug_printed[il]) {
+        fprintf(stderr, "  cb: Kcur-%d shape=[%lld,%lld,%lld,%lld] type=%s\n",
+                il, (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3],
+                ggml_type_name(t->type));
+        debug_printed[il] = true;
+    }
+
     if (il < 0 || il >= (int)g_calib.layer_map.size() || g_calib.layer_map[il] < 0) return true;
 
     const size_t nbytes = ggml_nbytes(t);
